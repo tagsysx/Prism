@@ -1,22 +1,19 @@
 """
 Prism Model: Wideband RF Neural Radiance Fields for OFDM Communication.
 
-This module implements the core Prism model architecture that extends NeRF2
-to handle wideband RF signals with multiple subcarriers. The model is designed
-specifically for OFDM communication systems and includes:
+This module implements the redesigned Prism model architecture that addresses
+computational efficiency issues while maintaining the virtual link concept
+for OFDM communication systems.
 
 Key Components:
-- RFPrismModule: Multi-channel MLP for subcarrier decomposition
-- AttenuationNetwork: Predicts signal attenuation based on position/environment
-- RadianceNetwork: Predicts signal radiance characteristics
+- AttenuationNetwork: Single network encoding spatial information into 128D features
+- AttenuationDecoder: Multi-channel MLPs decoding features into attenuation factors
+- RadianceNetwork: Processing UE position, viewing direction, and spatial features
 - PrismModel: Main model combining all components
 - PrismLoss: Frequency-aware loss function for multi-subcarrier optimization
 
-The architecture enables processing of wideband RF signals with:
-- Configurable number of subcarriers (52 to 1024+)
-- MIMO antenna configurations
-- 3D spatial awareness
-- Frequency-dependent signal modeling
+The new architecture eliminates independent subcarrier channels and uses shared
+feature encoding for significantly improved efficiency.
 """
 
 import torch
@@ -30,123 +27,49 @@ import logging
 from .csi_processor import CSIVirtualLinkProcessor
 from .ray_tracer import AdvancedRayTracer, Environment, Building, Plane
 
-class RFPrismModule(nn.Module):
-    """
-    RF Prism Module: Multi-channel MLP for decomposing global features into subcarrier components.
-    
-    This is the core innovation that enables wideband RF signal processing.
-    Instead of using a single network for all subcarriers, this module uses
-    separate MLP channels for each subcarrier, allowing independent learning
-    of frequency-specific characteristics.
-    
-    Architecture:
-    - C independent MLP channels (one per subcarrier)
-    - Each channel has 2 hidden layers with ReLU activation
-    - Outputs are concatenated to form subcarrier responses
-    
-    This design is inspired by the multi-frequency nature of OFDM signals
-    where different subcarriers may have different propagation characteristics
-    and channel responses.
-    """
-    def __init__(self, input_dim: int, num_subcarriers: int, hidden_dim: int = 256):
-        """
-        Initialize the RF Prism Module.
-        
-        Args:
-            input_dim: Dimension of input features (concatenated attenuation + radiance features)
-            num_subcarriers: Number of subcarriers to model (e.g., 52 for WiFi, 1024 for 5G)
-            hidden_dim: Hidden dimension for each MLP channel
-        """
-        super(RFPrismModule, self).__init__()
-        self.num_subcarriers = num_subcarriers
-        self.hidden_dim = hidden_dim
-        
-        # Create independent MLP channels for each subcarrier
-        # This allows each subcarrier to learn its own frequency-specific features
-        self.layer1 = nn.ModuleList([
-            nn.Linear(input_dim, hidden_dim) for _ in range(num_subcarriers)
-        ])
-        self.layer2 = nn.ModuleList([
-            nn.Linear(hidden_dim, hidden_dim) for _ in range(num_subcarriers)
-        ])
-        
-        # Output layer for each subcarrier (produces scalar response)
-        self.output_layers = nn.ModuleList([
-            nn.Linear(hidden_dim, 1) for _ in range(num_subcarriers)
-        ])
-        
-        # ReLU activation for non-linearity
-        self.activation = nn.ReLU()
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass through the RF Prism Module.
-        
-        This method processes input features through C independent MLP channels,
-        where C is the number of subcarriers. Each channel learns to predict
-        the response for a specific subcarrier frequency.
-        
-        Args:
-            x: Input tensor of shape [batch_size, input_dim]
-                Contains concatenated features from attenuation and radiance networks
-                
-        Returns:
-            Output tensor of shape [batch_size, num_subcarriers]
-                Each column represents the response for a specific subcarrier
-        """
-        batch_size = x.shape[0]
-        outputs = []
-        
-        # Process each subcarrier independently through its dedicated MLP channel
-        for i in range(self.num_subcarriers):
-            # First hidden layer
-            h = self.layer1[i](x)
-            h = self.activation(h)
-            
-            # Second hidden layer
-            h = self.layer2[i](h)
-            h = self.activation(h)
-            
-            # Output layer (produces scalar response for this subcarrier)
-            h = self.output_layers[i](h)
-            outputs.append(h)
-        
-        # Concatenate outputs from all subcarrier channels
-        # Result: [batch_size, num_subcarriers] tensor
-        return torch.cat(outputs, dim=1)
-
 class AttenuationNetwork(nn.Module):
     """
-    Attenuation Network: Predicts signal attenuation based on position and environment.
+    Attenuation Network: Encode spatial position information into compact features.
     
-    This network models how RF signals attenuate as they propagate through space.
-    It takes into account:
-    - 3D spatial position (x, y, z coordinates)
-    - Antenna configurations (UE and BS antenna features)
-    - Environmental factors (encoded in additional features)
+    This is the core innovation of the new architecture. Instead of having
+    M×N_UE independent networks, we use a single network to encode spatial
+    information into a compact 128-dimensional feature representation.
     
-    The network uses a deep MLP architecture to learn complex non-linear
-    relationships between spatial position and signal attenuation.
+    Architecture:
+    - 8-layer MLP with ReLU activation
+    - Input: 3D position coordinates
+    - Output: 128-dimensional feature vector (configurable)
+    
+    Key Benefits:
+    - Single network instead of M×N_UE independent networks
+    - Compact 128D representation instead of M×N_UE×128D
+    - Maintains spatial encoding capabilities
     """
-    def __init__(self, input_dim: int, hidden_dim: int = 256, num_layers: int = 8):
+    def __init__(self, input_dim: int = 3, hidden_dim: int = 256, feature_dim: int = 128):
         """
         Initialize the Attenuation Network.
         
         Args:
-            input_dim: Dimension of input features (position + antenna + environment)
+            input_dim: Dimension of input features (typically 3 for 3D position)
             hidden_dim: Hidden dimension for all layers
-            num_layers: Number of hidden layers in the network
+            feature_dim: Output feature dimension (default: 128)
         """
         super(AttenuationNetwork, self).__init__()
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.feature_dim = feature_dim
         
-        # Build the MLP architecture
+        # Build the MLP architecture: 8 layers
         layers = []
         layers.append(nn.Linear(input_dim, hidden_dim))
         
         # Add intermediate hidden layers
-        for _ in range(num_layers - 1):
+        for _ in range(7):  # 8 total layers: 1 input + 6 hidden + 1 output
             layers.append(nn.Linear(hidden_dim, hidden_dim))
             
+        # Output layer to feature dimension
+        layers.append(nn.Linear(hidden_dim, feature_dim))
+        
         self.network = nn.ModuleList(layers)
         self.activation = nn.ReLU()
         
@@ -155,107 +78,254 @@ class AttenuationNetwork(nn.Module):
         Forward pass through the Attenuation Network.
         
         Args:
-            x: Input tensor containing position, antenna, and environment features
+            x: Input tensor containing spatial position [batch_size, input_dim]
             
         Returns:
-            Hidden representation of attenuation characteristics
+            128-dimensional feature vector [batch_size, feature_dim]
         """
         # Process through all hidden layers with ReLU activation
-        for layer in self.network:
+        for i, layer in enumerate(self.network[:-1]):
             x = self.activation(layer(x))
+        
+        # Final layer without activation (linear output)
+        x = self.network[-1](x)
         return x
+
+class AttenuationDecoder(nn.Module):
+    """
+    Attenuation Decoder: Convert 128D features into M×N_UE attenuation factors.
+    
+    This module uses N_UE independent 3-layer MLPs to decode the compact
+    spatial features into attenuation factors for each subcarrier and UE antenna.
+    
+    Architecture:
+    - N_UE independent channels
+    - Each channel: 128D → 256D → 256D → M
+    - Output: Complex values representing attenuation factors
+    
+    Key Benefits:
+    - Configurable N_UE channels
+    - Efficient processing of M subcarriers per channel
+    - Maintains per-UE-antenna processing
+    """
+    def __init__(self, feature_dim: int = 128, num_subcarriers: int = 408, 
+                 num_ue_antennas: int = 4, hidden_dim: int = 256):
+        """
+        Initialize the Attenuation Decoder.
+        
+        Args:
+            feature_dim: Input feature dimension from AttenuationNetwork
+            num_subcarriers: Number of subcarriers (M)
+            num_ue_antennas: Number of UE antennas (N_UE)
+            hidden_dim: Hidden dimension for MLP layers
+        """
+        super(AttenuationDecoder, self).__init__()
+        self.feature_dim = feature_dim
+        self.num_subcarriers = num_subcarriers
+        self.num_ue_antennas = num_ue_antennas
+        self.hidden_dim = hidden_dim
+        
+        # Create N_UE independent MLP channels
+        self.channels = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(feature_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, num_subcarriers * 2)  # *2 for complex values (real + imaginary)
+            ) for _ in range(num_ue_antennas)
+        ])
+        
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass through the Attenuation Decoder.
+        
+        Args:
+            features: 128-dimensional feature vector [batch_size, feature_dim]
+            
+        Returns:
+            Attenuation factors [batch_size, num_ue_antennas, num_subcarriers]
+                Complex values representing attenuation for each UE antenna and subcarrier
+        """
+        batch_size = features.shape[0]
+        outputs = []
+        
+        # Process each UE antenna channel independently
+        for i, channel in enumerate(self.channels):
+            # Process through this channel's MLP
+            channel_output = channel(features)  # [batch_size, num_subcarriers * 2]
+            
+            # Reshape to separate real and imaginary parts
+            channel_output = channel_output.view(batch_size, self.num_subcarriers, 2)
+            
+            # Convert to complex numbers
+            real_part = channel_output[:, :, 0]
+            imag_part = channel_output[:, :, 1]
+            complex_output = torch.complex(real_part, imag_part)
+            
+            outputs.append(complex_output)
+        
+        # Stack all UE antenna outputs
+        # Result: [batch_size, num_ue_antennas, num_subcarriers]
+        return torch.stack(outputs, dim=1)
 
 class RadianceNetwork(nn.Module):
     """
-    Radiance Network: Predicts signal radiance characteristics.
+    Radiance Network: Process UE position, viewing direction, spatial features, and BS antenna ID.
     
-    This network models the directional and intensity characteristics of RF signals.
-    It captures:
-    - Signal strength variations with direction
-    - Antenna radiation patterns
-    - Multi-path effects and reflections
-    - Frequency-dependent radiation characteristics
+    This network processes UE position, viewing direction, the 128D spatial features,
+    and BS antenna ID to output radiation characteristics for specific antenna pairs.
     
-    Similar to the Attenuation Network, it uses a deep MLP architecture
-    to learn complex spatial relationships in RF signal propagation.
+    Architecture:
+    - N_UE × N_BS independent channels (one for each UE-BS antenna pair)
+    - Each channel processes: [UE_pos, view_dir, 128D_features, BS_antenna_ID] → M radiation values
+    - Output: Complex values representing radiation characteristics for specific antenna pairs
+    
+    Key Benefits:
+    - Independent processing for each UE-BS antenna pair
+    - Incorporates spatial features from AttenuationNetwork
+    - BS antenna-specific radiation modeling
+    - Configurable output dimensions
     """
-    def __init__(self, input_dim: int, hidden_dim: int = 256, num_layers: int = 8):
+    def __init__(self, position_dim: int = 3, view_dim: int = 3, feature_dim: int = 128,
+                 num_subcarriers: int = 408, num_ue_antennas: int = 4, num_bs_antennas: int = 64, 
+                 hidden_dim: int = 256):
         """
         Initialize the Radiance Network.
         
         Args:
-            input_dim: Dimension of input features (position + antenna + environment)
-            hidden_dim: Hidden dimension for all layers
-            num_layers: Number of hidden layers in the network
+            position_dim: Dimension of UE position coordinates
+            view_dim: Dimension of viewing direction vector
+            feature_dim: Dimension of spatial features from AttenuationNetwork
+            num_subcarriers: Number of subcarriers (M)
+            num_ue_antennas: Number of UE antennas (N_UE)
+            num_bs_antennas: Number of BS antennas (N_BS)
+            hidden_dim: Hidden dimension for MLP layers
         """
         super(RadianceNetwork, self).__init__()
+        self.position_dim = position_dim
+        self.view_dim = view_dim
+        self.feature_dim = feature_dim
+        self.num_subcarriers = num_subcarriers
+        self.num_ue_antennas = num_ue_antennas
+        self.num_bs_antennas = num_bs_antennas
+        self.hidden_dim = hidden_dim
         
-        # Build the MLP architecture (identical to Attenuation Network)
-        layers = []
-        layers.append(nn.Linear(input_dim, hidden_dim))
+        # Input dimension: UE position + viewing direction + spatial features + BS antenna ID
+        input_dim = position_dim + view_dim + feature_dim + 1  # +1 for BS antenna ID
         
-        # Add intermediate hidden layers
-        for _ in range(num_layers - 1):
-            layers.append(nn.Linear(hidden_dim, hidden_dim))
-            
-        self.network = nn.ModuleList(layers)
-        self.activation = nn.ReLU()
+        # Create N_UE × N_BS independent channels (one for each antenna pair)
+        total_channels = num_ue_antennas * num_bs_antennas
+        self.channels = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, num_subcarriers * 2)  # *2 for complex values
+            ) for _ in range(total_channels)
+        ])
         
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, ue_positions: torch.Tensor, view_directions: torch.Tensor, 
+                spatial_features: torch.Tensor, bs_antenna_ids: torch.Tensor) -> torch.Tensor:
         """
         Forward pass through the Radiance Network.
         
         Args:
-            x: Input tensor containing position, antenna, and environment features
+            ue_positions: UE position coordinates [batch_size, position_dim]
+            view_directions: Viewing direction vectors [batch_size, view_dim]
+            spatial_features: 128D spatial features [batch_size, feature_dim]
+            bs_antenna_ids: BS antenna IDs [batch_size] (1 to N_BS)
             
         Returns:
-            Hidden representation of radiance characteristics
+            Radiation factors [batch_size, num_ue_antennas, num_bs_antennas, num_subcarriers]
+                Complex values representing radiation for each UE-BS antenna pair and subcarrier
         """
-        # Process through all hidden layers with ReLU activation
-        for layer in self.network:
-            x = self.activation(layer(x))
-        return x
+        batch_size = ue_positions.shape[0]
+        
+        outputs = []
+        
+        # Process each UE-BS antenna pair channel
+        for ue_idx in range(self.num_ue_antennas):
+            ue_outputs = []
+            for bs_idx in range(self.num_bs_antennas):
+                # Calculate channel index for this UE-BS pair
+                channel_idx = ue_idx * self.num_bs_antennas + bs_idx
+                channel = self.channels[channel_idx]
+                
+                # Concatenate inputs: UE_pos + view_dir + spatial_features + BS_antenna_ID
+                # Normalize BS antenna ID to [0, 1] range for better training
+                normalized_bs_id = (bs_antenna_ids.float() - 1) / (self.num_bs_antennas - 1)
+                combined_input = torch.cat([
+                    ue_positions, view_directions, spatial_features, 
+                    normalized_bs_id.unsqueeze(1)
+                ], dim=1)
+                
+                # Process through this channel's MLP
+                channel_output = channel(combined_input)  # [batch_size, num_subcarriers * 2]
+                
+                # Reshape to separate real and imaginary parts
+                channel_output = channel_output.view(batch_size, self.num_subcarriers, 2)
+                
+                # Convert to complex numbers
+                real_part = channel_output[:, :, 0]
+                imag_part = channel_output[:, :, 1]
+                complex_output = torch.complex(real_part, imag_part)
+                
+                ue_outputs.append(complex_output)
+            
+            # Stack BS antenna outputs for this UE
+            ue_outputs = torch.stack(ue_outputs, dim=1)  # [batch_size, num_bs_antennas, num_subcarriers]
+            outputs.append(ue_outputs)
+        
+        # Stack all UE antenna outputs
+        # Result: [batch_size, num_ue_antennas, num_bs_antennas, num_subcarriers]
+        return torch.stack(outputs, dim=1)
 
 class PrismModel(nn.Module):
     """
     Prism: Wideband RF Neural Radiance Fields for OFDM Communication.
     
-    This is the main model that combines all components to create a comprehensive
-    RF signal model. It extends NeRF2 concepts to handle wideband RF signals with:
+    This is the main model implementing the new architecture that addresses
+    computational efficiency issues while maintaining the virtual link concept.
     
     Key Features:
     - M subcarriers (configurable from 52 to 1024+)
     - N_UE antennas at the User Equipment
     - N_BS antennas at the Base Station
-    - RF Prism Module for subcarrier decomposition
+    - Single AttenuationNetwork for spatial encoding
+    - Efficient AttenuationDecoder for M×N_UE attenuation factors
+    - RadianceNetwork for radiation characteristics
     - 3D spatial awareness for position-dependent modeling
     - MIMO channel matrix generation
     
     Architecture Flow:
-    1. Input: 3D position + antenna features + RF environment features
-    2. Attenuation Network: Learns spatial attenuation patterns
-    3. Radiance Network: Learns directional radiation patterns
-    4. RF Prism Module: Decomposes features into subcarrier responses
-    5. Output: Subcarrier responses + MIMO channel matrix
+    1. Input: 3D position + UE position + viewing direction
+    2. AttenuationNetwork: Encodes spatial position into 128D features
+    3. AttenuationDecoder: Decodes features into M×N_UE attenuation factors
+    4. RadianceNetwork: Processes UE info + spatial features into radiation factors
+    5. Output: Attenuation + Radiation factors + MIMO channel matrix
     
     This model is designed for real-world OFDM systems like WiFi, 5G, and LTE.
     """
     
     def __init__(self, 
-                 num_subcarriers: int = 1024,
-                 num_ue_antennas: int = 2,
-                 num_bs_antennas: int = 4,
+                 num_subcarriers: int = 408,
+                 num_ue_antennas: int = 4,
+                 num_bs_antennas: int = 64,
                  position_dim: int = 3,
-                 hidden_dim: int = 256):
+                 hidden_dim: int = 256,
+                 feature_dim: int = 128):
         """
         Initialize the Prism model.
         
         Args:
-            num_subcarriers: Number of OFDM subcarriers (e.g., 52 for WiFi, 1024 for 5G)
+            num_subcarriers: Number of OFDM subcarriers (e.g., 408 for 5G)
             num_ue_antennas: Number of antennas at User Equipment (MIMO configuration)
             num_bs_antennas: Number of antennas at Base Station (MIMO configuration)
             position_dim: Spatial dimension of coordinates (typically 3 for 3D space)
             hidden_dim: Hidden dimension for all neural networks
+            feature_dim: Feature dimension from AttenuationNetwork (default: 128)
         """
         super(PrismModel, self).__init__()
         
@@ -265,170 +335,174 @@ class PrismModel(nn.Module):
         self.num_bs_antennas = num_bs_antennas
         self.position_dim = position_dim
         self.hidden_dim = hidden_dim
+        self.feature_dim = feature_dim
         
-        # Calculate total input dimension
-        # Input includes: position + UE antennas + BS antennas + additional RF features
-        input_dim = position_dim + num_ue_antennas + num_bs_antennas + 10  # 10 for additional RF features
+        # Initialize core networks with new architecture
+        self.attenuation_net = AttenuationNetwork(
+            input_dim=position_dim,
+            hidden_dim=hidden_dim,
+            feature_dim=feature_dim
+        )
         
-        # Initialize core networks
-        # These networks learn spatial and environmental RF characteristics
-        self.attenuation_net = AttenuationNetwork(input_dim, hidden_dim)
-        self.radiance_net = RadianceNetwork(input_dim, hidden_dim)
+        self.attenuation_decoder = AttenuationDecoder(
+            feature_dim=feature_dim,
+            num_subcarriers=num_subcarriers,
+            num_ue_antennas=num_ue_antennas,
+            hidden_dim=hidden_dim
+        )
         
-        # RF Prism Module: decomposes global features into subcarrier components
-        # Input dimension is concatenated features from both networks
-        prism_input_dim = hidden_dim * 2  # Concatenated features from both networks
-        self.rf_prism = RFPrismModule(prism_input_dim, num_subcarriers, hidden_dim)
+        self.radiance_net = RadianceNetwork(
+            position_dim=position_dim,
+            view_dim=position_dim,  # View direction has same dimension as position
+            feature_dim=feature_dim,
+            num_subcarriers=num_subcarriers,
+            num_ue_antennas=num_ue_antennas,
+            num_bs_antennas=num_bs_antennas,
+            hidden_dim=hidden_dim
+        )
         
         # MIMO channel matrix output layer
-        # Converts subcarrier responses to MIMO channel matrix
-        # Output shape: [batch_size, num_subcarriers, num_ue_antennas, num_bs_antennas]
-        self.mimo_output = nn.Linear(1, num_ue_antennas * num_bs_antennas)
+        # Converts attenuation and radiation factors to MIMO channel matrix
+        # Input: concatenated attenuation and radiation factors (real + imag for both)
+        mimo_input_dim = num_ue_antennas * num_subcarriers * 4  # *4 for real+imag of both factors
+        self.mimo_output = nn.Linear(mimo_input_dim, num_ue_antennas * num_bs_antennas)
         
         # Initialize advanced features
         self._initialize_advanced_features()
         
-    def forward(self, positions: torch.Tensor, ue_antennas: torch.Tensor, 
-                bs_antennas: torch.Tensor, additional_features: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self, positions: torch.Tensor, ue_positions: torch.Tensor, 
+                view_directions: torch.Tensor, bs_antenna_ids: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         Forward pass through the complete Prism model.
         
-        This method orchestrates the entire forward pass:
-        1. Concatenates all input features
-        2. Processes through attenuation and radiance networks
-        3. Combines features for subcarrier decomposition
-        4. Generates subcarrier responses and MIMO channel matrix
+        This method orchestrates the forward pass to generate attenuation and radiation factors:
+        1. Encode spatial position into compact features
+        2. Decode features into attenuation factors
+        3. Process UE info + features into radiation factors
+        4. Store factors for later ray tracing processing (MIMO channel matrix generation)
         
         Args:
             positions: 3D spatial coordinates [batch_size, position_dim]
                 Represents the spatial location for RF signal prediction
-            ue_antennas: UE antenna features [batch_size, num_ue_antennas]
-                Contains antenna-specific characteristics and configurations
-            bs_antennas: BS antenna features [batch_size, num_bs_antennas]
-                Contains base station antenna characteristics
-            additional_features: Additional RF features [batch_size, 10]
-                Environmental factors, frequency, power, etc.
-            
+            ue_positions: UE position coordinates [batch_size, position_dim]
+                User equipment location in 3D space
+            view_directions: Viewing direction vectors [batch_size, position_dim]
+                Direction vectors for radiation pattern calculation
+            bs_antenna_ids: BS antenna IDs [batch_size] (1 to N_BS)
+                Identifies which BS antenna to model for radiation characteristics
+                
         Returns:
             Dictionary containing model outputs:
-            - subcarrier_responses: [batch_size, num_subcarriers]
-                Frequency response for each subcarrier
-            - mimo_channel: [batch_size, num_ue_antennas * num_bs_antennas]
-                Flattened MIMO channel matrix
-            - attenuation_features: [batch_size, hidden_dim]
-                Learned attenuation characteristics
-            - radiance_features: [batch_size, hidden_dim]
-                Learned radiance characteristics
+            - spatial_features: [batch_size, feature_dim]
+                Compact spatial encoding from AttenuationNetwork
+            - attenuation_factors: [batch_size, num_ue_antennas, num_subcarriers]
+                Attenuation factors for each UE antenna and subcarrier (complex values)
+            - radiation_factors: [batch_size, num_ue_antennas, num_bs_antennas, num_subcarriers]
+                Radiation factors for each UE-BS antenna pair and subcarrier (complex values)
+            - csi_status: Dict (if CSI processing enabled)
+                Status indicating that MIMO channel matrix requires ray tracing
+                
+        Note:
+            This model outputs attenuation and radiation factors for each spatial sampling point.
+            MIMO channel matrix generation requires additional ray tracing processing.
         """
-        # Step 1: Concatenate all input features into a single tensor
-        # This creates a comprehensive feature vector for RF modeling
-        x = torch.cat([positions, ue_antennas, bs_antennas, additional_features], dim=1)
-        
-        # Step 2: Extract features from core networks
-        # These networks learn spatial and environmental RF characteristics
-        attenuation_features = self.attenuation_net(x)
-        radiance_features = self.radiance_net(x)
-        
-        # Step 3: Concatenate features for RF Prism Module
-        # The prism module needs both attenuation and radiance information
-        combined_features = torch.cat([attenuation_features, radiance_features], dim=1)
-        
-        # Step 4: Decompose into subcarrier components
-        # This is the key innovation: frequency-specific signal modeling
-        subcarrier_responses = self.rf_prism(combined_features)
-        
-        # Step 5: Generate MIMO channel matrix for each subcarrier
-        # Process each subcarrier through the MIMO output layer
         batch_size = positions.shape[0]
-        mimo_channels = []
         
-        for i in range(self.num_subcarriers):
-            # Extract features for this subcarrier
-            subcarrier_features = subcarrier_responses[:, i:i+1]  # [batch_size, 1]
-            # Generate MIMO matrix for this subcarrier
-            mimo_matrix = self.mimo_output(subcarrier_features)  # [batch_size, num_ue_antennas * num_bs_antennas]
-            mimo_channels.append(mimo_matrix)
+        # Step 1: Encode spatial position into compact features
+        # This is the key innovation: single network for spatial encoding
+        spatial_features = self.attenuation_net(positions)
         
-        # Stack all subcarrier MIMO matrices
-        mimo_channel = torch.stack(mimo_channels, dim=1)  # [batch_size, num_subcarriers, num_ue_antennas * num_bs_antennas]
+        # Step 2: Decode features into attenuation factors
+        # N_UE independent channels, each outputting M attenuation factors
+        attenuation_factors = self.attenuation_decoder(spatial_features)
         
-        # Step 6: Apply advanced processing if enabled
+        # Step 3: Process UE info + spatial features + BS antenna ID into radiation factors
+        # Each UE-BS antenna pair has independent processing
+        radiation_factors = self.radiance_net(ue_positions, view_directions, spatial_features, bs_antenna_ids)
+        
+        # Step 4: Store attenuation and radiation factors for later processing
+        # These factors will be used by ray tracing to generate MIMO channel matrix
+        # Do NOT generate MIMO channel matrix here - it requires ray tracing
+        
+        # Step 5: Apply advanced processing if enabled
         if hasattr(self, 'csi_processor') and self.csi_processor:
-            # Process CSI virtual links
-            mimo_channel_reshaped = mimo_channel.view(
-                batch_size, 
-                self.num_subcarriers, 
-                self.num_ue_antennas, 
-                self.num_bs_antennas
-            )
-            
-            # Get sampling configuration
-            sample_size = None
-            if hasattr(self, 'csi_config') and self.csi_config:
-                if self.csi_config.get('enable_random_sampling', False):
-                    sample_size = self.csi_config.get('sample_size', 64)
-            
-            csi_results = self.csi_processor.process_virtual_links(
-                mimo_channel_reshaped, positions, additional_features, sample_size
-            )
+            # Process CSI virtual links (requires MIMO channel matrix from ray tracing)
+            # Note: MIMO channel matrix is not available here
+            csi_results = {
+                'status': 'pending_ray_tracing',
+                'message': 'MIMO channel matrix requires ray tracing processing'
+            }
             
             # Update outputs with CSI processing results
             outputs = {
-                'subcarrier_responses': subcarrier_responses,
-                'mimo_channel': mimo_channel,
-                'attenuation_features': attenuation_features,
-                'radiance_features': radiance_features,
-                'csi_virtual_links': csi_results.get('processed_virtual_links', mimo_channel_reshaped),
-                'csi_analysis': csi_results
+                'spatial_features': spatial_features,
+                'attenuation_factors': attenuation_factors,
+                'radiation_factors': radiation_factors,
+                'csi_status': csi_results
             }
         else:
             outputs = {
-                'subcarrier_responses': subcarrier_responses,
-                'mimo_channel': mimo_channel,
-                'attenuation_features': attenuation_features,
-                'radiance_features': radiance_features
+                'spatial_features': spatial_features,
+                'attenuation_factors': attenuation_factors,
+                'radiation_factors': radiation_factors
             }
         
         # Return comprehensive output dictionary
         return outputs
     
-    def get_subcarrier_response(self, subcarrier_idx: int, **kwargs) -> torch.Tensor:
+    def get_attenuation_factors(self, **kwargs) -> torch.Tensor:
         """
-        Get response for a specific subcarrier.
-        
-        This utility method allows extracting the response for a single
-        subcarrier, which is useful for:
-        - Frequency-specific analysis
-        - Debugging individual subcarrier performance
-        - Selective subcarrier processing
+        Get attenuation factors for all UE antennas and subcarriers.
         
         Args:
-            subcarrier_idx: Index of the subcarrier (0 to num_subcarriers-1)
-            **kwargs: Same arguments as forward method (positions, ue_antennas, etc.)
+            **kwargs: Same arguments as forward method (positions, ue_positions, view_directions, bs_antenna_ids)
             
         Returns:
-            Response tensor for the specified subcarrier [batch_size, 1]
+            Attenuation factors [batch_size, num_ue_antennas, num_subcarriers]
         """
-        # Run full forward pass and extract specific subcarrier
         outputs = self.forward(**kwargs)
-        return outputs['subcarrier_responses'][:, subcarrier_idx:subcarrier_idx+1]
+        return outputs['attenuation_factors']
+    
+    def get_radiation_factors(self, **kwargs) -> torch.Tensor:
+        """
+        Get radiation factors for all UE-BS antenna pairs and subcarriers.
+        
+        Args:
+            **kwargs: Same arguments as forward method (positions, ue_positions, view_directions, bs_antenna_ids)
+            
+        Returns:
+            Radiation factors [batch_size, num_ue_antennas, num_bs_antennas, num_subcarriers]
+        """
+        outputs = self.forward(**kwargs)
+        return outputs['radiation_factors']
     
     def get_mimo_channel(self, **kwargs) -> torch.Tensor:
         """
-        Get the MIMO channel matrix in proper shape.
+        Get the MIMO channel matrix.
         
-        This utility method returns the MIMO channel matrix reshaped
-        from flattened form to proper 3D tensor for easier manipulation.
+        Note: This method requires ray tracing to be enabled and processed.
+        The model only outputs attenuation and radiation factors.
         
         Args:
-            **kwargs: Same arguments as forward method (positions, ue_antennas, etc.)
+            **kwargs: Same arguments as forward method (positions, ue_positions, view_directions, bs_antenna_ids)
             
         Returns:
             MIMO channel matrix [batch_size, num_ue_antennas, num_bs_antennas]
+            
+        Raises:
+            RuntimeError: If ray tracing is not enabled or MIMO matrix not generated
         """
-        # Run forward pass and reshape MIMO channel output
+        if not hasattr(self, 'ray_tracer') or self.ray_tracer is None:
+            raise RuntimeError("Ray tracing not enabled. Call enable_ray_tracing() first.")
+        
+        # Get attenuation and radiation factors
         outputs = self.forward(**kwargs)
-        return outputs['mimo_channel'].view(-1, self.num_ue_antennas, self.num_bs_antennas)
+        
+        # Check if MIMO channel matrix has been generated by ray tracing
+        if not hasattr(self, '_mimo_channel_matrix'):
+            raise RuntimeError("MIMO channel matrix not yet generated. Complete ray tracing first.")
+        
+        return self._mimo_channel_matrix
     
     def _initialize_advanced_features(self):
         """Initialize advanced features (CSI processing and ray tracing)."""
@@ -507,6 +581,57 @@ class PrismModel(nn.Module):
             'statistics': statistics
         }
     
+    def generate_mimo_channel_matrix(self, positions: torch.Tensor, ue_positions: torch.Tensor, 
+                                   view_directions: torch.Tensor, bs_antenna_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Generate MIMO channel matrix through ray tracing processing.
+        
+        This method combines attenuation and radiation factors with ray tracing
+        to generate the complete MIMO channel matrix.
+        
+        Args:
+            positions: 3D spatial coordinates [batch_size, position_dim]
+            ue_positions: UE position coordinates [batch_size, position_dim]
+            view_directions: Viewing direction vectors [batch_size, position_dim]
+            bs_antenna_ids: BS antenna IDs [batch_size] (1 to N_BS)
+            
+        Returns:
+            MIMO channel matrix [batch_size, num_ue_antennas, num_bs_antennas]
+            
+        Raises:
+            RuntimeError: If ray tracing is not enabled
+        """
+        if not hasattr(self, 'ray_tracer') or self.ray_tracer is None:
+            raise RuntimeError("Ray tracing not enabled. Call enable_ray_tracing() first.")
+        
+        # Get attenuation and radiation factors
+        outputs = self.forward(positions, ue_positions, view_directions, bs_antenna_ids)
+        attenuation_factors = outputs['attenuation_factors']
+        radiation_factors = outputs['radiation_factors']
+        
+        # Use ray tracing to process these factors and generate MIMO matrix
+        # This is where the actual MIMO channel matrix generation happens
+        # For now, we'll use a placeholder implementation
+        batch_size = positions.shape[0]
+        
+        # Combine attenuation and radiation factors for MIMO processing
+        combined_factors = torch.cat([
+            attenuation_factors.real, attenuation_factors.imag,
+            radiation_factors.real, radiation_factors.imag
+        ], dim=2)  # [batch_size, num_ue_antennas, num_subcarriers * 4]
+        
+        # Flatten for MIMO processing
+        flattened_factors = combined_factors.view(batch_size, -1)
+        
+        # Generate MIMO channel matrix using the stored linear layer
+        mimo_channel = self.mimo_output(flattened_factors)
+        mimo_channel = mimo_channel.view(batch_size, self.num_ue_antennas, self.num_bs_antennas)
+        
+        # Store the generated MIMO matrix for later use
+        self._mimo_channel_matrix = mimo_channel
+        
+        return mimo_channel
+    
     def get_csi_analysis(self, **kwargs) -> Dict:
         """Get CSI virtual link analysis results."""
         if not hasattr(self, 'csi_processor') or self.csi_processor is None:
@@ -535,21 +660,21 @@ class PrismModel(nn.Module):
 
 class PrismLoss(nn.Module):
     """
-    Loss function for Prism model training.
+    Loss function for Prism model training based on virtual link received signals.
     
-    This loss function implements frequency-aware optimization for multi-subcarrier
-    OFDM signals. It's designed to handle the unique characteristics of wideband
-    RF signals where different subcarriers may have different importance or
-    characteristics.
+    This loss function implements the correct approach for MIMO-OFDM systems:
+    1. Model outputs electromagnetic properties at spatial sampling points
+    2. Ray tracing accumulates RF signals from all directions for each BS antenna
+    3. Loss is computed between predicted and actual received signals at each antenna
     
     Key Features:
-    - Independent subcarrier loss computation
-    - Configurable loss types (MSE, L1)
-    - Optional subcarrier weighting
-    - Maintains frequency independence
+    - Loss computation based on actual received signals at BS antennas
+    - Ray tracing integration for signal accumulation
+    - Virtual link-based optimization
+    - Frequency-aware subcarrier processing
     
-    The loss function ensures that the model learns to predict each subcarrier
-    independently while maintaining overall signal quality.
+    The loss function ensures the model learns to predict electromagnetic properties
+    that lead to correct received signals after ray tracing accumulation.
     """
     
     def __init__(self, loss_type: str = 'mse'):
@@ -574,80 +699,229 @@ class PrismLoss(nn.Module):
         else:
             raise ValueError(f"Unsupported loss type: {loss_type}")
     
-    def forward(self, predictions: torch.Tensor, targets: torch.Tensor, 
+    def forward(self, predictions: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], 
+                ray_tracer, environment, positions: torch.Tensor, ue_positions: torch.Tensor,
+                view_directions: torch.Tensor, bs_antenna_ids: torch.Tensor,
                 weights: Optional[torch.Tensor] = None,
-                csi_targets: Optional[torch.Tensor] = None,
-                ray_tracing_targets: Optional[torch.Tensor] = None,
                 config: Optional[Dict] = None) -> torch.Tensor:
         """
-        Compute the frequency-aware loss.
+        Compute loss based on virtual link received signals after ray tracing.
         
-        This method computes loss independently for each subcarrier and then
-        combines them. This approach is crucial for OFDM systems where:
-        - Different subcarriers may have different importance
-        - Frequency-dependent characteristics need independent optimization
-        - Overall signal quality depends on all subcarriers
+        This method implements the correct loss computation approach:
+        1. Use model predictions to get electromagnetic properties at sampling points
+        2. Perform ray tracing to accumulate RF signals from all directions
+        3. Compare predicted received signals with actual received signals at BS antennas
         
         Args:
-            predictions: Predicted subcarrier responses [batch_size, num_subcarriers]
-                Model outputs for each subcarrier frequency
-            targets: Ground truth subcarrier responses [batch_size, num_subcarriers]
-                True subcarrier responses from measurements or simulation
+            predictions: Model outputs dictionary containing:
+                - attenuation_factors: [batch_size, num_ue_antennas, num_subcarriers]
+                - radiation_factors: [batch_size, num_ue_antennas, num_bs_antennas, num_subcarriers]
+            targets: Ground truth dictionary containing actual received signals:
+                - received_signals: [batch_size, num_ue_antennas, num_bs_antennas, num_subcarriers]
+            ray_tracer: Ray tracing engine for signal accumulation
+            environment: Environment for ray tracing
+            positions: Spatial sampling points [batch_size, position_dim]
+            ue_positions: UE positions [batch_size, position_dim]
+            view_directions: Viewing directions [batch_size, position_dim]
+            bs_antenna_ids: BS antenna IDs [batch_size] (1 to N_BS)
             weights: Optional weights for each subcarrier [num_subcarriers]
-                Allows prioritizing certain subcarriers (e.g., pilot subcarriers)
+            config: Optional configuration dictionary
                 
         Returns:
             Total loss value (scalar tensor)
         """
-        # Step 1: Compute loss for each subcarrier independently
-        # Result: [batch_size, num_subcarriers] tensor of per-subcarrier losses
-        per_subcarrier_loss = self.criterion(predictions, targets)
+        total_loss = 0.0
         
-        # Step 2: Apply optional subcarrier weights if provided
-        # This allows frequency-dependent importance weighting
-        if weights is not None:
-            # Expand weights to match batch dimension for broadcasting
-            per_subcarrier_loss = per_subcarrier_loss * weights.unsqueeze(0)
+        # Step 1: Perform ray tracing to accumulate RF signals for each BS antenna
+        predicted_received_signals = self._compute_received_signals(
+            predictions, ray_tracer, environment, positions, ue_positions, 
+            view_directions, bs_antenna_ids
+        )
         
-        # Step 3: Sum across all subcarriers while maintaining independence
-        # This gives equal importance to all subcarriers (unless weighted)
-        total_loss = torch.sum(per_subcarrier_loss)
+        # Step 2: Compute loss between predicted and actual received signals
+        if 'received_signals' in targets:
+            received_loss = self._compute_received_signal_loss(
+                predicted_received_signals, targets['received_signals'], weights
+            )
+            total_loss += received_loss
         
-        # Step 4: Add CSI virtual link loss if enabled
-        if csi_targets is not None and config and 'loss' in config:
+        # Step 3: Add optional regularization terms
+        if config and 'loss' in config:
             loss_config = config['loss']
-            if loss_config.get('csi_loss_weight', 0) > 0:
-                csi_loss = self._compute_csi_loss(predictions, csi_targets)
-                total_loss += loss_config['csi_loss_weight'] * csi_loss
-        
-        # Step 5: Add ray tracing loss if enabled
-        if ray_tracing_targets is not None and config and 'loss' in config:
-            loss_config = config['loss']
-            if loss_config.get('ray_tracing_loss_weight', 0) > 0:
-                ray_loss = self._compute_ray_tracing_loss(predictions, ray_tracing_targets)
-                total_loss += loss_config['ray_tracing_loss_weight'] * ray_loss
+            
+            # Add electromagnetic property regularization if specified
+            if loss_config.get('em_property_weight', 0) > 0:
+                em_loss = self._compute_em_property_regularization(predictions)
+                total_loss += loss_config['em_property_weight'] * em_loss
         
         return total_loss
     
-    def _compute_csi_loss(self, predictions: torch.Tensor, csi_targets: torch.Tensor) -> torch.Tensor:
-        """Compute CSI virtual link loss."""
-        # Simple MSE loss for CSI targets
-        return torch.mean((predictions - csi_targets) ** 2)
+    def _compute_received_signals(self, predictions: Dict[str, torch.Tensor], ray_tracer, environment,
+                                 positions: torch.Tensor, ue_positions: torch.Tensor,
+                                 view_directions: torch.Tensor, bs_antenna_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Compute received signals at BS antennas through ray tracing accumulation.
+        
+        This method performs ray tracing from each spatial sampling point to each BS antenna,
+        accumulating RF signals from all directions to compute the total received signal.
+        
+        Args:
+            predictions: Model predictions containing attenuation and radiation factors
+            ray_tracer: Ray tracing engine
+            environment: Environment for ray tracing
+            positions: Spatial sampling points
+            ue_positions: UE positions
+            view_directions: Viewing directions
+            bs_antenna_ids: BS antenna IDs
+            
+        Returns:
+            Predicted received signals [batch_size, num_ue_antennas, num_bs_antennas, num_subcarriers]
+        """
+        batch_size = positions.shape[0]
+        num_ue_antennas = predictions['attenuation_factors'].shape[1]
+        num_bs_antennas = predictions['radiation_factors'].shape[2]
+        num_subcarriers = predictions['attenuation_factors'].shape[2]
+        
+        # Initialize received signals tensor
+        received_signals = torch.zeros(batch_size, num_ue_antennas, num_bs_antennas, 
+                                     num_subcarriers, dtype=torch.complex64, device=positions.device)
+        
+        # For each spatial sampling point, perform ray tracing to all BS antennas
+        for i in range(batch_size):
+            for ue_idx in range(num_ue_antennas):
+                for bs_idx in range(num_bs_antennas):
+                    # Get electromagnetic properties at this sampling point
+                    attenuation = predictions['attenuation_factors'][i, ue_idx, :]  # [num_subcarriers]
+                    radiation = predictions['radiation_factors'][i, ue_idx, bs_idx, :]  # [num_subcarriers]
+                    
+                    # Perform ray tracing from this point to the BS antenna
+                    # This is a simplified implementation - in practice, you'd use the full ray tracer
+                    ray_results = self._simplified_ray_tracing(
+                        positions[i], ue_positions[i], view_directions[i], bs_idx, 
+                        ray_tracer, environment
+                    )
+                    
+                    # Accumulate RF signals from all directions
+                    # The actual implementation would integrate over all ray directions
+                    accumulated_signal = self._accumulate_ray_signals(
+                        ray_results, attenuation, radiation
+                    )
+                    
+                    received_signals[i, ue_idx, bs_idx, :] = accumulated_signal
+        
+        return received_signals
     
-    def _compute_ray_tracing_loss(self, predictions: torch.Tensor, ray_tracing_targets: torch.Tensor) -> torch.Tensor:
-        """Compute ray tracing loss."""
-        # Simple MSE loss for ray tracing targets
-        return torch.mean((predictions - ray_tracing_targets) ** 2)
+    def _simplified_ray_tracing(self, position: torch.Tensor, ue_position: torch.Tensor,
+                               view_direction: torch.Tensor, bs_antenna_idx: int,
+                               ray_tracer, environment) -> Dict:
+        """
+        Simplified ray tracing for demonstration purposes.
+        In practice, this would use the full ray tracing engine.
+        """
+        # This is a placeholder for the actual ray tracing implementation
+        # In practice, you would call ray_tracer.trace_rays() with proper parameters
+        return {
+            'ray_paths': [],
+            'signal_strength': torch.ones(1, device=position.device),
+            'phase_shifts': torch.zeros(1, device=position.device)
+        }
+    
+    def _accumulate_ray_signals(self, ray_results: Dict, attenuation: torch.Tensor, 
+                               radiation: torch.Tensor) -> torch.Tensor:
+        """
+        Accumulate RF signals from ray tracing results.
+        
+        Args:
+            ray_results: Results from ray tracing
+            attenuation: Attenuation factors [num_subcarriers]
+            radiation: Radiation factors [num_subcarriers]
+            
+        Returns:
+            Accumulated signal [num_subcarriers]
+        """
+        # This is a simplified implementation
+        # In practice, you would integrate over all ray directions and apply
+        # proper electromagnetic propagation models
+        
+        # Combine attenuation and radiation factors
+        # The actual implementation would be more complex, involving:
+        # - Path loss from ray tracing
+        # - Phase shifts from propagation delays
+        # - Antenna pattern effects
+        # - Multi-path interference
+        
+        accumulated_signal = attenuation * radiation
+        
+        return accumulated_signal
+    
+    def _compute_received_signal_loss(self, predicted_signals: torch.Tensor, 
+                                    target_signals: torch.Tensor,
+                                    weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Compute loss between predicted and actual received signals.
+        
+        Args:
+            predicted_signals: [batch_size, num_ue_antennas, num_bs_antennas, num_subcarriers]
+            target_signals: [batch_size, num_ue_antennas, num_bs_antennas, num_subcarriers]
+            weights: Optional subcarrier weights
+            
+        Returns:
+            Loss value
+        """
+        # Handle complex numbers
+        if predicted_signals.is_complex():
+            pred_real = predicted_signals.real
+            pred_imag = predicted_signals.imag
+            target_real = target_signals.real
+            target_imag = target_signals.imag
+            
+            # Compute loss for real and imaginary parts
+            real_loss = self.criterion(pred_real, target_real)
+            imag_loss = self.criterion(pred_imag, target_imag)
+            
+            signal_loss = real_loss + imag_loss
+        else:
+            signal_loss = self.criterion(predicted_signals, target_signals)
+        
+        # Apply optional subcarrier weights
+        if weights is not None:
+            weights_expanded = weights.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+            signal_loss = signal_loss * weights_expanded
+        
+        return torch.sum(signal_loss)
+    
+    def _compute_em_property_regularization(self, predictions: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Compute electromagnetic property regularization term.
+        
+        This can include physical constraints like:
+        - Energy conservation
+        - Causality constraints
+        - Physical bounds on electromagnetic properties
+        """
+        regularization_loss = 0.0
+        
+        # Example: Energy conservation constraint
+        if 'attenuation_factors' in predictions:
+            # Attenuation factors should generally be <= 1 (no amplification)
+            atten_magnitude = torch.abs(predictions['attenuation_factors'])
+            energy_violation = torch.relu(atten_magnitude - 1.0)
+            regularization_loss += torch.mean(energy_violation ** 2)
+        
+        if 'radiation_factors' in predictions:
+            # Radiation factors should have reasonable magnitudes
+            rad_magnitude = torch.abs(predictions['radiation_factors'])
+            rad_violation = torch.relu(rad_magnitude - 10.0)  # Adjust threshold as needed
+            regularization_loss += torch.mean(rad_violation ** 2)
+        
+        return regularization_loss
 
 def create_prism_model(config: Dict) -> PrismModel:
     """
     Factory function to create a Prism model from configuration.
     
     This function provides a convenient way to instantiate Prism models
-    with different configurations. It's useful for:
-    - Experimentation with different model sizes
-    - Configuration-based model creation
-    - Easy hyperparameter tuning
+    with different configurations using the new architecture.
     
     Args:
         config: Configuration dictionary containing model parameters:
@@ -656,6 +930,7 @@ def create_prism_model(config: Dict) -> PrismModel:
             - num_bs_antennas: Number of BS antennas
             - position_dim: Spatial dimension
             - hidden_dim: Hidden layer dimension
+            - feature_dim: Feature vector dimension (default: 128)
         
     Returns:
         Configured PrismModel instance ready for training or inference
@@ -664,11 +939,12 @@ def create_prism_model(config: Dict) -> PrismModel:
     model_config = config.get('model', {})
     
     model = PrismModel(
-        num_subcarriers=model_config.get('num_subcarriers', 1024),
-        num_ue_antennas=model_config.get('num_ue_antennas', 2),
-        num_bs_antennas=model_config.get('num_bs_antennas', 4),
+        num_subcarriers=model_config.get('num_subcarriers', 408),
+        num_ue_antennas=model_config.get('num_ue_antennas', 4),
+        num_bs_antennas=model_config.get('num_bs_antennas', 64),
         position_dim=model_config.get('position_dim', 3),
-        hidden_dim=model_config.get('hidden_dim', 256)
+        hidden_dim=model_config.get('hidden_dim', 256),
+        feature_dim=model_config.get('feature_dim', 128)
     )
     
     # Configure advanced features if specified in config

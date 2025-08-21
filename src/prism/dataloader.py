@@ -63,33 +63,33 @@ class PrismDataset(Dataset):
             logger.warning("Positions file not found, generating synthetic data")
             data['positions'] = self._generate_synthetic_positions()
         
-        # Load UE antenna features
-        ue_antennas_file = os.path.join(self.data_dir, 'ue_antennas.npy')
-        if os.path.exists(ue_antennas_file):
-            data['ue_antennas'] = np.load(ue_antennas_file)
+        # Load UE positions (3D coordinates)
+        ue_positions_file = os.path.join(self.data_dir, 'ue_positions.npy')
+        if os.path.exists(ue_positions_file):
+            data['ue_positions'] = np.load(ue_positions_file)
         else:
-            data['ue_antennas'] = self._generate_synthetic_ue_antennas()
+            data['ue_positions'] = self._generate_synthetic_ue_positions()
         
-        # Load BS antenna features
-        bs_antennas_file = os.path.join(self.data_dir, 'bs_antennas.npy')
-        if os.path.exists(bs_antennas_file):
-            data['bs_antennas'] = np.load(bs_antennas_file)
+        # Load viewing directions (3D vectors)
+        view_directions_file = os.path.join(self.data_dir, 'view_directions.npy')
+        if os.path.exists(view_directions_file):
+            data['view_directions'] = np.load(view_directions_file)
         else:
-            data['bs_antennas'] = self._generate_synthetic_bs_antennas()
+            data['view_directions'] = self._generate_synthetic_view_directions()
         
-        # Load additional RF features
-        additional_features_file = os.path.join(self.data_dir, 'additional_features.npy')
-        if os.path.exists(additional_features_file):
-            data['additional_features'] = np.load(additional_features_file)
+        # Load attenuation factors (ground truth)
+        attenuation_file = os.path.join(self.data_dir, 'attenuation_factors.npy')
+        if os.path.exists(attenuation_file):
+            data['attenuation_factors'] = np.load(attenuation_file)
         else:
-            data['additional_features'] = self._generate_synthetic_additional_features()
+            data['attenuation_factors'] = self._generate_synthetic_attenuation_factors()
         
-        # Load subcarrier responses (ground truth)
-        subcarrier_file = os.path.join(self.data_dir, 'subcarrier_responses.npy')
-        if os.path.exists(subcarrier_file):
-            data['subcarrier_responses'] = np.load(subcarrier_file)
+        # Load radiation factors (ground truth)
+        radiation_file = os.path.join(self.data_dir, 'radiation_factors.npy')
+        if os.path.exists(radiation_file):
+            data['radiation_factors'] = np.load(radiation_file)
         else:
-            data['subcarrier_responses'] = self._generate_synthetic_subcarrier_responses()
+            data['radiation_factors'] = self._generate_synthetic_radiation_factors()
         
         # Validate data dimensions
         self._validate_data_dimensions(data)
@@ -107,56 +107,82 @@ class PrismDataset(Dataset):
         )
         return positions.astype(np.float32)
     
-    def _generate_synthetic_ue_antennas(self) -> np.ndarray:
-        """Generate synthetic UE antenna features."""
+    def _generate_synthetic_ue_positions(self) -> np.ndarray:
+        """Generate synthetic UE positions."""
         num_samples = self.config.get('num_samples', 10000)
-        # Generate random antenna features (normalized)
-        ue_antennas = np.random.normal(
-            loc=0.0, scale=1.0,
-            size=(num_samples, self.num_ue_antennas)
+        # Generate UE positions in a 10x10x3 meter room
+        ue_positions = np.random.uniform(
+            low=[0, 0, 0],
+            high=[10, 10, 3],
+            size=(num_samples, self.position_dim)
         )
-        return ue_antennas.astype(np.float32)
+        return ue_positions.astype(np.float32)
     
-    def _generate_synthetic_bs_antennas(self) -> np.ndarray:
-        """Generate synthetic BS antenna features."""
+    def _generate_synthetic_view_directions(self) -> np.ndarray:
+        """Generate synthetic viewing directions."""
         num_samples = self.config.get('num_samples', 10000)
-        # Generate random antenna features (normalized)
-        bs_antennas = np.random.normal(
+        # Generate normalized viewing direction vectors
+        view_directions = np.random.normal(
             loc=0.0, scale=1.0,
-            size=(num_samples, self.num_bs_antennas)
+            size=(num_samples, self.position_dim)
         )
-        return bs_antennas.astype(np.float32)
+        # Normalize to unit vectors
+        norms = np.linalg.norm(view_directions, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0  # Avoid division by zero
+        view_directions = view_directions / norms
+        return view_directions.astype(np.float32)
     
-    def _generate_synthetic_additional_features(self) -> np.ndarray:
-        """Generate synthetic additional RF features."""
-        num_samples = self.config.get('num_samples', 10000)
-        # Generate 10 additional RF features (frequency, power, etc.)
-        additional_features = np.random.normal(
-            loc=0.0, scale=1.0,
-            size=(num_samples, 10)
-        )
-        return additional_features.astype(np.float32)
-    
-    def _generate_synthetic_subcarrier_responses(self) -> np.ndarray:
-        """Generate synthetic subcarrier responses."""
+    def _generate_synthetic_attenuation_factors(self) -> np.ndarray:
+        """Generate synthetic attenuation factors."""
         num_samples = self.config.get('num_samples', 10000)
         
-        # Generate realistic subcarrier responses with frequency-dependent characteristics
-        subcarrier_responses = np.zeros((num_samples, self.num_subcarriers), dtype=np.float32)
+        # Generate complex attenuation factors for each UE antenna and subcarrier
+        attenuation_factors = np.zeros((num_samples, self.num_ue_antennas, self.num_subcarriers), dtype=np.complex64)
         
         for i in range(num_samples):
-            # Base response with frequency-dependent decay
-            base_response = np.exp(-np.arange(self.num_subcarriers) / (self.num_subcarriers * 0.3))
-            
-            # Add random variations
-            random_variation = np.random.normal(0, 0.1, self.num_subcarriers)
-            
-            # Add multipath effects (simplified)
-            multipath = 0.3 * np.exp(-np.arange(self.num_subcarriers) / (self.num_subcarriers * 0.1))
-            
-            subcarrier_responses[i] = base_response + random_variation + multipath
+            for j in range(self.num_ue_antennas):
+                # Base attenuation with frequency-dependent decay
+                base_attenuation = np.exp(-np.arange(self.num_subcarriers) / (self.num_subcarriers * 0.3))
+                
+                # Add random variations
+                random_variation = np.random.normal(0, 0.1, self.num_subcarriers)
+                
+                # Add multipath effects (simplified)
+                multipath = 0.3 * np.exp(-np.arange(self.num_subcarriers) / (self.num_subcarriers * 0.1))
+                
+                # Combine and convert to complex
+                magnitude = base_attenuation + random_variation + multipath
+                phase = np.random.uniform(-np.pi, np.pi, self.num_subcarriers)
+                
+                attenuation_factors[i, j] = magnitude * np.exp(1j * phase)
         
-        return subcarrier_responses
+        return attenuation_factors
+    
+    def _generate_synthetic_radiation_factors(self) -> np.ndarray:
+        """Generate synthetic radiation factors."""
+        num_samples = self.config.get('num_samples', 10000)
+        
+        # Generate complex radiation factors for each UE antenna and subcarrier
+        radiation_factors = np.zeros((num_samples, self.num_ue_antennas, self.num_subcarriers), dtype=np.complex64)
+        
+        for i in range(num_samples):
+            for j in range(self.num_ue_antennas):
+                # Base radiation pattern with frequency-dependent characteristics
+                base_radiation = np.exp(-np.arange(self.num_subcarriers) / (self.num_subcarriers * 0.2))
+                
+                # Add random variations
+                random_variation = np.random.normal(0, 0.15, self.num_subcarriers)
+                
+                # Add directional effects (simplified)
+                directional = 0.4 * np.exp(-np.arange(self.num_subcarriers) / (self.num_subcarriers * 0.15))
+                
+                # Combine and convert to complex
+                magnitude = base_radiation + random_variation + directional
+                phase = np.random.uniform(-np.pi, np.pi, self.num_subcarriers)
+                
+                radiation_factors[i, j] = magnitude * np.exp(1j * phase)
+        
+        return radiation_factors
     
     def _validate_data_dimensions(self, data: Dict[str, np.ndarray]):
         """Validate that all data arrays have consistent dimensions."""
@@ -164,10 +190,10 @@ class PrismDataset(Dataset):
         
         expected_shapes = {
             'positions': (num_samples, self.position_dim),
-            'ue_antennas': (num_samples, self.num_ue_antennas),
-            'bs_antennas': (num_samples, self.num_bs_antennas),
-            'additional_features': (num_samples, 10),
-            'subcarrier_responses': (num_samples, self.num_subcarriers)
+            'ue_positions': (num_samples, self.position_dim),
+            'view_directions': (num_samples, self.position_dim),
+            'attenuation_factors': (num_samples, self.num_ue_antennas, self.num_subcarriers),
+            'radiation_factors': (num_samples, self.num_ue_antennas, self.num_subcarriers)
         }
         
         for key, expected_shape in expected_shapes.items():
@@ -215,28 +241,52 @@ class PrismDataset(Dataset):
         
         sample = {
             'positions': torch.from_numpy(self.data['positions'][data_idx]).float(),
-            'ue_antennas': torch.from_numpy(self.data['ue_antennas'][data_idx]).float(),
-            'bs_antennas': torch.from_numpy(self.data['bs_antennas'][data_idx]).float(),
-            'additional_features': torch.from_numpy(self.data['additional_features'][data_idx]).float(),
-            'subcarrier_responses': torch.from_numpy(self.data['subcarrier_responses'][data_idx]).float()
+            'ue_positions': torch.from_numpy(self.data['ue_positions'][data_idx]).float(),
+            'view_directions': torch.from_numpy(self.data['view_directions'][data_idx]).float(),
+            'attenuation_factors': torch.from_numpy(self.data['attenuation_factors'][data_idx]).complex(),
+            'radiation_factors': torch.from_numpy(self.data['radiation_factors'][data_idx]).complex()
         }
         
         return sample
     
-    def get_subcarrier_statistics(self) -> Dict[str, np.ndarray]:
+    def get_attenuation_statistics(self) -> Dict[str, np.ndarray]:
         """
-        Get statistics for each subcarrier across the dataset.
+        Get statistics for attenuation factors across the dataset.
         
         Returns:
-            Dictionary containing mean and std for each subcarrier
+            Dictionary containing mean and std for attenuation factors
         """
-        responses = self.data['subcarrier_responses'][self.indices]
+        attenuation = self.data['attenuation_factors'][self.indices]
+        
+        # Convert complex to magnitude for statistics
+        magnitude = np.abs(attenuation)
         
         stats = {
-            'mean': np.mean(responses, axis=0),
-            'std': np.std(responses, axis=0),
-            'min': np.min(responses, axis=0),
-            'max': np.max(responses, axis=0)
+            'mean': np.mean(magnitude, axis=(0, 1)),  # Average across samples and UE antennas
+            'std': np.std(magnitude, axis=(0, 1)),
+            'min': np.min(magnitude, axis=(0, 1)),
+            'max': np.max(magnitude, axis=(0, 1))
+        }
+        
+        return stats
+    
+    def get_radiation_statistics(self) -> Dict[str, np.ndarray]:
+        """
+        Get statistics for radiation factors across the dataset.
+        
+        Returns:
+            Dictionary containing mean and std for radiation factors
+        """
+        radiation = self.data['radiation_factors'][self.indices]
+        
+        # Convert complex to magnitude for statistics
+        magnitude = np.abs(radiation)
+        
+        stats = {
+            'mean': np.mean(magnitude, axis=(0, 1)),  # Average across samples and UE antennas
+            'std': np.std(magnitude, axis=(0, 1)),
+            'min': np.min(magnitude, axis=(0, 1)),
+            'max': np.max(magnitude, axis=(0, 1))
         }
         
         return stats
@@ -250,7 +300,7 @@ class PrismDataset(Dataset):
         """
         if method == 'standard':
             # Standard normalization (zero mean, unit variance)
-            for key in ['positions', 'ue_antennas', 'bs_antennas', 'additional_features']:
+            for key in ['positions', 'ue_positions', 'view_directions']:
                 data = self.data[key][self.indices]
                 mean = np.mean(data, axis=0)
                 std = np.std(data, axis=0)
@@ -260,7 +310,7 @@ class PrismDataset(Dataset):
                 
         elif method == 'minmax':
             # Min-max normalization to [0, 1]
-            for key in ['positions', 'ue_antennas', 'bs_antennas', 'additional_features']:
+            for key in ['positions', 'ue_positions', 'view_directions']:
                 data = self.data[key][self.indices]
                 min_val = np.min(data, axis=0)
                 max_val = np.max(data, axis=0)
@@ -271,7 +321,7 @@ class PrismDataset(Dataset):
                 
         elif method == 'robust':
             # Robust normalization using median and IQR
-            for key in ['positions', 'ue_antennas', 'bs_antennas', 'additional_features']:
+            for key in ['positions', 'ue_positions', 'view_directions']:
                 data = self.data[key][self.indices]
                 median = np.median(data, axis=0)
                 q75, q25 = np.percentile(data, [75, 25], axis=0)

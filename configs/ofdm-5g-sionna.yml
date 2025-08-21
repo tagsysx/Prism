@@ -4,11 +4,12 @@
 
 model:
   # Model architecture parameters
-  num_subcarriers: 408          # Number of subcarriers (Sionna 5G simulation: 100MHz, 408 subcarriers)
-  num_ue_antennas: 4            # Number of UE antennas (Sionna simulation: 4 UE antennas)
-  num_bs_antennas: 64           # Number of BS antennas (Sionna simulation: 64 BS antennas)
+  num_subcarriers: 408          # Number of subcarriers (M, configurable)
+  num_ue_antennas: 4            # Number of UE antennas (N_UE, configurable)
+  num_bs_antennas: 64           # Number of BS antennas (N_BS, configurable)
   position_dim: 3               # 3D position coordinates
   hidden_dim: 256               # Hidden layer dimension
+  feature_dim: 128              # Feature vector dimension from AttenuationNetwork (configurable)
   
   # Network architecture
   attenuation_network:
@@ -19,9 +20,13 @@ model:
     num_layers: 8
     activation: 'relu'
   
-  rf_prism_module:
-    hidden_dim: 256
+  # New architecture components
+  attenuation_decoder:
+    num_layers: 3              # 3-layer MLP for each UE channel
+    hidden_dim: 256            # Hidden dimension for decoder
     activation: 'relu'
+  
+  # Removed rf_prism_module (replaced by new architecture)
 
 # CSI Virtual Link Processing Configuration
 csi_processing:
@@ -193,18 +198,23 @@ loss:
   # Loss function configuration
   loss_type: 'mse'              # Loss type (mse, l1)
   
-  # Subcarrier-specific loss weights (optional)
-  subcarrier_weights: null      # Weights for each subcarrier
+  # Primary loss weights
+  subcarrier_weight: 1.0        # Primary subcarrier loss weight
+  csi_weight: 0.3               # λ_CSI: CSI virtual link consistency
+  ray_tracing_weight: 0.2       # λ_ray: Ray tracing accuracy
+  spatial_weight: 0.1           # λ_spatial: Spatial consistency
   
   # Frequency-aware loss
   frequency_weighting: true     # Enable frequency-dependent weighting
   low_freq_weight: 1.0         # Weight for low-frequency subcarriers
   high_freq_weight: 1.2        # Weight for high-frequency subcarriers
   
-  # Advanced loss components
-  csi_loss_weight: 0.3          # Weight for CSI virtual link loss
-  ray_tracing_loss_weight: 0.2  # Weight for ray tracing loss
-  spatial_consistency_weight: 0.1  # Weight for spatial consistency
+  # Subcarrier-specific loss weights (optional)
+  subcarrier_weights: null      # Weights for each subcarrier
+  
+  # Loss balancing
+  enable_loss_balancing: true
+  adaptive_weight_adjustment: true
   
   # Loss balancing
   enable_loss_balancing: true

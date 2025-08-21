@@ -12,8 +12,8 @@ __email__ = "contact@prism-project.org"
 from .model import (
     PrismModel,
     PrismLoss,
-    RFPrismModule,
     AttenuationNetwork,
+    AttenuationDecoder,
     RadianceNetwork,
     create_prism_model
 )
@@ -36,8 +36,8 @@ __all__ = [
     # Core models
     'PrismModel',
     'PrismLoss',
-    'RFPrismModule',
     'AttenuationNetwork',
+    'AttenuationDecoder',
     'RadianceNetwork',
     'create_prism_model',
     

@@ -74,23 +74,23 @@ class PrismRenderer:
         # Limit to 100 colors to avoid overwhelming visualizations
         self.subcarrier_colors = plt.cm.viridis(np.linspace(0, 1, min(self.num_subcarriers, 100)))
         
-    def render_subcarrier_responses(self, predictions: torch.Tensor, targets: torch.Tensor,
-                                  save_path: str = 'subcarrier_responses.png'):
+    def render_attenuation_factors(self, predictions: torch.Tensor, targets: torch.Tensor,
+                                  save_path: str = 'attenuation_factors.png'):
         """
-        Render subcarrier responses comparison between predictions and ground truth.
+        Render attenuation factors comparison between predictions and ground truth.
         
         This method creates side-by-side comparisons of predicted vs actual
-        subcarrier responses, which is crucial for:
+        attenuation factors, which is crucial for:
         - Understanding model performance across the frequency spectrum
         - Identifying frequency bands where the model excels or struggles
         - Debugging frequency-specific prediction errors
-        - Validating the model's ability to capture OFDM characteristics
+        - Validating the model's ability to capture spatial attenuation characteristics
         
         Args:
-            predictions: Predicted subcarrier responses [batch_size, num_subcarriers]
-                Model outputs for each subcarrier frequency
-            targets: Ground truth subcarrier responses [batch_size, num_subcarriers]
-                True subcarrier responses from measurements or simulation
+            predictions: Predicted attenuation factors [batch_size, num_ue_antennas, num_subcarriers]
+                Model outputs for each UE antenna and subcarrier frequency
+            targets: Ground truth attenuation factors [batch_size, num_ue_antennas, num_subcarriers]
+                True attenuation factors from measurements or simulation
             save_path: Path where the visualization should be saved
                 Supports common image formats (PNG, JPG, PDF, SVG)
         """
@@ -98,13 +98,16 @@ class PrismRenderer:
         pred_np = predictions.detach().cpu().numpy()
         target_np = targets.detach().cpu().numpy()
         
+        # Convert complex to magnitude for visualization
+        pred_magnitude = np.abs(pred_np)
+        target_magnitude = np.abs(target_np)
+        
         # Sample a few examples for visualization to avoid cluttered plots
-        # This provides a representative view without overwhelming detail
-        num_examples = min(5, len(pred_np))
-        sample_indices = np.random.choice(len(pred_np), num_examples, replace=False)
+        num_examples = min(3, len(pred_magnitude))
+        sample_indices = np.random.choice(len(pred_magnitude), num_examples, replace=False)
         
         # Create subplot layout for multiple examples
-        fig, axes = plt.subplots(num_examples, 1, figsize=(12, 3 * num_examples))
+        fig, axes = plt.subplots(num_examples, 1, figsize=(12, 4 * num_examples))
         if num_examples == 1:
             axes = [axes]  # Handle single example case
         
@@ -115,14 +118,18 @@ class PrismRenderer:
             # Create subcarrier index array for x-axis
             subcarrier_indices = np.arange(self.num_subcarriers)
             
-            # Plot ground truth (solid blue line) and predictions (dashed red line)
-            ax.plot(subcarrier_indices, target_np[idx], 'b-', label='Ground Truth', linewidth=2)
-            ax.plot(subcarrier_indices, pred_np[idx], 'r--', label='Prediction', linewidth=2)
+            # Plot for each UE antenna
+            for ue_idx in range(self.num_ue_antennas):
+                # Plot ground truth (solid lines) and predictions (dashed lines)
+                ax.plot(subcarrier_indices, target_magnitude[idx, ue_idx], 
+                       f'C{ue_idx}-', label=f'UE {ue_idx+1} Ground Truth', linewidth=2)
+                ax.plot(subcarrier_indices, pred_magnitude[idx, ue_idx], 
+                       f'C{ue_idx}--', label=f'UE {ue_idx+1} Prediction', linewidth=2)
             
             # Set plot labels and title
             ax.set_xlabel('Subcarrier Index')
-            ax.set_ylabel('Response Magnitude')
-            ax.set_title(f'Sample {i+1}: Subcarrier Responses')
+            ax.set_ylabel('Attenuation Magnitude')
+            ax.set_title(f'Sample {i+1}: Attenuation Factors')
             ax.legend()
             ax.grid(True, alpha=0.3)  # Semi-transparent grid for readability
         
@@ -133,7 +140,75 @@ class PrismRenderer:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
         
-        logger.info(f"Subcarrier responses visualization saved to {save_path}")
+        logger.info(f"Attenuation factors visualization saved to {save_path}")
+    
+    def render_radiation_factors(self, predictions: torch.Tensor, targets: torch.Tensor,
+                                save_path: str = 'radiation_factors.png'):
+        """
+        Render radiation factors comparison between predictions and ground truth.
+        
+        This method creates side-by-side comparisons of predicted vs actual
+        radiation factors, which is crucial for:
+        - Understanding model performance across the frequency spectrum
+        - Identifying frequency bands where the model excels or struggles
+        - Debugging frequency-specific prediction errors
+        - Validating the model's ability to capture radiation characteristics
+        
+        Args:
+            predictions: Predicted radiation factors [batch_size, num_ue_antennas, num_subcarriers]
+                Model outputs for each UE antenna and subcarrier frequency
+            targets: Ground truth radiation factors [batch_size, num_ue_antennas, num_subcarriers]
+                True radiation factors from measurements or simulation
+            save_path: Path where the visualization should be saved
+                Supports common image formats (PNG, JPG, PDF, SVG)
+        """
+        # Convert PyTorch tensors to NumPy arrays for matplotlib plotting
+        pred_np = predictions.detach().cpu().numpy()
+        target_np = targets.detach().cpu().numpy()
+        
+        # Convert complex to magnitude for visualization
+        pred_magnitude = np.abs(pred_np)
+        target_magnitude = np.abs(target_np)
+        
+        # Sample a few examples for visualization to avoid cluttered plots
+        num_examples = min(3, len(pred_magnitude))
+        sample_indices = np.random.choice(len(pred_magnitude), num_examples, replace=False)
+        
+        # Create subplot layout for multiple examples
+        fig, axes = plt.subplots(num_examples, 1, figsize=(12, 4 * num_examples))
+        if num_examples == 1:
+            axes = [axes]  # Handle single example case
+        
+        # Plot each sampled example
+        for i, idx in enumerate(sample_indices):
+            ax = axes[i]
+            
+            # Create subcarrier index array for x-axis
+            subcarrier_indices = np.arange(self.num_subcarriers)
+            
+            # Plot for each UE antenna
+            for ue_idx in range(self.num_ue_antennas):
+                # Plot ground truth (solid lines) and predictions (dashed lines)
+                ax.plot(subcarrier_indices, target_magnitude[idx, ue_idx], 
+                       f'C{ue_idx}-', label=f'UE {ue_idx+1} Ground Truth', linewidth=2)
+                ax.plot(subcarrier_indices, pred_magnitude[idx, ue_idx], 
+                       f'C{ue_idx}--', label=f'UE {ue_idx+1} Prediction', linewidth=2)
+            
+            # Set plot labels and title
+            ax.set_xlabel('Subcarrier Index')
+            ax.set_ylabel('Radiation Magnitude')
+            ax.set_title(f'Sample {i+1}: Radiation Factors')
+            ax.legend()
+            ax.grid(True, alpha=0.3)  # Semi-transparent grid for readability
+        
+        # Adjust layout to prevent overlap
+        plt.tight_layout()
+        
+        # Save high-quality plot
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        logger.info(f"Radiation factors visualization saved to {save_path}")
     
     def render_mimo_channel(self, mimo_channel: torch.Tensor, save_path: str = 'mimo_channel.png'):
         """
@@ -259,10 +334,11 @@ class PrismRenderer:
         
         logger.info(f"Frequency spectrum visualization saved to {save_path}")
     
-    def render_3d_position_heatmap(self, positions: torch.Tensor, responses: torch.Tensor,
-                                   subcarrier_idx: int = 0, save_path: str = 'position_heatmap.png'):
+    def render_3d_position_heatmap(self, positions: torch.Tensor, attenuation_factors: torch.Tensor,
+                                   radiation_factors: torch.Tensor, subcarrier_idx: int = 0, 
+                                   save_path: str = 'position_heatmap.png'):
         """
-        Render 3D position heatmap for a specific subcarrier.
+        Render 3D position heatmap for attenuation and radiation factors.
         
         This method creates 3D spatial visualizations showing how signal
         strength varies across 3D space for a particular subcarrier.
@@ -275,36 +351,44 @@ class PrismRenderer:
         Args:
             positions: 3D positions [batch_size, 3]
                 Spatial coordinates (x, y, z) for each sample
-            responses: Subcarrier responses [batch_size, num_subcarriers]
-                Signal responses for all subcarriers
+            attenuation_factors: Attenuation factors [batch_size, num_ue_antennas, num_subcarriers]
+                Attenuation factors for all subcarriers
+            radiation_factors: Radiation factors [batch_size, num_ue_antennas, num_subcarriers]
+                Radiation factors for all subcarriers
             subcarrier_idx: Index of subcarrier to visualize
                 Allows focusing on specific frequency components
             save_path: Path where the visualization should be saved
         """
         # Convert PyTorch tensors to NumPy arrays for plotting
         pos_np = positions.detach().cpu().numpy()
-        resp_np = responses.detach().cpu().numpy()
+        atten_np = attenuation_factors.detach().cpu().numpy()
+        rad_np = radiation_factors.detach().cpu().numpy()
         
-        # Extract responses for the specified subcarrier
-        subcarrier_responses = resp_np[:, subcarrier_idx]
+        # Convert complex to magnitude and extract responses for the specified subcarrier
+        atten_magnitude = np.abs(atten_np[:, :, subcarrier_idx])  # [batch_size, num_ue_antennas]
+        rad_magnitude = np.abs(rad_np[:, :, subcarrier_idx])      # [batch_size, num_ue_antennas]
+        
+        # Average across UE antennas for overall spatial pattern
+        overall_atten = np.mean(atten_magnitude, axis=1)  # [batch_size]
+        overall_rad = np.mean(rad_magnitude, axis=1)      # [batch_size]
         
         # Create 3D figure and subplot
         fig = plt.figure(figsize=(12, 8))
         ax = fig.add_subplot(111, projection='3d')
         
-        # Create 3D scatter plot with color mapping
-        # Color represents signal strength at each spatial position
-        scatter = ax.scatter(pos_np[:, 0], pos_np[:, 1], pos_np[:, 2],
-                           c=subcarrier_responses, cmap='viridis', s=50, alpha=0.7)
+        # Create 3D scatter plot with color mapping for attenuation
+        # Color represents attenuation magnitude at each spatial position
+        scatter_atten = ax.scatter(pos_np[:, 0], pos_np[:, 1], pos_np[:, 2],
+                                 c=overall_atten, cmap='viridis', s=50, alpha=0.7)
         
         # Set axis labels and title
         ax.set_xlabel('X Position (m)')
         ax.set_ylabel('Y Position (m)')
         ax.set_zlabel('Z Position (m)')
-        ax.set_title(f'3D Position Heatmap - Subcarrier {subcarrier_idx}')
+        ax.set_title(f'3D Position Heatmap - Subcarrier {subcarrier_idx} (Attenuation)')
         
-        # Add colorbar to show signal strength scale
-        plt.colorbar(scatter, ax=ax, label='Response Magnitude')
+        # Add colorbar to show attenuation magnitude scale
+        plt.colorbar(scatter_atten, ax=ax, label='Attenuation Magnitude')
         
         # Save high-quality 3D plot
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -554,7 +638,7 @@ class PrismRenderer:
         logger.info(f"Subcarrier animation saved to {save_path}")
     
     def render_all_visualizations(self, model_outputs: Dict[str, torch.Tensor],
-                                 targets: torch.Tensor, positions: torch.Tensor,
+                                 targets: Dict[str, torch.Tensor], positions: torch.Tensor,
                                  train_losses: Optional[List[float]] = None,
                                  val_losses: Optional[List[float]] = None,
                                  output_dir: str = 'visualizations'):
@@ -570,11 +654,11 @@ class PrismRenderer:
         
         Args:
             model_outputs: Dictionary containing model outputs:
-                - subcarrier_responses: Predicted subcarrier responses
+                - attenuation_factors: Predicted attenuation factors
+                - radiation_factors: Predicted radiation factors
                 - mimo_channel: MIMO channel matrix
-                - attenuation_features: Attenuation network features
-                - radiance_features: Radiance network features
-            targets: Ground truth targets for comparison
+                - spatial_features: Spatial encoding features
+            targets: Ground truth dictionary with same structure as model_outputs
             positions: 3D spatial positions for spatial analysis
             train_losses: Training loss history (optional)
             val_losses: Validation loss history (optional)
@@ -586,40 +670,45 @@ class PrismRenderer:
         os.makedirs(output_dir, exist_ok=True)
         
         # Extract outputs from model_outputs dictionary
-        subcarrier_responses = model_outputs['subcarrier_responses']
+        attenuation_factors = model_outputs['attenuation_factors']
+        radiation_factors = model_outputs['radiation_factors']
         mimo_channel = model_outputs['mimo_channel']
+        
+        # Extract targets
+        atten_targets = targets['attenuation_factors']
+        rad_targets = targets['radiation_factors']
         
         # Render all available visualizations
         logger.info("Generating comprehensive visualizations...")
         
-        # 1. Subcarrier responses comparison
-        self.render_subcarrier_responses(
-            subcarrier_responses, targets,
-            os.path.join(output_dir, 'subcarrier_responses.png')
+        # 1. Attenuation factors comparison
+        self.render_attenuation_factors(
+            attenuation_factors, atten_targets,
+            os.path.join(output_dir, 'attenuation_factors.png')
         )
         
-        # 2. MIMO channel visualization
+        # 2. Radiation factors comparison
+        self.render_radiation_factors(
+            radiation_factors, rad_targets,
+            os.path.join(output_dir, 'radiation_factors.png')
+        )
+        
+        # 3. MIMO channel visualization
         self.render_mimo_channel(
             mimo_channel,
             os.path.join(output_dir, 'mimo_channel.png')
         )
         
-        # 3. Frequency spectrum analysis
+        # 4. Frequency spectrum analysis
         self.render_frequency_spectrum(
-            subcarrier_responses,
+            attenuation_factors, radiation_factors,
             save_path=os.path.join(output_dir, 'frequency_spectrum.png')
         )
         
-        # 4. 3D spatial heatmap
+        # 5. 3D spatial heatmap
         self.render_3d_position_heatmap(
-            positions, subcarrier_responses,
+            positions, attenuation_factors, radiation_factors,
             save_path=os.path.join(output_dir, 'position_heatmap.png')
-        )
-        
-        # 5. Detailed subcarrier comparison
-        self.render_subcarrier_comparison(
-            subcarrier_responses, targets,
-            save_path=os.path.join(output_dir, 'subcarrier_comparison.png')
         )
         
         # 6. Training progress (if available)
@@ -629,22 +718,13 @@ class PrismRenderer:
                 save_path=os.path.join(output_dir, 'training_progress.png')
             )
         
-        # 7. Animation (optional, may take longer)
-        try:
-            self.create_animation(
-                subcarrier_responses, targets,
-                os.path.join(output_dir, 'subcarrier_animation.gif')
-            )
-        except Exception as e:
-            logger.warning(f"Animation creation failed: {e}")
-        
         logger.info(f"All visualizations saved to {output_dir}")
         logger.info("Visualization package includes:")
-        logger.info("- Subcarrier response comparisons")
+        logger.info("- Attenuation factors comparisons")
+        logger.info("- Radiation factors comparisons")
         logger.info("- MIMO channel analysis")
         logger.info("- Frequency spectrum plots")
         logger.info("- 3D spatial heatmaps")
         logger.info("- Performance analysis plots")
         if train_losses and val_losses:
             logger.info("- Training progress analysis")
-        logger.info("- Animated visualizations")

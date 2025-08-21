@@ -2,7 +2,6 @@
 Tests for the Prism model components.
 """
 
-import pytest
 import torch
 import numpy as np
 from pathlib import Path
@@ -14,34 +13,35 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from prism.model import (
     PrismModel,
     PrismLoss,
-    RFPrismModule,
     AttenuationNetwork,
+    AttenuationDecoder,
     RadianceNetwork
 )
 
-class TestRFPrismModule:
-    """Test the RF Prism Module."""
+class TestAttenuationDecoder:
+    """Test the Attenuation Decoder."""
     
     def test_initialization(self):
-        """Test RF Prism Module initialization."""
-        module = RFPrismModule(input_dim=512, num_subcarriers=1024, hidden_dim=256)
+        """Test Attenuation Decoder initialization."""
+        decoder = AttenuationDecoder(feature_dim=128, num_subcarriers=408, num_ue_antennas=4, hidden_dim=256)
         
-        assert module.num_subcarriers == 1024
-        assert module.hidden_dim == 256
-        assert len(module.layer1) == 1024
-        assert len(module.layer2) == 1024
-        assert len(module.output_layers) == 1024
+        assert decoder.feature_dim == 128
+        assert decoder.num_subcarriers == 408
+        assert decoder.num_ue_antennas == 4
+        assert decoder.hidden_dim == 256
+        assert len(decoder.channels) == 4
     
     def test_forward_pass(self):
-        """Test RF Prism Module forward pass."""
-        module = RFPrismModule(input_dim=512, num_subcarriers=64, hidden_dim=256)
+        """Test Attenuation Decoder forward pass."""
+        decoder = AttenuationDecoder(feature_dim=128, num_subcarriers=64, num_ue_antennas=2, hidden_dim=256)
         
         batch_size = 8
-        input_tensor = torch.randn(batch_size, 512)
+        input_features = torch.randn(batch_size, 128)
         
-        output = module(input_tensor)
+        output = decoder(input_features)
         
-        assert output.shape == (batch_size, 64)
+        assert output.shape == (batch_size, 2, 64)  # [batch_size, num_ue_antennas, num_subcarriers]
+        assert output.is_complex()
         assert not torch.isnan(output).any()
         assert not torch.isinf(output).any()
 
@@ -50,22 +50,23 @@ class TestAttenuationNetwork:
     
     def test_initialization(self):
         """Test Attenuation Network initialization."""
-        network = AttenuationNetwork(input_dim=100, hidden_dim=256, num_layers=8)
+        network = AttenuationNetwork(input_dim=3, hidden_dim=256, feature_dim=128)
         
-        assert len(network.network) == 8
-        assert network.network[0].in_features == 100
+        assert len(network.network) == 9  # 9 total layers: 1 input + 7 hidden + 1 output
+        assert network.network[0].in_features == 3
         assert network.network[0].out_features == 256
+        assert network.network[-1].out_features == 128
     
     def test_forward_pass(self):
         """Test Attenuation Network forward pass."""
-        network = AttenuationNetwork(input_dim=100, hidden_dim=256, num_layers=4)
+        network = AttenuationNetwork(input_dim=3, hidden_dim=256, feature_dim=128)
         
         batch_size = 16
-        input_tensor = torch.randn(batch_size, 100)
+        input_tensor = torch.randn(batch_size, 3)  # 3D positions
         
         output = network(input_tensor)
         
-        assert output.shape == (batch_size, 256)
+        assert output.shape == (batch_size, 128)  # Feature dimension
         assert not torch.isnan(output).any()
         assert not torch.isinf(output).any()
 
@@ -74,22 +75,27 @@ class TestRadianceNetwork:
     
     def test_initialization(self):
         """Test Radiance Network initialization."""
-        network = RadianceNetwork(input_dim=100, hidden_dim=256, num_layers=8)
+        network = RadianceNetwork(position_dim=3, view_dim=3, feature_dim=128, 
+                                num_subcarriers=408, num_ue_antennas=4, hidden_dim=256)
         
-        assert len(network.network) == 8
-        assert network.network[0].in_features == 100
-        assert network.network[0].out_features == 256
+        assert len(network.channels) == 4  # N_UE channels
+        input_dim = 3 + 3 + 128  # position + view + features
+        assert network.channels[0][0].in_features == input_dim
     
     def test_forward_pass(self):
         """Test Radiance Network forward pass."""
-        network = RadianceNetwork(input_dim=100, hidden_dim=256, num_layers=4)
+        network = RadianceNetwork(position_dim=3, view_dim=3, feature_dim=128, 
+                                num_subcarriers=64, num_ue_antennas=2, hidden_dim=256)
         
         batch_size = 16
-        input_tensor = torch.randn(batch_size, 100)
+        ue_positions = torch.randn(batch_size, 3)
+        view_directions = torch.randn(batch_size, 3)
+        spatial_features = torch.randn(batch_size, 128)
         
-        output = network(input_tensor)
+        output = network(ue_positions, view_directions, spatial_features)
         
-        assert output.shape == (batch_size, 256)
+        assert output.shape == (batch_size, 2, 64)  # [batch_size, num_ue_antennas, num_subcarriers]
+        assert output.is_complex()
         assert not torch.isnan(output).any()
         assert not torch.isinf(output).any()
 
@@ -103,7 +109,8 @@ class TestPrismModel:
             num_ue_antennas=2,
             num_bs_antennas=4,
             position_dim=3,
-            hidden_dim=256
+            hidden_dim=256,
+            feature_dim=128
         )
         
         assert model.num_subcarriers == 64
@@ -111,6 +118,7 @@ class TestPrismModel:
         assert model.num_bs_antennas == 4
         assert model.position_dim == 3
         assert model.hidden_dim == 256
+        assert model.feature_dim == 128
     
     def test_forward_pass(self):
         """Test Prism Model forward pass."""
@@ -119,25 +127,25 @@ class TestPrismModel:
             num_ue_antennas=2,
             num_bs_antennas=4,
             position_dim=3,
-            hidden_dim=128
+            hidden_dim=128,
+            feature_dim=64
         )
         
         batch_size = 8
         
         # Create sample inputs
         positions = torch.randn(batch_size, 3)
-        ue_antennas = torch.randn(batch_size, 2)
-        bs_antennas = torch.randn(batch_size, 4)
-        additional_features = torch.randn(batch_size, 10)
+        ue_positions = torch.randn(batch_size, 3)
+        view_directions = torch.randn(batch_size, 3)
         
         # Forward pass
-        outputs = model(positions, ue_antennas, bs_antennas, additional_features)
+        outputs = model(positions, ue_positions, view_directions)
         
         # Check output shapes
-        assert outputs['subcarrier_responses'].shape == (batch_size, 32)
-        assert outputs['mimo_channel'].shape == (batch_size, 8)  # 2 * 4
-        assert outputs['attenuation_features'].shape == (batch_size, 128)
-        assert outputs['radiance_features'].shape == (batch_size, 128)
+        assert outputs['spatial_features'].shape == (batch_size, 64)
+        assert outputs['attenuation_factors'].shape == (batch_size, 2, 32)  # [batch_size, num_ue_antennas, num_subcarriers]
+        assert outputs['radiation_factors'].shape == (batch_size, 2, 32)   # [batch_size, num_ue_antennas, num_subcarriers]
+        assert outputs['mimo_channel'].shape == (batch_size, 2, 4)        # [batch_size, num_ue_antennas, num_bs_antennas]
         
         # Check for valid outputs
         for key, value in outputs.items():
@@ -182,23 +190,22 @@ class TestPrismModel:
             num_ue_antennas=2,
             num_bs_antennas=3,
             position_dim=3,
-            hidden_dim=64
+            hidden_dim=64,
+            feature_dim=32
         )
         
         batch_size = 4
         
         # Create sample inputs
         positions = torch.randn(batch_size, 3)
-        ue_antennas = torch.randn(batch_size, 2)
-        bs_antennas = torch.randn(batch_size, 3)
-        additional_features = torch.randn(batch_size, 10)
+        ue_positions = torch.randn(batch_size, 3)
+        view_directions = torch.randn(batch_size, 3)
         
         # Get MIMO channel matrix
         mimo_matrix = model.get_mimo_channel(
             positions=positions,
-            ue_antennas=ue_antennas,
-            bs_antennas=bs_antennas,
-            additional_features=additional_features
+            ue_positions=ue_positions,
+            view_directions=view_directions
         )
         
         assert mimo_matrix.shape == (batch_size, 2, 3)
@@ -217,18 +224,29 @@ class TestPrismLoss:
     
     def test_invalid_loss_type(self):
         """Test that invalid loss type raises error."""
-        with pytest.raises(ValueError, match="Unsupported loss type"):
+        try:
             PrismLoss(loss_type='invalid')
+            assert False, "Should have raised ValueError"
+        except ValueError:
+            pass
     
     def test_mse_loss(self):
         """Test MSE loss computation."""
         loss_fn = PrismLoss(loss_type='mse')
         
         batch_size = 8
+        num_ue_antennas = 2
         num_subcarriers = 16
         
-        predictions = torch.randn(batch_size, num_subcarriers)
-        targets = torch.randn(batch_size, num_subcarriers)
+        # Create complex predictions and targets
+        predictions = {
+            'attenuation_factors': torch.randn(batch_size, num_ue_antennas, num_subcarriers) + 1j * torch.randn(batch_size, num_ue_antennas, num_subcarriers),
+            'radiation_factors': torch.randn(batch_size, num_ue_antennas, num_subcarriers) + 1j * torch.randn(batch_size, num_ue_antennas, num_subcarriers)
+        }
+        targets = {
+            'attenuation_factors': torch.randn(batch_size, num_ue_antennas, num_subcarriers) + 1j * torch.randn(batch_size, num_ue_antennas, num_subcarriers),
+            'radiation_factors': torch.randn(batch_size, num_ue_antennas, num_subcarriers) + 1j * torch.randn(batch_size, num_ue_antennas, num_subcarriers)
+        }
         
         loss = loss_fn(predictions, targets)
         
@@ -241,10 +259,18 @@ class TestPrismLoss:
         loss_fn = PrismLoss(loss_type='l1')
         
         batch_size = 8
+        num_ue_antennas = 2
         num_subcarriers = 16
         
-        predictions = torch.randn(batch_size, num_subcarriers)
-        targets = torch.randn(batch_size, num_subcarriers)
+        # Create complex predictions and targets
+        predictions = {
+            'attenuation_factors': torch.randn(batch_size, num_ue_antennas, num_subcarriers) + 1j * torch.randn(batch_size, num_ue_antennas, num_subcarriers),
+            'radiation_factors': torch.randn(batch_size, num_ue_antennas, num_subcarriers) + 1j * torch.randn(batch_size, num_ue_antennas, num_subcarriers)
+        }
+        targets = {
+            'attenuation_factors': torch.randn(batch_size, num_ue_antennas, num_subcarriers) + 1j * torch.randn(batch_size, num_ue_antennas, num_subcarriers),
+            'radiation_factors': torch.randn(batch_size, num_ue_antennas, num_subcarriers) + 1j * torch.randn(batch_size, num_ue_antennas, num_subcarriers)
+        }
         
         loss = loss_fn(predictions, targets)
         
@@ -257,10 +283,18 @@ class TestPrismLoss:
         loss_fn = PrismLoss(loss_type='mse')
         
         batch_size = 8
+        num_ue_antennas = 2
         num_subcarriers = 16
         
-        predictions = torch.randn(batch_size, num_subcarriers)
-        targets = torch.randn(batch_size, num_subcarriers)
+        # Create complex predictions and targets
+        predictions = {
+            'attenuation_factors': torch.randn(batch_size, num_ue_antennas, num_subcarriers) + 1j * torch.randn(batch_size, num_ue_antennas, num_subcarriers),
+            'radiation_factors': torch.randn(batch_size, num_ue_antennas, num_subcarriers) + 1j * torch.randn(batch_size, num_ue_antennas, num_subcarriers)
+        }
+        targets = {
+            'attenuation_factors': torch.randn(batch_size, num_ue_antennas, num_subcarriers) + 1j * torch.randn(batch_size, num_ue_antennas, num_subcarriers),
+            'radiation_factors': torch.randn(batch_size, num_ue_antennas, num_subcarriers) + 1j * torch.randn(batch_size, num_ue_antennas, num_subcarriers)
+        }
         weights = torch.ones(num_subcarriers)
         
         loss = loss_fn(predictions, targets, weights)
@@ -270,4 +304,48 @@ class TestPrismLoss:
         assert not torch.isnan(loss)
 
 if __name__ == '__main__':
-    pytest.main([__file__])
+    # Run all tests
+    print("Running Prism Model Tests...")
+    print("=" * 50)
+    
+    # Test AttenuationDecoder
+    print("\n1. Testing AttenuationDecoder...")
+    test_decoder = TestAttenuationDecoder()
+    test_decoder.test_initialization()
+    test_decoder.test_forward_pass()
+    print("✓ AttenuationDecoder tests passed")
+    
+    # Test AttenuationNetwork
+    print("\n2. Testing AttenuationNetwork...")
+    test_atten = TestAttenuationNetwork()
+    test_atten.test_initialization()
+    test_atten.test_forward_pass()
+    print("✓ AttenuationNetwork tests passed")
+    
+    # Test RadianceNetwork
+    print("\n3. Testing RadianceNetwork...")
+    test_rad = TestRadianceNetwork()
+    test_rad.test_initialization()
+    test_rad.test_forward_pass()
+    print("✓ RadianceNetwork tests passed")
+    
+    # Test PrismModel
+    print("\n4. Testing PrismModel...")
+    test_model = TestPrismModel()
+    test_model.test_initialization()
+    test_model.test_forward_pass()
+    test_model.test_mimo_channel()
+    print("✓ PrismModel tests passed")
+    
+    # Test PrismLoss
+    print("\n5. Testing PrismLoss...")
+    test_loss = TestPrismLoss()
+    test_loss.test_initialization()
+    test_loss.test_invalid_loss_type()
+    test_loss.test_mse_loss()
+    test_loss.test_l1_loss()
+    test_loss.test_weighted_loss()
+    print("✓ PrismLoss tests passed")
+    
+    print("\n" + "=" * 50)
+    print("🎉 All tests passed successfully!")

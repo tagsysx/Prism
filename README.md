@@ -11,7 +11,7 @@ Prism extends the NeRF2 architecture to handle wideband RF signals in Orthogonal
 - **Frequency-Aware Processing**: RF Prism Module with C channels for C subcarriers
 - **OFDM-Optimized**: Specifically designed for orthogonal frequency-division multiplexing systems
 - **Independent Subcarrier Training**: Ray marching with independent error back-propagation per subcarrier
-- **CSI Virtual Link Modeling**: Treats M×N_UE uplink channel combinations as virtual links for enhanced channel modeling
+- **CSI Virtual Link Modeling**: Treats $M \times N_{UE}$ uplink channel combinations as virtual links for enhanced channel modeling
 - **Advanced Ray Tracing**: Comprehensive ray tracing with configurable azimuth/elevation sampling and spatial point sampling
 
 ## Architecture
@@ -25,8 +25,8 @@ The core innovation of Prism is the RF Prism Module, a multi-channel MLP that:
 
 ### CSI Virtual Link Architecture
 Prism introduces a novel approach to MIMO channel modeling:
-- **Virtual Link Concept**: Each M×N_UE uplink channel combination is treated as a single virtual link
-- **Enhanced Channel Modeling**: Base station antennas receive M×N_UE uplink signals per antenna
+- **Virtual Link Concept**: Each $M \times N_{UE}$ uplink channel combination is treated as a single virtual link
+- **Enhanced Channel Modeling**: Base station antennas receive $M \times N_{UE}$ uplink signals per antenna
 - **Improved Spatial Resolution**: Better representation of complex multi-path environments
 - **Smart Sampling**: Randomly samples K virtual links per antenna for computational efficiency
 - **Scalable Architecture**: Configurable parameters for different deployment scenarios
@@ -194,7 +194,7 @@ For detailed simulation documentation, see `scripts/simulation/README.md`.
 
 The system supports various OFDM configurations:
 - **Subcarrier Count**: Configurable from 52 (WiFi) to 1024+ (ultra-wideband)
-- **Antenna Configuration**: Flexible N_UE × N_BS MIMO setups
+- **Antenna Configuration**: Flexible $N_{UE} \times N_{BS}$ MIMO setups
 - **Frequency Bands**: Adaptable to different communication standards
 
 ### 5G OFDM Configuration (ofdm-5g-sionna.yml)
@@ -242,14 +242,20 @@ ray_tracing:
 
 ## Advanced Features
 
-### CSI Virtual Link Processing
+### New Network Architecture Design
 
-The CSI virtual link concept treats each M×N_UE uplink channel combination as a single virtual link:
+The redesigned architecture uses a more efficient approach for processing virtual links:
 
-- **Enhanced Channel Modeling**: Each base station antenna receives M×N_UE uplink signals
-- **Improved Spatial Resolution**: Better representation of complex multi-path environments
-- **Scalable Architecture**: Configurable parameters for different deployment scenarios
-- **Performance Optimization**: Efficient processing of large channel matrices
+- **AttenuationNetwork**: Processes spatial positions and outputs a single 128-dimensional feature vector
+- **Attenuation Decoder**: 4-channel MLP (configurable N_UE) that converts 128D features to M×N_UE attenuation factors
+- **RadianceNetwork**: 4 independent channels (configurable N_UE) that process UE position, viewing direction, and 128D features
+- **Output**: N_UE × M complex values representing attenuation and radiation for each virtual link
+
+#### Key Parameters:
+- **$M$**: Number of subcarriers (configurable, e.g., 408 for 5G)
+- **$N_{UE}$**: Number of UE antennas (configurable, e.g., 4)
+- **$N_{BS}$**: Number of BS antennas (configurable, e.g., 64)
+- **Feature Dimension**: 128D (configurable) spatial encoding features
 
 ### Advanced Ray Tracing
 
@@ -263,17 +269,70 @@ The ray tracing system provides comprehensive spatial modeling:
 
 ## Loss Function
 
-The training employs a frequency-aware loss function with CSI virtual link enhancement:
+The training employs a comprehensive loss function that combines multiple components for optimal model performance:
+
+### Primary Loss Components
 
 ```
-L = |h₁ - h̃₁|² + |h₂ - h̃₂|² + ... + |h_C - h̃_C|² + λ_CSI × L_CSI + λ_ray × L_ray
+L_total = L_subcarrier + λ_CSI × L_CSI + λ_ray × L_ray + λ_spatial × L_spatial
 ```
 
-Where:
-- Each subcarrier's error is computed independently
-- L_CSI represents CSI virtual link consistency
-- L_ray represents ray tracing accuracy
-- λ_CSI and λ_ray are weighting parameters
+#### 1. Subcarrier Loss ($L_{subcarrier}$)
+```
+L_{subcarrier} = \sum_{i} |h_i - \tilde{h}_i|^2
+```
+- **Purpose**: Ensures accurate prediction of each subcarrier's channel response
+- **Calculation**: Mean squared error between predicted ($\tilde{h}_i$) and ground truth ($h_i$) for each subcarrier $i$
+- **Coverage**: All $M$ subcarriers across all $N_{UE}$ antennas ($M \times N_{UE}$ total terms)
+
+#### 2. CSI Virtual Link Loss (L_CSI)
+```
+L_CSI = Σⱼₖ |Hⱼₖ - H̃ⱼₖ|²
+```
+- **Purpose**: Maintains consistency between virtual link representations and actual channel responses
+- **Components**:
+  - **Hⱼₖ**: Ground truth virtual link matrix [N_UE × M]
+  - **H̃ⱼₖ**: Predicted virtual link matrix [N_UE × M]
+  - **j**: UE antenna index (1 to N_UE)
+  - **k**: Subcarrier index (1 to M)
+- **Physical Meaning**: Ensures that the predicted attenuation and radiation factors for each UE antenna-subcarrier combination match the actual channel characteristics
+
+#### 3. Ray Tracing Loss (L_ray)
+```
+L_ray = Σₚ |Pₚ - P̃ₚ|² + Σᵣ |Rᵣ - R̃ᵣ|²
+```
+- **Purpose**: Validates spatial consistency and ray propagation accuracy
+- **Components**:
+  - **Path Loss (P)**: Spatial attenuation along ray paths
+  - **Reflection Loss (R)**: Accuracy of reflection point predictions
+  - **p**: Path index, **r**: Reflection index
+- **Physical Meaning**: Ensures that the model's spatial understanding matches ray tracing simulations
+
+#### 4. Spatial Consistency Loss (L_spatial)
+```
+L_spatial = Σᵢⱼ |∇ᵢhⱼ|²
+```
+- **Purpose**: Enforces smooth spatial variations in channel responses
+- **Calculation**: Spatial gradient of channel responses across neighboring positions
+- **Benefits**: Prevents overfitting and ensures physically realistic predictions
+
+### Loss Weighting Parameters
+
+```yaml
+loss:
+  subcarrier_weight: 1.0        # Primary loss weight
+  csi_weight: 0.3               # λ_CSI: CSI virtual link consistency
+  ray_tracing_weight: 0.2       # λ_ray: Ray tracing accuracy
+  spatial_weight: 0.1           # λ_spatial: Spatial consistency
+```
+
+### Loss Function Benefits
+
+1. **Frequency Awareness**: Independent optimization of each subcarrier
+2. **Virtual Link Consistency**: Maintains MIMO channel matrix coherence
+3. **Spatial Accuracy**: Validates ray tracing and spatial predictions
+4. **Physical Realism**: Enforces smooth spatial variations
+5. **Balanced Training**: Configurable weights for different loss components
 
 ## Applications
 
