@@ -37,10 +37,7 @@ python test_sionna_simulation.py
 python sionna_simulation.py
 ```
 
-#### China Mobile n41 Band Simulation
-```bash
-python sionna_simulation_china_mobile_n41.py
-```
+
 
 ## 📋 Available Simulations
 
@@ -52,13 +49,7 @@ python sionna_simulation_china_mobile_n41.py
 - **Coverage**: 500m × 500m
 - **Use Case**: General 5G research and development
 
-### **China Mobile n41 Band Simulation** (`sionna_simulation_china_mobile_n41.py`)
-- **Frequency**: 2.5 GHz (n41 band)
-- **Bandwidth**: 100 MHz
-- **Subcarriers**: 273
-- **Antennas**: 64 BS, 4 UE
-- **Coverage**: 400m × 400m
-- **Use Case**: Urban microcell deployment, China Mobile specifications
+
 
 ## 🔧 Configuration Files
 
@@ -71,11 +62,11 @@ The simulations use configuration files located in the `configs/` directory:
 
 ### **Data Files**
 - **Generic 5G**: `data/sionna_5g_simulation.h5`
-- **n41 Band**: `data/china_mobile_n41_simulation.h5`
+
 
 ### **Visualizations**
 - **Generic 5G**: `data/sionna_simulation_results.png`
-- **n41 Band**: `data/china_mobile_n41_simulation_results.png`
+
 
 ### **Data Structure**
 ```
@@ -85,7 +76,7 @@ Delays:           (100, N)          - Channel delay information
 Positions:        (100, 3)          - UE and BS coordinates
 ```
 
-Where `N` is the number of subcarriers (408 for generic, 273 for n41).
+Where `N` is the number of subcarriers (408 for generic 5G).
 
 ## 🎯 Key Features
 
@@ -97,12 +88,7 @@ Where `N` is the number of subcarriers (408 for generic, 273 for n41).
 - HDF5 data export for easy integration
 - Comprehensive visualization plots
 
-### **n41 Band Specific Features**
-- Optimized for 2.5 GHz frequency characteristics
-- Better building penetration modeling
-- Urban microcell deployment optimization
-- SNR and capacity analysis
-- China Mobile deployment specifications
+
 
 ## 🔄 Integration with Prism
 
@@ -111,8 +97,7 @@ Where `N` is the number of subcarriers (408 for generic, 273 for n41).
 # Train with generic 5G data
 python ../prism_runner.py --mode train --config ../../configs/ofdm-wideband.yml
 
-# Train with n41 band data
-python ../prism_runner.py --mode train --config ../../configs/china-mobile-n41.yml
+
 ```
 
 ### **Data Loading Example**
@@ -157,7 +142,7 @@ with h5py.File('data/sionna_5g_simulation.h5', 'r') as f:
 ## 📚 Documentation
 
 - **`README_SIONNA.md`**: General Sionna simulation overview
-- **`README_CHINA_MOBILE_N41.md`**: n41 band specific details
+
 - **`sionna_simulation_guide.md`**: Comprehensive technical guide
 - **Configuration files**: Detailed parameter explanations
 
