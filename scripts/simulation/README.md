@@ -11,9 +11,7 @@ scripts/simulation/
 ├── install_sionna.sh                  # Automated installation script
 ├── test_sionna_simulation.py          # Test script to verify setup
 ├── sionna_simulation.py               # Generic 5G OFDM simulation
-├── sionna_simulation_china_mobile_n41.py  # China Mobile n41 band simulation
 ├── README_SIONNA.md                   # General Sionna simulation guide
-├── README_CHINA_MOBILE_N41.md         # n41 band specific documentation
 └── sionna_simulation_guide.md         # Detailed technical guide
 ```
 
@@ -37,8 +35,6 @@ python test_sionna_simulation.py
 python sionna_simulation.py
 ```
 
-
-
 ## 📋 Available Simulations
 
 ### **Generic 5G OFDM Simulation** (`sionna_simulation.py`)
@@ -56,13 +52,12 @@ python sionna_simulation.py
 The simulations use configuration files located in the `configs/` directory:
 - `configs/ofdm-wifi.yml` - WiFi-like OFDM configuration
 - `configs/ofdm-wideband.yml` - Ultra-wideband OFDM configuration
-- `configs/china-mobile-n41.yml` - China Mobile n41 band configuration
+- `configs/ofdm-5g-sionna.yml` - 5G OFDM configuration for Sionna
 
 ## 📊 Output Data
 
 ### **Data Files**
 - **Generic 5G**: `data/sionna_5g_simulation.h5`
-
 
 ### **Visualizations**
 - **Generic 5G**: `data/sionna_simulation_results.png`
@@ -87,6 +82,13 @@ Where `N` is the number of subcarriers (408 for generic 5G).
 - OFDM with configurable subcarriers
 - HDF5 data export for easy integration
 - Comprehensive visualization plots
+- GPU-accelerated ray tracing support (experimental)
+
+### **GPU Ray Tracing** 🚧
+- **Status**: Under development (see `TODO.MD`)
+- **Features**: GPU-accelerated RF signal propagation modeling
+- **Integration**: Works with existing Sionna simulations
+- **Testing**: Use `../test_gpu_ray_tracer.py` for validation
 
 
 
@@ -95,9 +97,7 @@ Where `N` is the number of subcarriers (408 for generic 5G).
 ### **Training with Generated Data**
 ```bash
 # Train with generic 5G data
-python ../prism_runner.py --mode train --config ../../configs/ofdm-wideband.yml
-
-
+python ../prism_runner.py --mode train --config ../../configs/ofdm-5g-sionna.yml
 ```
 
 ### **Data Loading Example**
@@ -142,7 +142,6 @@ with h5py.File('data/sionna_5g_simulation.h5', 'r') as f:
 ## 📚 Documentation
 
 - **`README_SIONNA.md`**: General Sionna simulation overview
-
 - **`sionna_simulation_guide.md`**: Comprehensive technical guide
 - **Configuration files**: Detailed parameter explanations
 
