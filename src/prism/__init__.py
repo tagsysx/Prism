@@ -25,6 +25,13 @@ from .dataloader import (
 
 from .renderer import PrismRenderer
 
+# Advanced features
+from .csi_processor import CSIVirtualLinkProcessor
+from .ray_tracer import (
+    AdvancedRayTracer, Environment, Building, Plane, 
+    Ray, RayGenerator, PathTracer
+)
+
 __all__ = [
     # Core models
     'PrismModel',
@@ -40,6 +47,16 @@ __all__ = [
     
     # Visualization
     'PrismRenderer',
+    
+    # Advanced features
+    'CSIVirtualLinkProcessor',
+    'AdvancedRayTracer',
+    'Environment',
+    'Building',
+    'Plane',
+    'Ray',
+    'RayGenerator',
+    'PathTracer',
     
     # Version info
     '__version__',

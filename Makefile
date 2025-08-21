@@ -128,12 +128,18 @@ train-wifi:
 train-wideband:
 	python scripts/prism_runner.py --mode train --config configs/ofdm-wideband.yml --dataset_type ofdm --gpu 0
 
+train-5g:
+	python scripts/prism_runner.py --mode train --config configs/ofdm-5g-sionna.yml --dataset_type ofdm --gpu 0
+
 # Model testing examples
 test-wifi:
 	python scripts/prism_runner.py --mode test --config configs/ofdm-wifi.yml --dataset_type ofdm --gpu 0 --checkpoint checkpoints/ofdm_wifi/best_model.pth
 
 test-wideband:
 	python scripts/prism_runner.py --mode test --config configs/ofdm-wideband.yml --dataset_type ofdm --gpu 0 --checkpoint checkpoints/ofdm_1024/best_model.pth
+
+test-5g:
+	python scripts/prism_runner.py --mode test --config configs/ofdm-5g-sionna.yml --dataset_type ofdm --gpu 0 --checkpoint checkpoints/ofdm_5g/best_model.pth
 
 # Demo
 demo:

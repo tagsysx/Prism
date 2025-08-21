@@ -1,0 +1,378 @@
+# Configuration for Prism: 5G OFDM with CSI Virtual Links and Advanced Ray Tracing
+# This configuration extends NeRF2 for 5G ultra-wideband RF signals with advanced features
+# Updated for Sionna-generated simulation data integration
+
+model:
+  # Model architecture parameters
+  num_subcarriers: 408          # Number of subcarriers (Sionna 5G simulation: 100MHz, 408 subcarriers)
+  num_ue_antennas: 4            # Number of UE antennas (Sionna simulation: 4 UE antennas)
+  num_bs_antennas: 64           # Number of BS antennas (Sionna simulation: 64 BS antennas)
+  position_dim: 3               # 3D position coordinates
+  hidden_dim: 256               # Hidden layer dimension
+  
+  # Network architecture
+  attenuation_network:
+    num_layers: 8
+    activation: 'relu'
+  
+  radiance_network:
+    num_layers: 8
+    activation: 'relu'
+  
+  rf_prism_module:
+    hidden_dim: 256
+    activation: 'relu'
+
+# CSI Virtual Link Processing Configuration
+csi_processing:
+  # Enable CSI virtual link processing
+  virtual_link_enabled: true
+  
+  # Virtual link parameters (Updated for Sionna simulation)
+  m_subcarriers: 408            # Number of subcarriers (Sionna: 100MHz, 408 subcarriers)
+  n_ue_antennas: 4              # Number of UE antennas (Sionna: 4 UE antennas)
+  n_bs_antennas: 64             # Number of BS antennas (Sionna: 64 BS antennas)
+  
+  # Calculated parameters
+  virtual_link_count: 1632      # M × N_UE = 408 × 4
+  uplink_per_bs_antenna: 1632   # M × N_UE uplinks per BS antenna
+  
+  # Processing options
+  enable_interference_cancellation: true
+  enable_channel_estimation: true
+  enable_spatial_filtering: true
+  
+  # Sampling configuration
+  enable_random_sampling: true
+  sample_size: 64              # Number of virtual links to sample (K)
+  sampling_strategy: 'random'  # Sampling strategy: 'random', 'uniform', 'adaptive'
+  
+  # Performance settings
+  batch_processing: true
+  gpu_acceleration: true
+  memory_optimization: true
+  
+  # Advanced CSI features
+  enable_frequency_correlation: true
+  enable_spatial_correlation: true
+  enable_temporal_correlation: true
+
+# Advanced Ray Tracing Configuration
+ray_tracing:
+  # Enable ray tracing system
+  enabled: true
+  
+  # Angular sampling (configurable)
+  azimuth_samples: 36           # Number of azimuth angles (0° to 360°)
+  elevation_samples: 18         # Number of elevation angles (-90° to +90°)
+  
+  # Spatial sampling (configurable)
+  points_per_ray: 64            # Spatial sampling points per ray
+  
+  # Coverage calculations
+  total_angle_combinations: 648 # 36 × 18 = 648 angle combinations
+  total_spatial_points: 41472   # 648 × 64 = 41,472 spatial samples
+  
+  # Resolution settings
+  azimuth_resolution: 10        # 10° between azimuth samples
+  elevation_resolution: 10      # 10° between elevation samples
+  spatial_resolution: 0.1       # 0.1m between spatial points
+  
+  # Physical parameters
+  max_ray_length: 100.0         # Maximum ray length in meters
+  reflection_order: 3           # Maximum reflection order
+  diffraction_enabled: true     # Enable diffraction effects
+  scattering_enabled: true      # Enable scattering effects
+  
+  # Performance options
+  gpu_acceleration: true        # Enable GPU acceleration
+  parallel_processing: true     # Enable parallel processing
+  memory_optimization: true     # Enable memory optimization
+  
+  # Material properties
+  materials:
+    concrete:
+      permittivity: 4.5
+      conductivity: 0.02
+      roughness: 0.01
+    glass:
+      permittivity: 3.8
+      conductivity: 0.0
+      transparency: 0.9
+    metal:
+      permittivity: 1.0
+      conductivity: 1e7
+      roughness: 0.001
+    wood:
+      permittivity: 2.0
+      conductivity: 0.01
+      roughness: 0.05
+    plastic:
+      permittivity: 2.3
+      conductivity: 0.0
+      roughness: 0.02
+
+# Performance Configuration
+performance:
+  # Ray tracing performance
+  max_concurrent_rays: 1000     # Maximum concurrent ray processing
+  batch_size: 256               # Batch size for processing
+  
+  # Memory management
+  max_memory_usage: "8GB"       # Maximum memory usage
+  cache_enabled: true           # Enable result caching
+  
+  # GPU settings
+  gpu_memory_fraction: 0.8      # GPU memory usage fraction
+  mixed_precision: true         # Enable mixed precision for speed
+  
+  # Processing options
+  parallel_workers: 8           # Number of parallel workers
+  chunk_size: 1024              # Chunk size for large datasets
+  
+  # Optimization settings
+  enable_early_termination: true
+  enable_adaptive_sampling: true
+  enable_dynamic_lod: true      # Level of detail adjustment
+
+data:
+  # Dataset configuration (Updated for Sionna simulation data)
+  data_dir: 'data/sionna_5g_simulation.h5'  # Sionna HDF5 data file
+  data_type: 'sionna_hdf5'     # Data type: Sionna HDF5 format
+  num_samples: 100              # Total number of samples (Sionna: 100 UE positions)
+  
+  # Data split ratios (Updated for 80% train, 20% test)
+  train_ratio: 0.8              # Training set ratio (80%)
+  val_ratio: 0.0                # No validation set (0%)
+  test_ratio: 0.2               # Test set ratio (20%)
+  
+  # Data parameters (must match model config and Sionna simulation)
+  num_subcarriers: 408          # Must match model config (Sionna: 408 subcarriers)
+  num_ue_antennas: 4            # Must match model config (Sionna: 4 UE antennas)
+  num_bs_antennas: 64           # Must match model config (Sionna: 64 BS antennas)
+  position_dim: 3               # Must match model config
+  
+  # Data loading
+  num_workers: 8                # Number of data loading workers
+  pin_memory: true              # Pin memory for faster GPU transfer
+  
+  # Advanced data features
+  enable_data_augmentation: true
+  enable_noise_injection: true
+  enable_frequency_shift: true
+
+training:
+  # Training parameters
+  num_epochs: 1000              # Number of training epochs
+  batch_size: 64                # Batch size
+  learning_rate: 0.001          # Learning rate
+  weight_decay: 0.00001         # Weight decay
+  
+  # Learning rate scheduling
+  lr_step_size: 200             # Step size for LR scheduler
+  lr_gamma: 0.9                 # Gamma for LR scheduler
+  
+  # Optimization
+  optimizer: 'adam'              # Optimizer type
+  gradient_clip: 1.0            # Gradient clipping value
+  
+  # Checkpointing
+  save_freq: 10                 # Save checkpoint every N epochs
+  checkpoint_dir: 'checkpoints/ofdm_5g'  # Checkpoint directory
+  
+  # Early stopping
+  patience: 100                 # Early stopping patience
+  min_delta: 0.000001          # Minimum improvement for early stopping
+  
+  # Advanced training features
+  enable_curriculum_learning: true
+  enable_adaptive_batch_size: true
+  enable_mixed_precision: true
+
+loss:
+  # Loss function configuration
+  loss_type: 'mse'              # Loss type (mse, l1)
+  
+  # Subcarrier-specific loss weights (optional)
+  subcarrier_weights: null      # Weights for each subcarrier
+  
+  # Frequency-aware loss
+  frequency_weighting: true     # Enable frequency-dependent weighting
+  low_freq_weight: 1.0         # Weight for low-frequency subcarriers
+  high_freq_weight: 1.2        # Weight for high-frequency subcarriers
+  
+  # Advanced loss components
+  csi_loss_weight: 0.3          # Weight for CSI virtual link loss
+  ray_tracing_loss_weight: 0.2  # Weight for ray tracing loss
+  spatial_consistency_weight: 0.1  # Weight for spatial consistency
+  
+  # Loss balancing
+  enable_loss_balancing: true
+  adaptive_weight_adjustment: true
+
+validation:
+  # Validation parameters
+  val_freq: 10                  # Validate every N epochs
+  save_best: true               # Save best model based on validation
+  
+  # Metrics to track
+  metrics: ['mse', 'mae', 'rmse', 'csi_accuracy', 'ray_tracing_accuracy']
+  
+  # Advanced validation
+  enable_cross_validation: true
+  enable_ensemble_validation: true
+
+testing:
+  # Testing parameters
+  batch_size: 128               # Test batch size
+  save_predictions: true        # Save model predictions
+  output_dir: 'results/ofdm_5g' # Output directory for results
+  
+  # Analysis options
+  analyze_subcarriers: true     # Analyze performance per subcarrier
+  create_visualizations: true   # Create visualization plots
+  save_animations: true         # Save animated visualizations
+  
+  # Advanced analysis
+  enable_spatial_analysis: true
+  enable_frequency_analysis: true
+  enable_temporal_analysis: true
+  
+  # Performance benchmarking
+  benchmark_ray_tracing: true
+  benchmark_csi_processing: true
+  benchmark_memory_usage: true
+
+hardware:
+  # Hardware configuration
+  device: 'cuda'                # Device type (cuda, cpu)
+  gpu_id: 0                     # GPU device ID
+  
+  # GPU optimization
+  cudnn_benchmark: true         # Enable cuDNN benchmark
+  cudnn_deterministic: false    # Disable cuDNN deterministic mode
+  
+  # Memory optimization
+  enable_memory_pinning: true
+  enable_memory_sharing: true
+  
+  # Multi-GPU support
+  multi_gpu: false              # Enable multi-GPU training
+  gpu_ids: [0]                 # List of GPU IDs to use
+
+# Sionna Integration Configuration
+sionna_integration:
+  # Enable Sionna data integration
+  enabled: true
+  
+  # Sionna simulation parameters
+  carrier_frequency: 3.5e9      # 3.5 GHz (mid-band 5G)
+  bandwidth: 100e6              # 100 MHz bandwidth
+  fft_size: 512                 # OFDM FFT size
+  
+  # Channel model configuration
+  channel_model: 'UMi'          # Urban Microcell channel model
+  enable_3d_antenna_patterns: true
+  enable_o2i_modeling: true     # Outdoor-to-Indoor modeling
+  
+  # Data file structure
+  hdf5_structure:
+    channel_responses: 'channel_data/channel_responses'  # Shape: (100, 408, 4, 64)
+    path_losses: 'channel_data/path_losses'             # Shape: (100, 408)
+    delays: 'channel_data/delays'                       # Shape: (100, 408)
+    ue_positions: 'positions/ue_positions'              # Shape: (100, 3)
+    bs_position: 'positions/bs_position'                # Shape: (3,)
+    simulation_config: 'simulation_config'               # Simulation parameters
+  
+  # Data preprocessing
+  enable_frequency_normalization: true
+  enable_spatial_normalization: true
+  enable_channel_estimation: true
+  
+  # Performance optimization
+  enable_gpu_acceleration: true
+  enable_batch_processing: true
+  memory_optimization: true
+
+# Advanced Features Configuration
+advanced_features:
+  # Machine learning integration
+  enable_ml_enhancement: false
+  ml_model_path: 'models/ml_enhancement.pth'
+  
+  # Real-time processing
+  enable_real_time: false
+  real_time_latency: 0.1        # Target latency in seconds
+  
+  # Dynamic environment support
+  enable_dynamic_obstacles: false
+  enable_time_varying: false
+  
+  # Integration capabilities
+  enable_cad_import: false
+  enable_gis_integration: false
+  enable_sensor_fusion: false
+  
+  # Export options
+  enable_3d_export: true
+  enable_animation_export: true
+  enable_report_generation: true
+
+# Logging and Monitoring
+logging:
+  # Log level
+  level: 'INFO'                 # Log level (DEBUG, INFO, WARNING, ERROR)
+  
+  # Log file configuration
+  log_file: 'logs/ofdm_5g.log'
+  max_file_size: '100MB'
+  backup_count: 5
+  
+  # Monitoring
+  enable_tensorboard: true
+  enable_wandb: false           # Weights & Biases integration
+  log_interval: 100             # Log every N iterations
+  
+  # Performance monitoring
+  enable_profiling: true
+  profile_interval: 1000        # Profile every N iterations
+
+# Environment Configuration
+environment:
+  # Simulation environment
+  environment_type: 'indoor'     # Environment type (indoor, outdoor, urban, rural)
+  
+  # Building properties
+  building_height: 20.0         # Building height in meters
+  building_material: 'concrete' # Default building material
+  
+  # Atmospheric conditions
+  temperature: 20.0             # Temperature in Celsius
+  humidity: 50.0                # Humidity percentage
+  pressure: 1013.25             # Atmospheric pressure in hPa
+  
+  # Weather effects
+  enable_weather_effects: false
+  weather_condition: 'clear'    # Weather condition
+  
+  # Time of day
+  enable_time_of_day: false
+  time_of_day: 'day'            # Time of day (day, night, dawn, dusk)
+
+# Calibration and Validation
+calibration:
+  # System calibration
+  enable_calibration: true
+  calibration_interval: 1000    # Calibrate every N iterations
+  
+  # Reference measurements
+  reference_data_path: 'data/calibration/reference_measurements.csv'
+  
+  # Calibration parameters
+  frequency_calibration: true
+  spatial_calibration: true
+  temporal_calibration: true
+  
+  # Validation metrics
+  calibration_threshold: 0.95   # Minimum calibration accuracy
+  enable_auto_calibration: true

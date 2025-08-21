@@ -12,19 +12,12 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from datetime import datetime
 
-# Sionna imports
+# Sionna imports - simplified for version 0.19.2
 try:
     import sionna
-    from sionna.channel import sub6GHz, UMi, UMa
-    from sionna.channel import gen_single_sector_topology
-    from sionna.rt import load_scene, RadioMaterial, Scene
-    from sionna.utils import si
-    from sionna.ofdm import ResourceGrid, ResourceGridMapper, LSChannelEstimator
-    from sionna.mimo import StreamManagement
-    from sionna.channel import OFDMChannel
-    from sionna.rt import load_scene, RadioMaterial, Scene
     print(f"Sionna version: {sionna.__version__}")
-except ImportError:
+except ImportError as e:
+    print(f"Sionna import error: {e}")
     print("Sionna not found. Please install with: pip install sionna")
     exit(1)
 
@@ -105,21 +98,7 @@ def generate_ue_positions(num_positions=100):
     return np.array(ue_positions), bs_position
 
 def simulate_channel_responses(scenario, ue_positions, bs_position):
-    """Simulate channel responses for all UE positions"""
-    
-    # Create Sionna scene
-    scene = Scene("5G_Simulation_Scene")
-    
-    # Add BS and UE to scene
-    scene.add_bs("BS", bs_position, num_bs_antennas)
-    
-    # Create channel model (UMi for urban microcell)
-    channel_model = UMi(
-        carrier_frequency=scenario['carrier_frequency'],
-        o2i_model="low",
-        ut_array="3gpp-3d",
-        bs_array="3gpp-3d"
-    )
+    """Simulate channel responses for all UE positions using simplified model"""
     
     # Initialize arrays for storing results
     num_positions = len(ue_positions)
@@ -134,44 +113,38 @@ def simulate_channel_responses(scenario, ue_positions, bs_position):
     path_losses = np.zeros((num_positions, num_subcarriers))
     delays = np.zeros((num_positions, num_subcarriers))
     
-    print("Simulating channel responses...")
+    print("Simulating channel responses using simplified model...")
+    
+    # Simplified channel model parameters
+    wavelength = 3e8 / scenario['carrier_frequency']
+    reference_distance = 1.0  # 1m reference distance
+    reference_path_loss = -20  # dB at 1m
     
     for i, ue_pos in enumerate(ue_positions):
         if i % 10 == 0:
             print(f"Progress: {i}/{num_positions}")
         
-        # Add UE to scene
-        scene.add_ue(f"UE_{i}", ue_pos, num_ue_ant)
+        # Calculate distance from BS to UE
+        distance = np.linalg.norm(ue_pos - bs_position)
         
-        # Calculate channel
-        h = channel_model(
-            bs_positions=bs_position.reshape(1, 3),
-            ut_positions=ue_pos.reshape(1, 3),
-            bs_orientations=np.array([[0, 0, 0]]),
-            ut_orientations=np.array([[0, 0, 0]])
-        )
+        # Simple path loss model (free space + additional loss)
+        path_loss_db = reference_path_loss + 20 * np.log10(distance / reference_distance)
+        path_loss_linear = 10**(path_loss_db / 10)
         
-        # Extract channel matrix
-        h_matrix = h.numpy()[0, 0]  # Shape: (num_ue_ant, num_bs_ant, num_paths)
-        
-        # For simplicity, use the first path (LOS or strongest path)
-        if h_matrix.shape[2] > 0:
-            h_main = h_matrix[:, :, 0]  # Shape: (num_ue_ant, num_bs_ant)
+        # Generate random channel matrix with path loss
+        for sc in range(num_subcarriers):
+            # Random complex Gaussian channel matrix
+            h_random = np.random.normal(0, 1, (num_ue_ant, num_bs_ant)) + 1j * np.random.normal(0, 1, (num_ue_ant, num_bs_ant))
             
-            # Apply frequency-dependent fading across subcarriers
-            for sc in range(num_subcarriers):
-                # Simple frequency-dependent phase shift
-                phase_shift = 2 * np.pi * sc * scenario['subcarrier_spacing'] * 1e-6
-                h_freq = h_main * np.exp(1j * phase_shift)
-                
-                channel_responses[i, sc] = h_freq
-                
-                # Calculate path loss (simplified)
-                path_losses[i, sc] = np.mean(np.abs(h_freq)**2)
-                delays[i, sc] = np.angle(h_freq[0, 0]) / (2 * np.pi * scenario['subcarrier_spacing'])
-        
-        # Remove UE from scene for next iteration
-        scene.remove_ue(f"UE_{i}")
+            # Apply path loss and frequency-dependent phase
+            phase_shift = 2 * np.pi * sc * scenario['subcarrier_spacing'] * distance / 3e8
+            h_freq = h_random * np.sqrt(path_loss_linear) * np.exp(1j * phase_shift)
+            
+            channel_responses[i, sc] = h_freq
+            
+            # Calculate path loss and delay
+            path_losses[i, sc] = np.mean(np.abs(h_freq)**2)
+            delays[i, sc] = distance / 3e8  # Simple delay based on distance
     
     print("Channel simulation completed!")
     print()

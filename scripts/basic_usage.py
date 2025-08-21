@@ -200,9 +200,11 @@ def main():
     print("=== Basic usage demonstration completed successfully! ===")
     print("\nNext steps:")
     print("1. Train the model using: python prism_runner.py --mode train --config configs/ofdm-wifi.yml")
-    print("2. Test the model using: python prism_runner.py --mode test --config configs/ofdm-wifi.yml --checkpoint path/to/checkpoint")
-    print("3. Explore different configurations in the configs/ directory")
-    print("4. Modify the model architecture in model.py for your specific needs")
+            print("2. Train with 5G features: python prism_runner.py --mode train --config configs/ofdm-5g-sionna.yml")
+    print("3. Test the model using: python prism_runner.py --mode test --config configs/ofdm-wifi.yml --checkpoint path/to/checkpoint")
+            print("4. Test with 5G features: python prism_runner.py --mode test --config configs/ofdm-5g-sionna.yml --checkpoint path/to/checkpoint")
+    print("5. Explore different configurations in the configs/ directory")
+    print("6. Modify the model architecture in model.py for your specific needs")
 
 if __name__ == '__main__':
     main()
