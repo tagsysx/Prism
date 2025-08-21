@@ -38,11 +38,16 @@ Prism/
 │
 ├── 📁 scripts/                       # Executable scripts
 │   ├── 📄 prism_runner.py           # Main training/testing runner
-│   └── 📄 basic_usage.py            # Basic usage demonstration
+│   ├── 📄 basic_usage.py            # Basic usage demonstration
+│   └── 📁 simulation/               # Sionna-based 5G simulations
+│       ├── 📄 sionna_simulation.py  # Generic 5G OFDM simulation
+│       ├── 📄 sionna_simulation_china_mobile_n41.py  # China Mobile n41 band
+│       └── 📄 README.md             # Simulation overview
 │
 ├── 📁 configs/                       # Configuration files
 │   ├── 📄 ofdm-wideband.yml         # 1024 subcarriers configuration
-│   └── 📄 ofdm-wifi.yml             # 52 subcarriers configuration
+│   ├── 📄 ofdm-wifi.yml             # 52 subcarriers configuration
+│   └── 📄 china-mobile-n41.yml      # China Mobile n41 band configuration
 │
 ├── 📁 docs/                          # Documentation
 ├── 📁 tests/                         # Test suite
@@ -102,6 +107,27 @@ python scripts/prism_runner.py --mode test --config configs/ofdm-wideband.yml --
 # Run basic demonstration
 python scripts/basic_usage.py
 ```
+
+### Simulations
+
+```bash
+# Run 5G OFDM simulations with Sionna
+cd scripts/simulation
+
+# Install Sionna dependencies
+./install_sionna.sh
+
+# Test setup
+python test_sionna_simulation.py
+
+# Run generic 5G simulation
+python sionna_simulation.py
+
+# Run China Mobile n41 band simulation
+python sionna_simulation_china_mobile_n41.py
+```
+
+For detailed simulation documentation, see `scripts/simulation/README.md`.
 
 ## Configuration
 

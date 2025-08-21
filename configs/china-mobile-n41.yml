@@ -1,0 +1,203 @@
+# Configuration for Prism: China Mobile n41 Band (2.5 GHz)
+# This configuration is optimized for China Mobile's n41 band deployment
+
+model:
+  # Model architecture parameters for n41 band
+  num_subcarriers: 273          # n41 band: 100 MHz / 30 kHz = 273 subcarriers
+  num_ue_antennas: 4            # Number of UE antennas
+  num_bs_antennas: 64           # Number of BS antennas (Massive MIMO)
+  position_dim: 3               # 3D position coordinates
+  hidden_dim: 256               # Hidden layer dimension
+  
+  # Network architecture optimized for n41 band
+  attenuation_network:
+    num_layers: 8
+    activation: 'relu'
+  
+  radiance_network:
+    num_layers: 8
+    activation: 'relu'
+  
+  rf_prism_module:
+    hidden_dim: 256
+    activation: 'relu'
+
+data:
+  # Dataset configuration for n41 band
+  data_dir: 'data/china_mobile_n41'    # Dataset directory
+  num_samples: 50000            # Total number of samples
+  
+  # Data split ratios
+  train_ratio: 0.7              # Training set ratio
+  val_ratio: 0.15               # Validation set ratio
+  test_ratio: 0.15              # Test set ratio
+  
+  # Data parameters (must match model config)
+  num_subcarriers: 273          # n41 band subcarriers
+  num_ue_antennas: 4            # Must match model config
+  num_bs_antennas: 64           # Must match model config
+  position_dim: 3               # Must match model config
+  
+  # Data loading
+  num_workers: 4                # Number of data loading workers
+  pin_memory: true              # Pin memory for faster GPU transfer
+
+training:
+  # Training parameters for n41 band
+  num_epochs: 1000              # Number of training epochs
+  batch_size: 32                # Batch size (reduced for 64 BS antennas)
+  learning_rate: 0.001          # Learning rate
+  weight_decay: 1e-5            # Weight decay
+  
+  # Learning rate scheduling
+  lr_step_size: 200             # Step size for LR scheduler
+  lr_gamma: 0.9                 # Gamma for LR scheduler
+  
+  # Optimization
+  optimizer: 'adam'              # Optimizer type
+  gradient_clip: 1.0            # Gradient clipping value
+  
+  # Checkpointing
+  save_freq: 50                 # Save checkpoint every N epochs
+  checkpoint_dir: 'checkpoints/china_mobile_n41'  # Checkpoint directory
+  
+  # Early stopping
+  patience: 100                 # Early stopping patience
+  min_delta: 1e-6              # Minimum improvement for early stopping
+
+loss:
+  # Loss function configuration for n41 band
+  loss_type: 'mse'              # Loss type (mse, l1)
+  
+  # Subcarrier-specific loss weights for n41 band
+  subcarrier_weights: null      # Weights for each subcarrier
+  
+  # Frequency-aware loss for n41 band
+  frequency_weighting: true     # Enable frequency-dependent weighting
+  low_freq_weight: 1.0         # Weight for low-frequency subcarriers
+  high_freq_weight: 1.1        # Weight for high-frequency subcarriers (n41 has less variation)
+
+validation:
+  # Validation parameters
+  val_freq: 10                  # Validate every N epochs
+  save_best: true               # Save best model based on validation
+  
+  # Metrics to track for n41 band
+  metrics: ['mse', 'mae', 'rmse', 'snr', 'capacity']  # Validation metrics
+
+testing:
+  # Testing parameters for n41 band
+  batch_size: 64                # Test batch size
+  save_predictions: true        # Save model predictions
+  output_dir: 'results/china_mobile_n41'  # Output directory for results
+  
+  # Analysis options for n41 band
+  analyze_subcarriers: true     # Analyze performance per subcarrier
+  create_visualizations: true   # Create visualization plots
+  save_animations: false        # Save animated visualizations
+
+hardware:
+  # Hardware configuration
+  device: 'cuda'                # Device to use (cuda, cpu)
+  gpu_id: 0                     # GPU device ID
+  mixed_precision: true         # Use mixed precision training
+  
+  # Memory optimization for n41 band
+  gradient_accumulation: 2      # Gradient accumulation steps (increased for 64 BS antennas)
+  memory_efficient: true        # Enable memory-efficient operations
+
+logging:
+  # Logging configuration
+  log_level: 'INFO'             # Logging level
+  log_freq: 100                 # Log every N iterations
+  
+  # TensorBoard logging
+  tensorboard: true             # Enable TensorBoard logging
+  log_dir: 'logs/china_mobile_n41'     # TensorBoard log directory
+  
+  # Progress tracking
+  progress_bar: true            # Show progress bar
+  save_plots: true              # Save training plots
+
+# n41 band specific parameters
+ofdm:
+  # Frequency configuration for n41 band
+  center_frequency: 2.5e9       # Center frequency (2.5 GHz - n41 band)
+  bandwidth: 100e6              # Bandwidth (100 MHz - n41 band standard)
+  subcarrier_spacing: 30e3      # Subcarrier spacing (30 kHz - n41 band standard)
+  
+  # Signal characteristics for n41 band
+  cyclic_prefix: 0.07           # Cyclic prefix ratio (7% for n41)
+  pilot_density: 0.1            # Pilot subcarrier density (10% for n41)
+  
+  # Channel modeling for n41 band
+  multipath_components: 6       # Number of multipath components (urban environment)
+  doppler_shift: 50             # Maximum Doppler shift (Hz) - urban mobility
+  
+  # MIMO configuration for n41 band
+  mimo_type: 'spatial_multiplexing'  # MIMO type
+  precoding: 'zero_forcing'     # Precoding method
+  detection: 'maximum_likelihood'     # Detection method
+
+# China Mobile n41 band specific configuration
+china_mobile_n41:
+  # Band information
+  band: 'n41'
+  operator: 'China Mobile'
+  frequency_range: '2.5 GHz'
+  
+  # Deployment characteristics
+  deployment_type: 'urban_microcell'
+  coverage_area: '400m × 400m'
+  bs_height: 30.0               # Base station height (meters)
+  ue_height_range: [1.5, 2.0]   # UE height range (meters)
+  
+  # n41 band advantages
+  advantages:
+    - 'Better building penetration than 3.5 GHz'
+    - 'Lower path loss in urban environments'
+    - 'Suitable for dense urban deployment'
+    - 'Good balance of coverage and capacity'
+  
+  # Typical use cases
+  use_cases:
+    - 'Urban microcell deployment'
+    - 'Indoor coverage enhancement'
+    - 'High-density user scenarios'
+    - 'Mobile broadband services'
+
+# Environment configuration for n41 band
+environment:
+  # Room/environment parameters for n41 band
+  room_dimensions: [400, 400, 50]  # 400m × 400m × 50m coverage area
+  
+  # Urban environment characteristics
+  building_density: 'high'      # High building density (urban)
+  penetration_loss: 'medium'    # Medium penetration loss (2.5 GHz)
+  multipath_richness: 'high'    # Rich multipath environment
+  
+  # Channel characteristics for n41 band
+  path_loss_exponent: 3.5       # Path loss exponent for urban environment
+  shadowing_std: 8.0            # Shadowing standard deviation (dB)
+  delay_spread: 0.5             # RMS delay spread (microseconds)
+  
+  # Mobility considerations
+  max_velocity: 30.0            # Maximum UE velocity (m/s) - urban scenario
+  doppler_spectrum: 'classic'   # Doppler spectrum type
+
+# Simulation parameters for n41 band
+simulation:
+  # Sionna simulation settings
+  channel_model: 'UMi'          # Urban Microcell channel model
+  antenna_pattern: '3gpp-3d'    # 3GPP 3D antenna patterns
+  o2i_model: 'low'              # Outdoor-to-indoor model
+  
+  # n41 band specific simulation
+  num_ue_positions: 100         # Number of UE positions to simulate
+  min_bs_distance: 30.0         # Minimum distance from BS (meters)
+  max_bs_distance: 200.0        # Maximum distance from BS (meters)
+  
+  # Output configuration
+  save_format: 'hdf5'           # Output file format
+  include_metadata: true        # Include simulation metadata
+  create_visualizations: true   # Generate visualization plots
