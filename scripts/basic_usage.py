@@ -31,7 +31,10 @@ def main():
             'bandwidth': 20e6,
             'subcarrier_spacing': 312.5e3,
             'cyclic_prefix': 0.25,
-            'pilot_density': 0.15
+            'pilot_density': 0.15,
+            'mimo_type': 'spatial_multiplexing',
+            'precoding': 'zero_forcing',
+            'detection': 'maximum_likelihood'
         }
     }
     

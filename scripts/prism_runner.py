@@ -41,17 +41,25 @@ class PrismTrainer:
         self.criterion = PrismLoss(loss_type=config.get('loss_type', 'mse'))
         
         # Create optimizer
+        # Ensure numeric types for optimizer parameters
+        lr = float(config['training']['learning_rate'])
+        weight_decay = float(config['training'].get('weight_decay', 1e-5))
+        
         self.optimizer = optim.Adam(
             self.model.parameters(),
-            lr=config['training']['learning_rate'],
-            weight_decay=config['training'].get('weight_decay', 1e-5)
+            lr=lr,
+            weight_decay=weight_decay
         )
         
         # Learning rate scheduler
+        # Ensure numeric types for scheduler parameters
+        lr_step_size = int(config['training'].get('lr_step_size', 1000))
+        lr_gamma = float(config['training'].get('lr_gamma', 0.9))
+        
         self.scheduler = optim.lr_scheduler.StepLR(
             self.optimizer,
-            step_size=config['training'].get('lr_step_size', 1000),
-            gamma=config['training'].get('lr_gamma', 0.9)
+            step_size=lr_step_size,
+            gamma=lr_gamma
         )
         
         # Training state
