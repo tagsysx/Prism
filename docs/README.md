@@ -5,7 +5,7 @@ Welcome to the documentation for **Prism: Wideband RF Neural Radiance Fields for
 ## 📚 **Documentation Structure**
 
 ### **Getting Started**
-- [Installation Guide](installation.md)
+- [Installation Guide](INSTALLATION.md)
 - [Quick Start Tutorial](quickstart.md)
 - [Basic Usage Examples](examples/basic_usage.md)
 
@@ -27,7 +27,7 @@ Welcome to the documentation for **Prism: Wideband RF Neural Radiance Fields for
 - [Model Extensions](advanced/extensions.md)
 - [Performance Optimization](advanced/optimization.md)
 - [Troubleshooting](advanced/troubleshooting.md)
-- [Technical Specification](technical_specification.md)
+- [Technical Specification](TECHNICAL_SPECIFICATION.md)
 
 ### **Examples & Tutorials**
 - [OFDM Scenarios](examples/ofdm_scenarios.md)
@@ -43,7 +43,7 @@ Welcome to the documentation for **Prism: Wideband RF Neural Radiance Fields for
 
 ## 🚀 **Quick Navigation**
 
-- **New to Prism?** Start with [Installation](installation.md) and [Quick Start](quickstart.md)
+- **New to Prism?** Start with [Installation](INSTALLATION.md) and [Quick Start](quickstart.md)
 - **Want to train a model?** See [Training Guide](user_guide/training.md)
 - **Need help with configuration?** Check [Configuration Guide](user_guide/configuration.md)
 - **Looking for examples?** Browse [Examples & Tutorials](examples/)
