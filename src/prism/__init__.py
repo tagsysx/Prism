@@ -12,18 +12,15 @@ __email__ = "contact@prism-project.org"
 from .ray_tracer import (
     DiscreteRayTracer,
     Ray,
-    RayIntersection,
-    RayPath,
     BaseStation,
-    UserEquipment,
-    Environment,
-    VoxelGrid
+    UserEquipment
 )
 
-from .mlp_direction_sampler import (
-    MLPDirectionSampler,
-    DirectionSamplingConfig
+from .ray_tracer_cuda import (
+    CUDARayTracer
 )
+
+
 
 from .rf_signal_processor import (
     RFSignalProcessor,
@@ -31,11 +28,22 @@ from .rf_signal_processor import (
     SubcarrierSelector
 )
 
-from .utils import (
-    RayTracingUtils,
-    SignalProcessingUtils,
-    GeometryUtils
+from .networks import (
+    AttenuationNetwork,
+    AttenuationDecoder,
+    AntennaEmbeddingCodebook,
+    AntennaNetwork,
+    RadianceNetwork,
+    PrismNetwork,
+    AttenuationNetworkConfig,
+    AttenuationDecoderConfig,
+    AntennaEmbeddingCodebookConfig,
+    AntennaNetworkConfig,
+    RadianceNetworkConfig,
+    PrismNetworkConfig
 )
+
+
 
 __all__ = [
     # Core ray tracing
@@ -45,22 +53,32 @@ __all__ = [
     'RayPath',
     'BaseStation',
     'UserEquipment',
-    'Environment',
-    'VoxelGrid',
     
-    # MLP direction sampling
-    'MLPDirectionSampler',
-    'DirectionSamplingConfig',
+    # CUDA-accelerated ray tracing
+    'CUDARayTracer',
+    
+
     
     # RF signal processing
     'RFSignalProcessor',
     'SignalStrengthCalculator',
     'SubcarrierSelector',
     
-    # Utilities
-    'RayTracingUtils',
-    'SignalProcessingUtils',
-    'GeometryUtils',
+    # Neural networks
+    'AttenuationNetwork',
+    'AttenuationDecoder',
+    'AntennaEmbeddingCodebook',
+    'AntennaNetwork',
+    'RadianceNetwork',
+    'PrismNetwork',
+    'AttenuationNetworkConfig',
+    'AttenuationDecoderConfig',
+    'AntennaEmbeddingCodebookConfig',
+    'AntennaNetworkConfig',
+    'RadianceNetworkConfig',
+    'PrismNetworkConfig',
+    
+
     
     # Version info
     '__version__',

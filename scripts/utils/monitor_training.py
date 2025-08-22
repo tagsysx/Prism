@@ -59,7 +59,7 @@ def monitor_training(interval=30):
                         pass
                     
                     # 检查训练进度
-                    checkpoint_dir = Path('checkpoints/sionna_5g')
+                    checkpoint_dir = Path('../../checkpoints/sionna_5g')
                     if checkpoint_dir.exists():
                         # 检查最佳模型文件
                         best_model = checkpoint_dir / 'best_model.pth'
@@ -84,7 +84,7 @@ def monitor_training(interval=30):
                             print(f"  Latest Epoch Checkpoint: {epoch}")
                     
                     # 检查结果文件
-                    results_file = Path('results/sionna_5g/test_results.pt')
+                    results_file = Path('../../results/sionna_5g/test_results.pt')
                     if results_file.exists():
                         try:
                             results = torch.load(results_file)
@@ -99,7 +99,7 @@ def monitor_training(interval=30):
                 print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] No training process found")
                 
                 # 检查是否训练已完成
-                results_file = Path('results/sionna_5g/test_results.pt')
+                results_file = Path('../../results/sionna_5g/test_results.pt')
                 if results_file.exists():
                     print("  Training appears to be completed!")
                     try:

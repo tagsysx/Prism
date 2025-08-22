@@ -110,7 +110,7 @@ To model the radiation pattern of each base station antenna, we construct an $N_
 - **Easy Extension**: Can add new antennas by extending the codebook
 - **Transfer Learning**: Pre-trained embeddings can be fine-tuned for new scenarios
 
-### 5. AntNetwork
+### 5. AntennaNetwork
 
 **Purpose**: Process antenna embeddings to generate directional importance indicators for efficient directional sampling
 
@@ -163,12 +163,12 @@ model:
   use_antenna_codebook: true    # Enable antenna-specific embeddings
   use_ipe_encoding: true        # Enable IPE encoding for spatial inputs
   
-  # AntNetwork Configuration
-  ant_network:
+  # AntennaNetwork Configuration
+  antenna_network:
     azimuth_divisions: A         # A: Number of azimuthal directions
     elevation_divisions: B      # B: Number of elevation directions
     top_k_directions: K_dir     # K_dir: Top-K important directions to sample
-    hidden_dim: 128             # Hidden layer dimension for AntNetwork
+    hidden_dim: 128             # Hidden layer dimension for AntennaNetwork
     activation: "softmax"       # Activation function for importance normalization
 ```
 
@@ -199,7 +199,7 @@ virtual_links:
    ↓
 7. 64D Antenna Embedding
    ↓
-8. AntNetwork (Shallow Network)
+8. AntennaNetwork (Shallow Network)
    ↓
 9. A × B Directional Importance Matrix
    ↓
@@ -224,7 +224,7 @@ virtual_links:
 5. **Antenna Codebook**: $N_{\text{BS}} \times 64D$ learnable embeddings for antenna-specific radiation patterns
 6. **Codebook Management**: Efficient lookup table implementation with gradient flow to all embeddings
 7. **IPE Encoding**: All spatial inputs (positions and viewing directions) are IPE-encoded for better spatial representation learning
-8. **AntNetwork Integration**: Shallow network for directional importance prediction, enabling efficient top-K directional sampling
+8. **AntennaNetwork Integration**: Shallow network for directional importance prediction, enabling efficient top-K directional sampling
 9. **Directional Sampling**: Reduces computational complexity from $A \times B$ to $K$ important directions per antenna
 10. **Configurable Resolution**: $A$ and $B$ can be adjusted for different angular resolutions based on application requirements
 

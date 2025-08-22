@@ -98,8 +98,8 @@ def read_checkpoint(checkpoint_path):
 def main():
     """主函数"""
     if len(sys.argv) != 2:
-        print("使用方法: python scripts/read_checkpoint.py <检查点文件路径>")
-        print("示例: python scripts/read_checkpoint.py checkpoints/sionna_5g/best_model.pth")
+        print("使用方法: python scripts/utils/read_checkpoint.py <检查点文件路径>")
+        print("示例: python scripts/utils/read_checkpoint.py ../../checkpoints/sionna_5g/best_model.pth")
         return
     
     checkpoint_path = Path(sys.argv[1])

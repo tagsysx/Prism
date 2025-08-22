@@ -1,5 +1,5 @@
-# Configuration for Prism: Discrete Electromagnetic Ray Tracing System
-# This configuration implements the new ray tracing design with MLP-based direction sampling
+# Configuration for Prism: Neural Network-Based Electromagnetic Ray Tracing System
+# This configuration implements the updated ray tracing design with neural networks
 
 # Core Ray Tracing Configuration
 ray_tracing:
@@ -11,7 +11,8 @@ ray_tracing:
   elevation_divisions: 18         # Number of elevation divisions B (-90° to +90°)
   
   # Spatial sampling (configurable)
-  points_per_ray: 64              # Spatial sampling points per ray
+  uniform_samples: 128            # First stage: uniform sampling points per ray
+  resampled_points: 128            # Second stage: importance-based resampled points
   
   # Coverage calculations
   total_directions: 648           # 36 × 18 = 648 angle combinations
@@ -20,39 +21,65 @@ ray_tracing:
   # Resolution settings
   azimuth_resolution: 10          # 10° between azimuth samples
   elevation_resolution: 10        # 10° between elevation samples
-  spatial_resolution: 0.1         # 0.1m between spatial points
   
   # Physical parameters
   max_ray_length: 100.0           # Maximum ray length in meters
-  reflection_order: 3             # Maximum reflection order
-  diffraction_enabled: true       # Enable diffraction effects
-  scattering_enabled: true        # Enable scattering effects
+  scene_size: 200.0               # Scene size D (cubic environment)
   
   # Performance options
   gpu_acceleration: true          # Enable GPU acceleration
-  parallel_processing: true       # Enable parallel processing
-  memory_optimization: true       # Enable memory optimization
+  enable_early_termination: true  # Enable early termination optimization
+  signal_threshold: 1e-6          # Signal strength threshold for early termination
 
-# MLP Direction Sampling Configuration
-mlp_direction_sampling:
-  # Enable MLP-based direction sampling
+# Neural Network Configuration
+neural_networks:
+  # Enable neural network-based processing
   enabled: true
   
-  # MLP architecture
-  input_dim: 128                  # Antenna embedding dimension
-  hidden_dim: 256                 # Hidden layer dimension
-  num_hidden_layers: 2            # Number of hidden layers (2-3 as per design)
-  output_dim: 648                 # A × B directions (36 × 18 = 648)
-  
-  # Training parameters
-  learning_rate: 0.001            # Learning rate for training
-  batch_size: 32                  # Batch size for training
-  num_epochs: 100                 # Number of training epochs
-  dropout_rate: 0.1               # Dropout rate for regularization
-  threshold: 0.5                  # Threshold for binary indicators
-  
-  # Sampling efficiency
-  target_efficiency: 0.3          # Target sampling efficiency (30% of directions)
+  # Attenuation Network
+  attenuation_network:
+    input_dim: 3                  # 3D spatial position
+    hidden_dim: 256               # Hidden layer dimension
+    num_hidden_layers: 8          # Number of hidden layers
+    feature_dim: 128              # Output feature dimension
+    activation: 'relu'            # Activation function
+    use_shortcut: true            # Enable shortcut connections
+    
+  # Attenuation Decoder
+  attenuation_decoder:
+    input_dim: 128                # Feature dimension from AttenuationNetwork
+    hidden_dim: 256               # Hidden layer dimension
+    num_hidden_layers: 3          # Number of hidden layers
+    output_dim: 408               # Number of subcarriers K
+    num_ue: 1000                  # Number of UE devices
+    activation: 'relu'            # Activation function
+    
+  # Antenna Codebook
+  antenna_codebook:
+    num_antennas: 64              # Number of BS antennas N_BS
+    embedding_dim: 64             # Antenna embedding dimension
+    learnable: true               # Learnable embeddings
+    
+  # Antenna Network (MLP-based direction sampling)
+  antenna_network:
+    input_dim: 64                 # Antenna embedding dimension
+    hidden_dim: 128               # Hidden layer dimension
+    num_hidden_layers: 2          # Number of hidden layers
+    output_dim: 648               # A × B directions (36 × 18 = 648)
+    activation: 'relu'            # Activation function
+    dropout_rate: 0.1             # Dropout rate for regularization
+    
+  # Radiance Network
+  radiance_network:
+    ue_pos_dim: 3                 # UE position dimension
+    view_dir_dim: 3               # Viewing direction dimension
+    spatial_feature_dim: 128      # Spatial feature dimension
+    antenna_embedding_dim: 64     # Antenna embedding dimension
+    hidden_dim: 256               # Hidden layer dimension
+    num_hidden_layers: 4          # Number of hidden layers
+    output_dim: 408               # Number of subcarriers K
+    num_ue: 1000                  # Number of UE devices
+    activation: 'relu'            # Activation function
 
 # RF Signal Processing Configuration
 rf_signal_processing:
@@ -78,7 +105,7 @@ base_station:
   # Default configuration
   default_position: [0.0, 0.0, 0.0]  # Base station at origin
   num_antennas: 64                     # Number of BS antennas
-  antenna_embedding_dim: 128           # Antenna embedding dimension
+  antenna_embedding_dim: 64            # Antenna embedding dimension
   
   # Antenna properties
   antenna_type: 'mimo'                 # MIMO antenna configuration
@@ -94,34 +121,19 @@ user_equipment:
   position_range: [-100.0, 100.0]      # UE position range in meters
   height_range: [1.0, 2.0]             # UE height range in meters
 
-# Environment Configuration
-environment:
-  # Voxel grid configuration
-  voxel_grid_size: [200, 200, 50]     # Grid dimensions (nx, ny, nz)
-  voxel_size: 1.0                      # Voxel size in meters
+# Importance Sampling Configuration
+importance_sampling:
+  # Enable importance-based sampling
+  enabled: true
   
-  # Material properties
-  materials:
-    concrete:
-      permittivity: 4.5
-      conductivity: 0.02
-      attenuation_coeff: 0.1
-    glass:
-      permittivity: 3.8
-      conductivity: 0.0
-      attenuation_coeff: 0.05
-    metal:
-      permittivity: 1.0
-      conductivity: 1e7
-      attenuation_coeff: 0.8
-    wood:
-      permittivity: 2.0
-      conductivity: 0.01
-      attenuation_coeff: 0.08
-    plastic:
-      permittivity: 2.3
-      conductivity: 0.0
-      attenuation_coeff: 0.06
+  # Sampling parameters
+  power_factor: 2.0                # Power factor for weight calculation
+  min_weights: 1e-6                # Minimum weight threshold
+  normalize_weights: true          # Normalize importance weights
+  
+  # Resampling parameters
+  resampling_method: 'multinomial' # Resampling method
+  replacement: true                 # Allow replacement during resampling
 
 # Performance Configuration
 performance:
@@ -148,4 +160,4 @@ output:
   # Logging
   log_level: 'INFO'                    # Logging level
   enable_progress_bar: true            # Enable progress bars
-  save_training_history: true          # Save MLP training history
+  save_training_history: true          # Save neural network training history
