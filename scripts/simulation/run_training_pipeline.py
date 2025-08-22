@@ -4,7 +4,7 @@ Complete Training Pipeline for Prism Network
 
 This script runs the complete training pipeline:
 1. Prepare data (split into train/test sets)
-2. Train the Prism network
+2. Train the Prism network using TrainingInterface
 3. Test the trained model
 4. Generate comprehensive results
 
@@ -33,7 +33,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class TrainingPipeline:
-    """Complete training pipeline for Prism network"""
+    """Complete training pipeline for Prism network using TrainingInterface"""
     
     def __init__(self, config_path: str, data_path: str, output_dir: str):
         """Initialize the training pipeline"""
@@ -103,17 +103,17 @@ class TrainingPipeline:
             raise
     
     def train_model(self):
-        """Step 2: Train the Prism network"""
+        """Step 2: Train the Prism network using TrainingInterface"""
         logger.info("=" * 60)
-        logger.info("STEP 2: Training Prism network")
+        logger.info("STEP 2: Training Prism network with TrainingInterface")
         logger.info("=" * 60)
         
         # Check if there's a latest checkpoint to resume from
-        latest_checkpoint = self.training_dir / 'latest_checkpoint.pt'
+        latest_checkpoint = self.training_dir / 'checkpoints' / 'latest_checkpoint.pt'
         resume_arg = []
         if latest_checkpoint.exists():
             resume_arg = ['--resume', str(latest_checkpoint)]
-            logger.info(f"Found checkpoint to resume from: {latest_checkpoint}")
+            logger.info(f"Found TrainingInterface checkpoint to resume from: {latest_checkpoint}")
         
         cmd = [
             sys.executable, 'scripts/simulation/train_prism.py',
@@ -122,7 +122,7 @@ class TrainingPipeline:
             '--output', str(self.training_dir)
         ] + resume_arg
         
-        logger.info(f"Running training: {' '.join(cmd)}")
+        logger.info(f"Running training with TrainingInterface: {' '.join(cmd)}")
         
         try:
             # Run training (this may take a long time)
@@ -130,24 +130,25 @@ class TrainingPipeline:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             training_time = time.time() - start_time
             
-            logger.info("Training completed successfully")
+            logger.info("Training with TrainingInterface completed successfully")
             logger.info(f"Training time: {training_time/3600:.2f} hours")
             logger.info(f"Output: {result.stdout}")
             
-            # Find the best model
-            best_model_path = self.training_dir / 'best_model.pt'
+            # Find the best model from TrainingInterface checkpoints
+            checkpoint_dir = self.training_dir / 'checkpoints'
+            best_model_path = checkpoint_dir / 'best_model.pt'
             if best_model_path.exists():
                 self.best_model_path = best_model_path
-                logger.info(f"Best model saved: {self.best_model_path}")
+                logger.info(f"Best model saved by TrainingInterface: {self.best_model_path}")
             else:
                 # Look for the latest checkpoint
-                checkpoints = list(self.training_dir.glob('checkpoint_epoch_*.pt'))
+                checkpoints = list(checkpoint_dir.glob('checkpoint_epoch_*.pt'))
                 if checkpoints:
                     latest_checkpoint = max(checkpoints, key=lambda x: int(x.stem.split('_')[-1]))
                     self.best_model_path = latest_checkpoint
-                    logger.info(f"Using latest checkpoint: {self.best_model_path}")
+                    logger.info(f"Using latest TrainingInterface checkpoint: {self.best_model_path}")
                 else:
-                    raise FileNotFoundError("No trained model found")
+                    raise FileNotFoundError("No trained model found in TrainingInterface checkpoints")
             
         except subprocess.CalledProcessError as e:
             logger.error(f"Training failed: {e}")
@@ -158,9 +159,9 @@ class TrainingPipeline:
             raise
     
     def test_model(self):
-        """Step 3: Test the trained model"""
+        """Step 3: Test the trained model from TrainingInterface"""
         logger.info("=" * 60)
-        logger.info("STEP 3: Testing trained model")
+        logger.info("STEP 3: Testing trained model from TrainingInterface")
         logger.info("=" * 60)
         
         cmd = [
@@ -187,16 +188,16 @@ class TrainingPipeline:
             raise
     
     def generate_summary(self):
-        """Step 4: Generate comprehensive summary"""
+        """Step 4: Generate comprehensive summary including TrainingInterface info"""
         logger.info("=" * 60)
-        logger.info("STEP 4: Generating summary report")
+        logger.info("STEP 4: Generating summary report with TrainingInterface details")
         logger.info("=" * 60)
         
         summary_path = self.output_dir / 'training_pipeline_summary.txt'
         
         with open(summary_path, 'w') as f:
-            f.write("Prism Network Training Pipeline Summary\n")
-            f.write("=====================================\n\n")
+            f.write("Prism Network Training Pipeline Summary (TrainingInterface)\n")
+            f.write("==========================================================\n\n")
             
             f.write(f"Pipeline completed at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
             
@@ -210,9 +211,19 @@ class TrainingPipeline:
             f.write(f"  Testing data: {self.test_data_path}\n")
             f.write(f"  Split ratio: 80% training, 20% testing\n\n")
             
-            f.write("Training:\n")
+            f.write("Training with TrainingInterface:\n")
             f.write(f"  Training directory: {self.training_dir}\n")
-            f.write(f"  Best model: {self.best_model_path}\n\n")
+            f.write(f"  TrainingInterface checkpoints: {self.training_dir / 'checkpoints'}\n")
+            f.write(f"  Best model: {self.best_model_path}\n")
+            f.write(f"  Training state files: {self.training_dir / 'training_state_*.pt'}\n\n")
+            
+            f.write("TrainingInterface Features:\n")
+            f.write("  - BS-Centric ray tracing from each BS antenna\n")
+            f.write("  - AntennaNetwork-guided direction selection\n")
+            f.write("  - Antenna-specific subcarrier selection\n")
+            f.write("  - Integrated ray tracer for signal accumulation\n")
+            f.write("  - Automatic checkpoint management\n")
+            f.write("  - Training state tracking and recovery\n\n")
             
             f.write("Testing:\n")
             f.write(f"  Testing directory: {self.testing_dir}\n")
@@ -220,7 +231,8 @@ class TrainingPipeline:
             f.write(f"  Predictions: {self.testing_dir / 'predictions.npz'}\n\n")
             
             f.write("Generated Files:\n")
-            f.write("  - Training checkpoints and logs\n")
+            f.write("  - TrainingInterface checkpoints and logs\n")
+            f.write("  - Training state files (optimizer, scheduler)\n")
             f.write("  - Training curves and metrics\n")
             f.write("  - Test results and visualizations\n")
             f.write("  - Model predictions\n")
@@ -231,19 +243,20 @@ class TrainingPipeline:
             f.write("  2. Analyze test results and visualizations\n")
             f.write("  3. Fine-tune hyperparameters if needed\n")
             f.write("  4. Deploy model for inference\n")
+            f.write("  5. Use TrainingInterface for inference tasks\n")
         
         logger.info(f"Summary report generated: {summary_path}")
     
     def run_pipeline(self):
-        """Run the complete training pipeline"""
-        logger.info("Starting Prism Network Training Pipeline")
+        """Run the complete training pipeline with TrainingInterface"""
+        logger.info("Starting Prism Network Training Pipeline with TrainingInterface")
         logger.info("=" * 60)
         
         try:
             # Step 1: Prepare data
             self.prepare_data()
             
-            # Step 2: Train model
+            # Step 2: Train model using TrainingInterface
             self.train_model()
             
             # Step 3: Test model
@@ -253,9 +266,10 @@ class TrainingPipeline:
             self.generate_summary()
             
             logger.info("=" * 60)
-            logger.info("TRAINING PIPELINE COMPLETED SUCCESSFULLY!")
+            logger.info("TRAINING PIPELINE WITH TRAININGINTERFACE COMPLETED SUCCESSFULLY!")
             logger.info("=" * 60)
             logger.info(f"All results saved to: {self.output_dir}")
+            logger.info(f"TrainingInterface checkpoints: {self.training_dir / 'checkpoints'}")
             
         except Exception as e:
             logger.error("=" * 60)
@@ -266,7 +280,7 @@ class TrainingPipeline:
 
 def main():
     """Main function"""
-    parser = argparse.ArgumentParser(description='Run complete Prism training pipeline')
+    parser = argparse.ArgumentParser(description='Run complete Prism training pipeline with TrainingInterface')
     parser.add_argument('--config', type=str, default='configs/ofdm-5g-sionna.yml',
                        help='Path to configuration file')
     parser.add_argument('--data', type=str, required=True,

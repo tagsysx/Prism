@@ -28,6 +28,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent / "src"))
 
 from prism.networks.prism_network import PrismNetwork
 from prism.ray_tracer import DiscreteRayTracer
+from prism.training_interface import PrismTrainingInterface
 
 # Configure logging
 logging.basicConfig(
@@ -41,7 +42,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class PrismTester:
-    """Main tester class for Prism network"""
+    """Main tester class for Prism network using TrainingInterface"""
     
     def __init__(self, config_path: str, model_path: str, data_path: str, output_dir: str):
         """Initialize tester with configuration, model, and data paths"""
@@ -70,8 +71,82 @@ class PrismTester:
         return config
     
     def _load_model(self):
-        """Load trained Prism network model"""
-        logger.info(f"Loading model from {self.model_path}")
+        """Load trained Prism network model from TrainingInterface checkpoint"""
+        logger.info(f"Loading TrainingInterface model from {self.model_path}")
+        
+        # Check if this is a TrainingInterface checkpoint
+        if 'checkpoint_epoch_' in str(self.model_path) or 'best_model.pt' in str(self.model_path) or 'latest_checkpoint.pt' in str(self.model_path):
+            # This is a TrainingInterface checkpoint
+            self._load_training_interface_checkpoint()
+        else:
+            # This is a legacy checkpoint, try to load it
+            self._load_legacy_checkpoint()
+    
+    def _load_training_interface_checkpoint(self):
+        """Load TrainingInterface checkpoint"""
+        try:
+            # Create PrismNetwork and DiscreteRayTracer first
+            nn_config = self.config['neural_networks']
+            rt_config = self.config['ray_tracing']
+            
+            self.prism_network = PrismNetwork(
+                num_subcarriers=nn_config['attenuation_decoder']['output_dim'],
+                num_ue_antennas=nn_config['attenuation_decoder']['num_ue'],
+                num_bs_antennas=nn_config['antenna_codebook']['num_antennas'],
+                position_dim=nn_config['attenuation_network']['input_dim'],
+                hidden_dim=nn_config['attenuation_network']['hidden_dim'],
+                feature_dim=nn_config['attenuation_network']['feature_dim'],
+                antenna_embedding_dim=nn_config['antenna_codebook']['embedding_dim'],
+                use_antenna_codebook=nn_config['antenna_codebook']['learnable'],
+                use_ipe_encoding=True,
+                azimuth_divisions=rt_config['azimuth_divisions'],
+                elevation_divisions=rt_config['elevation_divisions'],
+                top_k_directions=32,
+                complex_output=True
+            )
+            
+            self.ray_tracer = DiscreteRayTracer(
+                scene_bounds=rt_config.get('scene_bounds', None),
+                angular_divisions=(rt_config['azimuth_divisions'], rt_config['elevation_divisions']),
+                spatial_sampling=rt_config.get('spatial_sampling', 64),
+                gpu_acceleration=rt_config.get('gpu_acceleration', True)
+            )
+            
+            # Create TrainingInterface
+            self.model = PrismTrainingInterface(
+                prism_network=self.prism_network,
+                ray_tracer=self.ray_tracer,
+                num_sampling_points=rt_config.get('spatial_sampling', 64),
+                scene_bounds=rt_config.get('scene_bounds', None),
+                subcarrier_sampling_ratio=rt_config.get('subcarrier_sampling_ratio', 0.3),
+                checkpoint_dir=str(self.output_dir / 'temp_checkpoints')
+            )
+            
+            # Load the checkpoint
+            self.model.load_checkpoint(self.model_path)
+            self.model = self.model.to(self.device)
+            self.model.eval()
+            
+            # Print model info
+            total_params = sum(p.numel() for p in self.model.parameters())
+            logger.info(f"TrainingInterface model loaded with {total_params:,} parameters")
+            
+            # Store checkpoint info from TrainingInterface
+            training_info = self.model.get_training_info()
+            self.checkpoint_info = {
+                'epoch': training_info['current_epoch'],
+                'best_loss': training_info['best_loss'],
+                'training_history_length': training_info['training_history_length']
+            }
+            logger.info(f"TrainingInterface checkpoint info: {self.checkpoint_info}")
+            
+        except Exception as e:
+            logger.error(f"Failed to load TrainingInterface checkpoint: {e}")
+            raise
+    
+    def _load_legacy_checkpoint(self):
+        """Load legacy checkpoint format"""
+        logger.info("Attempting to load legacy checkpoint format...")
         
         # Load checkpoint
         checkpoint = torch.load(self.model_path, map_location=self.device)
@@ -109,7 +184,7 @@ class PrismTester:
         
         # Print model info
         total_params = sum(p.numel() for p in self.model.parameters())
-        logger.info(f"Model loaded with {total_params:,} parameters")
+        logger.info(f"Legacy model loaded with {total_params:,} parameters")
         
         # Store checkpoint info
         self.checkpoint_info = {
@@ -117,7 +192,7 @@ class PrismTester:
             'train_loss': checkpoint.get('train_loss', 'Unknown'),
             'val_loss': checkpoint.get('val_loss', 'Unknown')
         }
-        logger.info(f"Checkpoint info: {self.checkpoint_info}")
+        logger.info(f"Legacy checkpoint info: {self.checkpoint_info}")
         
     def _load_data(self):
         """Load test data from HDF5 file"""
@@ -136,6 +211,16 @@ class PrismTester:
             self.bs_position = torch.tensor(f['bs_position'][:], dtype=torch.float32)
             logger.info(f"BS position: {self.bs_position}")
             
+            # Load antenna indices if available
+            if 'antenna_indices' in f:
+                self.antenna_indices = torch.tensor(f['antenna_indices'][:], dtype=torch.long)
+                logger.info(f"Loaded antenna indices with shape: {self.antenna_indices.shape}")
+            else:
+                # Create default antenna indices if not available
+                num_bs_antennas = self.csi_target.shape[1] if len(self.csi_target.shape) > 1 else 1
+                self.antenna_indices = torch.arange(num_bs_antennas)
+                logger.info(f"Created default antenna indices: {self.antenna_indices}")
+            
             # Load simulation parameters
             self.sim_params = dict(f['simulation_params'].attrs)
             logger.info(f"Simulation parameters: {self.sim_params}")
@@ -144,9 +229,10 @@ class PrismTester:
         self.ue_positions = self.ue_positions.to(self.device)
         self.csi_target = self.csi_target.to(self.device)
         self.bs_position = self.bs_position.to(self.device)
+        self.antenna_indices = self.antenna_indices.to(self.device)
         
     def _evaluate_model(self) -> Dict[str, float]:
-        """Evaluate model performance on test data"""
+        """Evaluate model performance on test data using TrainingInterface"""
         logger.info("Evaluating model performance...")
         
         self.model.eval()
@@ -160,45 +246,72 @@ class PrismTester:
         with torch.no_grad():
             for i in range(0, num_samples, batch_size):
                 end_idx = min(i + batch_size, num_samples)
-                batch_pos = self.ue_positions[i:end_idx]
-                batch_target = self.csi_target[i:end_idx]
+                batch_ue_pos = self.ue_positions[i:end_idx]
+                batch_bs_pos = self.bs_position.expand(end_idx - i, -1)
+                batch_antenna_idx = self.antenna_indices.expand(end_idx - i, -1)
+                batch_csi_target = self.csi_target[i:end_idx]
                 
                 try:
-                    # Forward pass
-                    batch_pred = self.model(batch_pos)
-                    
-                    # Store predictions
-                    predictions.append(batch_pred.cpu())
-                    
-                    # Calculate loss
-                    if batch_pred.dtype == torch.complex64:
-                        pred_real = torch.cat([batch_pred.real, batch_pred.imag], dim=-1)
-                        target_real = torch.cat([batch_target.real, batch_target.imag], dim=-1)
-                        loss = nn.MSELoss()(pred_real, target_real)
+                    if hasattr(self.model, 'forward') and callable(getattr(self.model, 'forward')):
+                        # This is a TrainingInterface
+                        outputs = self.model(
+                            ue_positions=batch_ue_pos,
+                            bs_position=batch_bs_pos,
+                            antenna_indices=batch_antenna_idx
+                        )
+                        batch_predictions = outputs['csi_predictions']
                     else:
-                        loss = nn.MSELoss()(batch_pred, batch_target)
+                        # This is a legacy PrismNetwork
+                        batch_predictions = self.model(batch_ue_pos)
                     
-                    losses.append(loss.item())
+                    # Compute loss
+                    if hasattr(self.model, 'compute_loss'):
+                        # TrainingInterface loss computation
+                        batch_loss = self.model.compute_loss(batch_predictions, batch_csi_target, nn.MSELoss())
+                    else:
+                        # Legacy loss computation
+                        if batch_predictions.dtype == torch.complex64:
+                            batch_predictions_real = torch.cat([batch_predictions.real, batch_predictions.imag], dim=-1)
+                            batch_csi_target_real = torch.cat([batch_csi_target.real, batch_csi_target.imag], dim=-1)
+                            batch_loss = nn.MSELoss()(batch_predictions_real, batch_csi_target_real)
+                        else:
+                            batch_loss = nn.MSELoss()(batch_predictions, batch_csi_target)
+                    
+                    predictions.append(batch_predictions.cpu())
+                    losses.append(batch_loss.item())
                     
                 except Exception as e:
                     logger.error(f"Error in batch {i//batch_size}: {e}")
                     continue
         
-        # Concatenate predictions
-        self.csi_pred = torch.cat(predictions, dim=0)
+        if not predictions:
+            raise RuntimeError("No successful predictions made")
         
-        # Calculate metrics
-        metrics = self._calculate_metrics()
+        # Concatenate all predictions
+        self.predictions = torch.cat(predictions, dim=0)
+        avg_loss = np.mean(losses)
         
-        logger.info(f"Evaluation completed. Average loss: {np.mean(losses):.6f}")
-        return metrics
+        logger.info(f"Evaluation completed. Average loss: {avg_loss:.6f}")
+        return {'avg_loss': avg_loss}
     
-    def _calculate_metrics(self) -> Dict[str, float]:
-        """Calculate various performance metrics"""
-        logger.info("Calculating performance metrics...")
+    def _compute_metrics(self) -> Dict[str, float]:
+        """Compute comprehensive performance metrics"""
+        logger.info("Computing performance metrics...")
         
-        # Convert to numpy for calculations
-        pred_np = self.csi_pred.numpy()
+        # Ensure predictions and targets have the same shape
+        if self.predictions.shape != self.csi_target.shape:
+            logger.warning(f"Shape mismatch: predictions {self.predictions.shape} vs targets {self.csi_target.shape}")
+            # Try to reshape if possible
+            if len(self.predictions.shape) == len(self.csi_target.shape):
+                min_shape = tuple(min(p, t) for p, t in zip(self.predictions.shape, self.csi_target.shape))
+                self.predictions = self.predictions[:min_shape[0], :min_shape[1], :min_shape[2], :min_shape[3]]
+                self.csi_target = self.csi_target[:min_shape[0], :min_shape[1], :min_shape[2], :min_shape[3]]
+            else:
+                logger.error("Cannot reshape predictions to match targets")
+                return {}
+        
+        # Convert to numpy for metric computation
+        pred_np = self.predictions.cpu().numpy()
         target_np = self.csi_target.cpu().numpy()
         
         # Complex MSE
@@ -207,25 +320,27 @@ class PrismTester:
         # Magnitude error
         pred_magnitude = np.abs(pred_np)
         target_magnitude = np.abs(target_np)
-        magnitude_error = np.mean(np.abs(pred_magnitude - target_magnitude))
+        magnitude_error = np.mean(np.abs(pred_magnitude - target_magnitude) ** 2)
         
-        # Phase error (wrapped to [-π, π])
+        # Phase error
         pred_phase = np.angle(pred_np)
         target_phase = np.angle(target_np)
-        phase_diff = pred_phase - target_phase
-        phase_diff = np.angle(np.exp(1j * phase_diff))  # Wrap to [-π, π]
-        phase_error = np.mean(np.abs(phase_diff))
+        phase_error = np.mean(np.abs(pred_phase - target_phase) ** 2)
         
         # Correlation coefficient
-        correlation = np.corrcoef(pred_np.flatten(), target_np.flatten())[0, 1]
+        pred_flat = pred_np.flatten()
+        target_flat = target_np.flatten()
+        correlation = np.corrcoef(pred_flat.real, target_flat.real)[0, 1]
+        if np.isnan(correlation):
+            correlation = 0.0
         
-        # Normalized Mean Square Error (NMSE)
-        nmse = complex_mse / np.mean(np.abs(target_np) ** 2)
+        # NMSE (Normalized Mean Square Error)
+        nmse = complex_mse / (np.mean(np.abs(target_np) ** 2) + 1e-8)
         
-        # Signal-to-Noise Ratio (SNR)
+        # SNR (Signal-to-Noise Ratio)
         signal_power = np.mean(np.abs(target_np) ** 2)
         noise_power = complex_mse
-        snr_db = 10 * np.log10(signal_power / noise_power) if noise_power > 0 else float('inf')
+        snr = 10 * np.log10(signal_power / (noise_power + 1e-8))
         
         metrics = {
             'complex_mse': float(complex_mse),
@@ -233,11 +348,10 @@ class PrismTester:
             'phase_error': float(phase_error),
             'correlation': float(correlation),
             'nmse': float(nmse),
-            'snr_db': float(snr_db)
+            'snr_db': float(snr)
         }
         
-        # Log metrics
-        logger.info("Performance Metrics:")
+        logger.info("Metrics computed:")
         for metric, value in metrics.items():
             logger.info(f"  {metric}: {value:.6f}")
         
@@ -275,7 +389,7 @@ class PrismTester:
             row, col = i // 2, i % 2
             ax = axes[row, col]
             
-            pred_mag = np.abs(self.csi_pred[idx].numpy())
+            pred_mag = np.abs(self.predictions[idx].numpy())
             target_mag = np.abs(self.csi_target[idx].cpu().numpy())
             
             subcarriers = range(len(pred_mag))
@@ -305,7 +419,7 @@ class PrismTester:
             row, col = i // 2, i % 2
             ax = axes[row, col]
             
-            pred_phase = np.angle(self.csi_pred[idx].numpy())
+            pred_phase = np.angle(self.predictions[idx].numpy())
             target_phase = np.angle(self.csi_target[idx].cpu().numpy())
             
             subcarriers = range(len(pred_phase))
@@ -330,7 +444,7 @@ class PrismTester:
         fig, axes = plt.subplots(1, 2, figsize=(15, 6))
         
         # Magnitude error
-        pred_mag = np.abs(self.csi_pred.numpy())
+        pred_mag = np.abs(self.predictions.numpy())
         target_mag = np.abs(self.csi_target.cpu().numpy())
         mag_error = pred_mag - target_mag
         
@@ -341,7 +455,7 @@ class PrismTester:
         axes[0].grid(True, alpha=0.3)
         
         # Phase error
-        pred_phase = np.angle(self.csi_pred.numpy())
+        pred_phase = np.angle(self.predictions.numpy())
         target_phase = np.angle(self.csi_target.cpu().numpy())
         phase_diff = pred_phase - target_phase
         phase_diff = np.angle(np.exp(1j * phase_diff))  # Wrap to [-π, π]
@@ -364,7 +478,7 @@ class PrismTester:
         fig, axes = plt.subplots(1, 2, figsize=(15, 6))
         
         # Calculate error per UE position
-        pred_np = self.csi_pred.numpy()
+        pred_np = self.predictions.numpy()
         target_np = self.csi_target.cpu().numpy()
         
         # Magnitude error per UE
@@ -409,7 +523,7 @@ class PrismTester:
         """Plot performance across subcarriers"""
         fig, axes = plt.subplots(1, 2, figsize=(15, 6))
         
-        pred_np = self.csi_pred.numpy()
+        pred_np = self.predictions.numpy()
         target_np = self.csi_target.cpu().numpy()
         
         # Calculate error per subcarrier
@@ -462,7 +576,7 @@ class PrismTester:
         np.savez_compressed(
             predictions_path,
             ue_positions=self.ue_positions.cpu().numpy(),
-            csi_predictions=self.csi_pred.numpy(),
+            csi_predictions=self.predictions.numpy(),
             csi_targets=self.csi_target.cpu().numpy(),
             bs_position=self.bs_position.cpu().numpy()
         )

@@ -29,6 +29,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent / "src"))
 
 from prism.networks.prism_network import PrismNetwork
 from prism.ray_tracer import DiscreteRayTracer
+from prism.training_interface import PrismTrainingInterface
 
 # Configure logging
 logging.basicConfig(
@@ -42,7 +43,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class PrismTrainer:
-    """Main trainer class for Prism network"""
+    """Main trainer class for Prism network using TrainingInterface"""
     
     def __init__(self, config_path: str, data_path: str, output_dir: str, resume_from: str = None):
         """Initialize trainer with configuration and data paths"""
@@ -78,11 +79,12 @@ class PrismTrainer:
         return config
     
     def _setup_model(self):
-        """Initialize Prism network model"""
+        """Initialize Prism network model and TrainingInterface"""
         nn_config = self.config['neural_networks']
+        rt_config = self.config['ray_tracing']
         
-        # Create model with configuration from YAML
-        self.model = PrismNetwork(
+        # Create PrismNetwork with configuration from YAML
+        self.prism_network = PrismNetwork(
             num_subcarriers=nn_config['attenuation_decoder']['output_dim'],
             num_ue_antennas=nn_config['attenuation_decoder']['num_ue'],
             num_bs_antennas=nn_config['antenna_codebook']['num_antennas'],
@@ -92,10 +94,28 @@ class PrismTrainer:
             antenna_embedding_dim=nn_config['antenna_codebook']['embedding_dim'],
             use_antenna_codebook=nn_config['antenna_codebook']['learnable'],
             use_ipe_encoding=True,  # Enable IPE encoding for better performance
-            azimuth_divisions=self.config['ray_tracing']['azimuth_divisions'],
-            elevation_divisions=self.config['ray_tracing']['elevation_divisions'],
+            azimuth_divisions=rt_config['azimuth_divisions'],
+            elevation_divisions=rt_config['elevation_divisions'],
             top_k_directions=32,  # Top-K directions for importance sampling
             complex_output=True
+        )
+        
+        # Create DiscreteRayTracer
+        self.ray_tracer = DiscreteRayTracer(
+            scene_bounds=rt_config.get('scene_bounds', None),
+            angular_divisions=(rt_config['azimuth_divisions'], rt_config['elevation_divisions']),
+            spatial_sampling=rt_config.get('spatial_sampling', 64),
+            gpu_acceleration=rt_config.get('gpu_acceleration', True)
+        )
+        
+        # Create PrismTrainingInterface
+        self.model = PrismTrainingInterface(
+            prism_network=self.prism_network,
+            ray_tracer=self.ray_tracer,
+            num_sampling_points=rt_config.get('spatial_sampling', 64),
+            scene_bounds=rt_config.get('scene_bounds', None),
+            subcarrier_sampling_ratio=rt_config.get('subcarrier_sampling_ratio', 0.3),
+            checkpoint_dir=str(self.output_dir / 'checkpoints')
         )
         
         self.model = self.model.to(self.device)
@@ -103,7 +123,7 @@ class PrismTrainer:
         # Print model summary
         total_params = sum(p.numel() for p in self.model.parameters())
         trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        logger.info(f"Model created with {total_params:,} total parameters ({trainable_params:,} trainable)")
+        logger.info(f"TrainingInterface created with {total_params:,} total parameters ({trainable_params:,} trainable)")
         
     def _setup_training(self):
         """Setup training hyperparameters and optimizers"""
@@ -116,7 +136,7 @@ class PrismTrainer:
         # Loss function for complex-valued outputs
         self.criterion = nn.MSELoss()
         
-        # Optimizer
+        # Optimizer - now optimizing the TrainingInterface
         self.optimizer = optim.AdamW(
             self.model.parameters(),
             lr=self.learning_rate,
@@ -151,6 +171,16 @@ class PrismTrainer:
             bs_position = f['bs_position'][:]
             logger.info(f"BS position: {bs_position}")
             
+            # Load antenna indices if available
+            if 'antenna_indices' in f:
+                antenna_indices = f['antenna_indices'][:]
+                logger.info(f"Loaded antenna indices with shape: {antenna_indices.shape}")
+            else:
+                # Create default antenna indices if not available
+                num_bs_antennas = csi_data.shape[1] if len(csi_data.shape) > 1 else 1
+                antenna_indices = np.arange(num_bs_antennas)
+                logger.info(f"Created default antenna indices: {antenna_indices}")
+            
             # Load simulation parameters
             params = dict(f['simulation_params'].attrs)
             logger.info(f"Simulation parameters: {params}")
@@ -164,9 +194,15 @@ class PrismTrainer:
         self.ue_positions = torch.tensor(ue_positions, dtype=torch.float32)
         self.csi_data = torch.tensor(csi_data, dtype=torch.complex64)
         self.bs_position = torch.tensor(bs_position, dtype=torch.float32)
+        self.antenna_indices = torch.tensor(antenna_indices, dtype=torch.long)
         
-        # Create dataset
-        self.dataset = TensorDataset(self.ue_positions, self.csi_data)
+        # Create dataset with all required data
+        self.dataset = TensorDataset(
+            self.ue_positions, 
+            self.bs_position.expand(len(ue_positions), -1),
+            self.antenna_indices.expand(len(ue_positions), -1),
+            self.csi_data
+        )
         self.dataloader = DataLoader(
             self.dataset,
             batch_size=self.batch_size,
@@ -178,30 +214,33 @@ class PrismTrainer:
         logger.info(f"Training data loaded: {len(self.dataset)} samples, batch_size={self.batch_size}")
         
     def _train_epoch(self, epoch: int):
-        """Train for one epoch"""
+        """Train for one epoch using TrainingInterface"""
         self.model.train()
         total_loss = 0.0
         num_batches = 0
         
-        for batch_idx, (ue_pos, csi_target) in enumerate(self.dataloader):
+        for batch_idx, (ue_pos, bs_pos, antenna_idx, csi_target) in enumerate(self.dataloader):
             ue_pos = ue_pos.to(self.device)
+            bs_pos = bs_pos.to(self.device)
+            antenna_idx = antenna_idx.to(self.device)
             csi_target = csi_target.to(self.device)
             
             # Forward pass
             self.optimizer.zero_grad()
             
             try:
-                # Get model output
-                csi_pred = self.model(ue_pos)
+                # Use TrainingInterface forward pass
+                outputs = self.model(
+                    ue_positions=ue_pos,
+                    bs_position=bs_pos,
+                    antenna_indices=antenna_idx
+                )
                 
-                # Compute loss (handle complex numbers)
-                if csi_pred.dtype == torch.complex64:
-                    # Convert complex to real for loss calculation
-                    csi_pred_real = torch.cat([csi_pred.real, csi_pred.imag], dim=-1)
-                    csi_target_real = torch.cat([csi_target.real, csi_target.imag], dim=-1)
-                    loss = self.criterion(csi_pred_real, csi_target_real)
-                else:
-                    loss = self.criterion(csi_pred, csi_target)
+                # Extract CSI predictions
+                csi_pred = outputs['csi_predictions']
+                
+                # Compute loss using TrainingInterface's loss computation
+                loss = self.model.compute_loss(csi_pred, csi_target, self.criterion)
                 
                 # Backward pass
                 loss.backward()
@@ -213,6 +252,9 @@ class PrismTrainer:
                 
                 total_loss += loss.item()
                 num_batches += 1
+                
+                # Update training state in TrainingInterface
+                self.model.update_training_state(epoch, batch_idx, loss.item())
                 
                 # Log progress
                 if batch_idx % 10 == 0:
@@ -226,7 +268,7 @@ class PrismTrainer:
         return avg_loss
     
     def _validate(self, epoch: int):
-        """Validate model on a subset of data"""
+        """Validate model on a subset of data using TrainingInterface"""
         self.model.eval()
         total_loss = 0.0
         num_batches = 0
@@ -239,17 +281,20 @@ class PrismTrainer:
             for i in range(0, val_size, self.batch_size):
                 batch_indices = val_indices[i:i+self.batch_size]
                 ue_pos = self.ue_positions[batch_indices].to(self.device)
+                bs_pos = self.bs_position.expand(len(batch_indices), -1).to(self.device)
+                antenna_idx = self.antenna_indices.expand(len(batch_indices), -1).to(self.device)
                 csi_target = self.csi_data[batch_indices].to(self.device)
                 
                 try:
-                    csi_pred = self.model(ue_pos)
+                    # Use TrainingInterface forward pass
+                    outputs = self.model(
+                        ue_positions=ue_pos,
+                        bs_position=bs_pos,
+                        antenna_indices=antenna_idx
+                    )
                     
-                    if csi_pred.dtype == torch.complex64:
-                        csi_pred_real = torch.cat([csi_pred.real, csi_pred.imag], dim=-1)
-                        csi_target_real = torch.cat([csi_target.real, csi_target.imag], dim=-1)
-                        loss = self.criterion(csi_pred_real, csi_target_real)
-                    else:
-                        loss = self.criterion(csi_pred, csi_target)
+                    csi_pred = outputs['csi_predictions']
+                    loss = self.model.compute_loss(csi_pred, csi_target, self.criterion)
                     
                     total_loss += loss.item()
                     num_batches += 1
@@ -262,10 +307,13 @@ class PrismTrainer:
         return avg_val_loss
     
     def _save_checkpoint(self, epoch: int, train_loss: float, val_loss: float):
-        """Save model checkpoint"""
-        checkpoint = {
+        """Save model checkpoint using TrainingInterface"""
+        # Save TrainingInterface checkpoint
+        self.model.save_checkpoint(f'checkpoint_epoch_{epoch}.pt')
+        
+        # Save additional training state
+        training_state = {
             'epoch': epoch,
-            'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
             'train_loss': train_loss,
@@ -273,20 +321,22 @@ class PrismTrainer:
             'config': self.config
         }
         
-        checkpoint_path = self.output_dir / f'checkpoint_epoch_{epoch}.pt'
-        torch.save(checkpoint, checkpoint_path)
-        logger.info(f"Checkpoint saved: {checkpoint_path}")
+        checkpoint_path = self.output_dir / f'training_state_epoch_{epoch}.pt'
+        torch.save(training_state, checkpoint_path)
+        logger.info(f"Training state saved: {checkpoint_path}")
         
         # Save best model
         if not hasattr(self, 'best_val_loss') or val_loss < self.best_val_loss:
             self.best_val_loss = val_loss
             best_model_path = self.output_dir / 'best_model.pt'
-            torch.save(checkpoint, best_model_path)
+            self.model.save_checkpoint('best_model.pt')
+            torch.save(training_state, best_model_path.replace('.pt', '_state.pt'))
             logger.info(f"Best model saved: {best_model_path}")
         
         # Save latest checkpoint for resuming
         latest_checkpoint_path = self.output_dir / 'latest_checkpoint.pt'
-        torch.save(checkpoint, latest_checkpoint_path)
+        self.model.save_checkpoint('latest_checkpoint.pt')
+        torch.save(training_state, latest_checkpoint_path.replace('.pt', '_state.pt'))
         logger.info(f"Latest checkpoint saved: {latest_checkpoint_path}")
         
         # Clean up old checkpoints (keep last 5)
@@ -294,16 +344,26 @@ class PrismTrainer:
     
     def _cleanup_old_checkpoints(self):
         """Clean up old checkpoints to save disk space"""
-        checkpoints = list(self.output_dir.glob('checkpoint_epoch_*.pt'))
+        # Clean up TrainingInterface checkpoints
+        checkpoint_dir = Path(self.model.checkpoint_dir)
+        checkpoints = list(checkpoint_dir.glob('checkpoint_epoch_*.pt'))
         if len(checkpoints) > 5:
             # Sort by epoch number and remove oldest
             checkpoints.sort(key=lambda x: int(x.stem.split('_')[-1]))
             for checkpoint in checkpoints[:-5]:
                 checkpoint.unlink()
                 logger.info(f"Removed old checkpoint: {checkpoint}")
+        
+        # Clean up training state files
+        training_states = list(self.output_dir.glob('training_state_epoch_*.pt'))
+        if len(training_states) > 5:
+            training_states.sort(key=lambda x: int(x.stem.split('_')[-1]))
+            for state in training_states[:-5]:
+                state.unlink()
+                logger.info(f"Removed old training state: {state}")
     
     def _resume_from_checkpoint(self):
-        """Resume training from a checkpoint"""
+        """Resume training from a checkpoint using TrainingInterface"""
         logger.info(f"Resuming training from checkpoint: {self.resume_from}")
         
         if not os.path.exists(self.resume_from):
@@ -311,35 +371,45 @@ class PrismTrainer:
             raise FileNotFoundError(f"Checkpoint file not found: {self.resume_from}")
         
         try:
-            checkpoint = torch.load(self.resume_from, map_location=self.device)
+            # Load TrainingInterface checkpoint
+            self.model.load_checkpoint(self.resume_from)
+            logger.info("TrainingInterface checkpoint loaded successfully")
             
-            # Load model state
-            self.model.load_state_dict(checkpoint['model_state_dict'])
-            logger.info("Model state loaded successfully")
-            
-            # Load optimizer state
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            logger.info("Optimizer state loaded successfully")
-            
-            # Load scheduler state
-            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            logger.info("Scheduler state loaded successfully")
-            
-            # Load training state
-            self.start_epoch = checkpoint['epoch'] + 1
-            self.best_val_loss = checkpoint.get('val_loss', float('inf'))
-            
-            logger.info(f"Resuming from epoch {self.start_epoch}")
-            logger.info(f"Best validation loss so far: {self.best_val_loss:.6f}")
-            
-            # Load training history if available
-            if 'train_losses' in checkpoint:
-                self.train_losses = checkpoint['train_losses']
-                self.val_losses = checkpoint['val_losses']
-                logger.info(f"Loaded training history: {len(self.train_losses)} epochs")
+            # Load training state if available
+            training_state_path = self.resume_from.replace('.pt', '_state.pt')
+            if os.path.exists(training_state_path):
+                training_state = torch.load(training_state_path, map_location=self.device)
+                
+                # Load optimizer state
+                self.optimizer.load_state_dict(training_state['optimizer_state_dict'])
+                logger.info("Optimizer state loaded successfully")
+                
+                # Load scheduler state
+                self.scheduler.load_state_dict(training_state['scheduler_state_dict'])
+                logger.info("Scheduler state loaded successfully")
+                
+                # Load training state
+                self.start_epoch = training_state['epoch'] + 1
+                self.best_val_loss = training_state.get('val_loss', float('inf'))
+                
+                logger.info(f"Resuming from epoch {self.start_epoch}")
+                logger.info(f"Best validation loss so far: {self.best_val_loss:.6f}")
+                
+                # Load training history if available
+                if 'train_losses' in training_state:
+                    self.train_losses = training_state['train_losses']
+                    self.val_losses = training_state['val_losses']
+                    logger.info(f"Loaded training history: {len(self.train_losses)} epochs")
+                else:
+                    self.train_losses = []
+                    self.val_losses = []
             else:
+                # Fallback to TrainingInterface state
+                self.start_epoch = self.model.current_epoch + 1
+                self.best_val_loss = self.model.best_loss
                 self.train_losses = []
                 self.val_losses = []
+                logger.info(f"Resuming from TrainingInterface state: epoch {self.start_epoch}")
             
         except Exception as e:
             logger.error(f"Failed to load checkpoint: {e}")
@@ -357,10 +427,16 @@ class PrismTrainer:
                 self.writer.add_histogram(f'Parameters/{name}', param.data, epoch)
                 if param.grad is not None:
                     self.writer.add_histogram(f'Gradients/{name}', param.grad, epoch)
+        
+        # Log TrainingInterface specific metrics
+        training_info = self.model.get_training_info()
+        self.writer.add_scalar('Training/Current_Epoch', training_info['current_epoch'], epoch)
+        self.writer.add_scalar('Training/Best_Loss', training_info['best_loss'], epoch)
+        self.writer.add_scalar('Training/History_Length', training_info['training_history_length'], epoch)
     
     def train(self):
-        """Main training loop"""
-        logger.info("Starting training...")
+        """Main training loop using TrainingInterface"""
+        logger.info("Starting training with TrainingInterface...")
         
         # Load data
         self._load_data()
@@ -411,7 +487,8 @@ class PrismTrainer:
         history = {
             'train_losses': train_losses,
             'val_losses': val_losses,
-            'config': self.config
+            'config': self.config,
+            'training_interface_info': self.model.get_training_info()
         }
         
         history_path = self.output_dir / 'training_history.json'
@@ -447,7 +524,7 @@ class PrismTrainer:
 
 def main():
     """Main function"""
-    parser = argparse.ArgumentParser(description='Train Prism Network')
+    parser = argparse.ArgumentParser(description='Train Prism Network using TrainingInterface')
     parser.add_argument('--config', type=str, default='configs/ofdm-5g-sionna.yml',
                        help='Path to configuration file')
     parser.add_argument('--data', type=str, required=True,

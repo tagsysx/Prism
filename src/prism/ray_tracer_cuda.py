@@ -1,15 +1,28 @@
 """
 CUDA-Accelerated Discrete Electromagnetic Ray Tracing System for Prism
 
-This module implements a high-performance CUDA version of the ray tracing system
-with automatic device detection and fallback to CPU implementation.
+This module implements a high-performance CUDA version of the discrete electromagnetic ray tracing system
+as described in the design document, with support for MLP-based direction sampling and
+efficient RF signal strength computation.
+
+IMPORTANT NOTE: This ray tracer does NOT select subcarriers internally. All subcarrier
+selection must be provided by the calling code (typically PrismTrainingInterface) to
+ensure consistency across the training pipeline and proper loss computation.
+
+The ray tracer expects:
+- selected_subcarriers: Dictionary or tensor specifying which subcarriers to process
+- subcarrier_indices: Explicit indices of subcarriers to trace
+- No internal subcarrier selection logic
+
+This design ensures that the training interface has full control over which subcarriers
+are used for loss computation, preventing any mismatch between ray tracing and loss calculation.
 """
 
 import torch
 import logging
 import math
 import time
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Union
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -181,6 +194,7 @@ class CUDARayTracer:
             self.cuda_module = load_inline(
                 name='ray_tracing_kernel',
                 cuda_sources=[CUDA_KERNEL],
+                cpp_sources=[],  # Add empty cpp_sources list
                 extra_cuda_cflags=['-O3', '--use_fast_math'],
                 verbose=False
             )
@@ -513,3 +527,318 @@ class CUDARayTracer:
             info['cuda_compute_capability'] = torch.cuda.get_device_capability()
         
         return info
+    
+    def is_position_in_scene(self, position: torch.Tensor) -> bool:
+        """
+        Check if a position is within the scene boundaries.
+        
+        Args:
+            position: 3D position tensor [x, y, z]
+        
+        Returns:
+            True if position is within scene boundaries
+        """
+        if position.dim() == 1:
+            position = position.unsqueeze(0)
+        
+        # Check if all coordinates are within bounds
+        scene_bounds = self.scene_size / 2.0
+        in_bounds = torch.all(
+            (position >= -scene_bounds) & (position <= scene_bounds), 
+            dim=1
+        )
+        
+        return in_bounds.all().item()
+    
+    def get_scene_bounds(self) -> Tuple[float, float]:
+        """Get scene boundaries."""
+        scene_bounds = self.scene_size / 2.0
+        return -scene_bounds, scene_bounds
+    
+    def get_scene_size(self) -> float:
+        """Get scene size D."""
+        return self.scene_size
+    
+    def update_scene_size(self, new_scene_size: float):
+        """
+        Update scene size and related parameters.
+        
+        Args:
+            new_scene_size: New scene size in meters
+        """
+        if new_scene_size <= 0:
+            raise ValueError(f"Scene size must be positive, got {new_scene_size}")
+        
+        self.scene_size = new_scene_size
+        
+        # Adjust max ray length if necessary
+        if self.max_ray_length > new_scene_size:
+            self.max_ray_length = new_scene_size
+            logger.info(f"Adjusted max ray length to {self.max_ray_length}m")
+        
+        logger.info(f"Updated scene size to {new_scene_size}m")
+    
+    def get_scene_config(self) -> Dict[str, float]:
+        """Get complete scene configuration."""
+        scene_bounds = self.scene_size / 2.0
+        return {
+            'scene_size': self.scene_size,
+            'scene_min': -scene_bounds,
+            'scene_max': scene_bounds,
+            'max_ray_length': self.max_ray_length,
+            'azimuth_divisions': self.azimuth_divisions,
+            'elevation_divisions': self.elevation_divisions
+        }
+    
+    def trace_ray(self, 
+                  base_station_pos: torch.Tensor,
+                  direction: Tuple[int, int],
+                  ue_positions: List[torch.Tensor],
+                  selected_subcarriers: Union[Dict, torch.Tensor, List[int]],
+                  antenna_embedding: torch.Tensor) -> Dict:
+        """
+        Trace RF signal along a single ray direction.
+        
+        Args:
+            base_station_pos: Base station position P_BS
+            direction: Direction indices (phi_idx, theta_idx)
+            ue_positions: List of UE positions
+            selected_subcarriers: Subcarrier information from training interface
+            antenna_embedding: Base station's antenna embedding parameter C
+        
+        Returns:
+            Dictionary mapping (ue_pos, subcarrier) to received RF signal strength
+        """
+        # Convert direction indices to direction vector
+        phi_idx, theta_idx = direction
+        phi = phi_idx * (2 * math.pi / self.azimuth_divisions)
+        theta = theta_idx * (math.pi / self.elevation_divisions)
+        
+        direction_vector = torch.tensor([
+            math.sin(theta) * math.cos(phi),
+            math.sin(theta) * math.sin(phi),
+            math.cos(theta)
+        ], dtype=torch.float32, device=self.device)
+        
+        # Use existing trace_rays method with single direction
+        # Convert selected_subcarriers to the expected Dict format
+        if isinstance(selected_subcarriers, (list, tuple)):
+            # Convert list to dict format
+            subcarrier_dict = {}
+            for ue_pos in ue_positions:
+                ue_key = tuple(ue_pos.tolist())
+                subcarrier_dict[ue_key] = selected_subcarriers
+        elif isinstance(selected_subcarriers, torch.Tensor):
+            # Convert tensor to dict format
+            subcarrier_dict = {}
+            for ue_pos in ue_positions:
+                ue_key = tuple(ue_pos.tolist())
+                subcarrier_dict[ue_key] = selected_subcarriers.tolist()
+        else:
+            subcarrier_dict = selected_subcarriers
+        
+        # Create antenna embeddings tensor with proper shape
+        if antenna_embedding.dim() == 1:
+            # Single embedding, expand to match subcarriers
+            num_subcarriers = len(selected_subcarriers) if isinstance(selected_subcarriers, (list, tuple)) else selected_subcarriers.shape[0]
+            antenna_embeddings = antenna_embedding.unsqueeze(0).expand(num_subcarriers, -1)
+        else:
+            antenna_embeddings = antenna_embedding
+        
+        # Create antenna embeddings tensor with proper shape
+        if antenna_embedding.dim() == 1:
+            # Single embedding, expand to match subcarriers
+            if isinstance(selected_subcarriers, (list, tuple)):
+                num_subcarriers = len(selected_subcarriers)
+            elif isinstance(selected_subcarriers, torch.Tensor):
+                num_subcarriers = selected_subcarriers.shape[0]
+            else:  # dict
+                # Count total subcarriers across all UEs
+                num_subcarriers = sum(len(subcarriers) for subcarriers in selected_subcarriers.values())
+            antenna_embeddings = antenna_embedding.unsqueeze(0).expand(num_subcarriers, -1)
+        else:
+            antenna_embeddings = antenna_embedding
+        
+        results = self.trace_rays(
+            base_station_pos, ue_positions, subcarrier_dict, antenna_embeddings
+        )
+        
+        # Convert results to single ray format
+        # The trace_rays method returns results in format (ue_pos, subcarrier, direction_idx)
+        # We need to extract results for the first direction only
+        single_ray_results = {}
+        for (ue_pos, subcarrier, dir_idx), signal_strength in results.items():
+            if dir_idx == 0:  # Only first direction
+                single_ray_results[(ue_pos, subcarrier)] = signal_strength
+        
+        return single_ray_results
+    
+    def accumulate_signals(self, 
+                          base_station_pos: torch.Tensor,
+                          ue_positions: List[torch.Tensor],
+                          selected_subcarriers: Union[Dict, torch.Tensor, List[int]],
+                          antenna_embedding: torch.Tensor) -> Dict:
+        """
+        Accumulate RF signals using MLP-based direction sampling with antenna embedding C.
+        
+        Args:
+            base_station_pos: Base station position
+            ue_positions: List of UE positions
+            selected_subcarriers: Subcarrier information from training interface
+            antenna_embedding: Base station's antenna embedding parameter C
+        
+        Returns:
+            Accumulated signal strength matrix for all virtual links
+        """
+        # Generate all direction vectors
+        direction_vectors = self.generate_direction_vectors()
+        
+        # Use existing trace_rays method for all directions
+        # Convert selected_subcarriers to the expected Dict format
+        if isinstance(selected_subcarriers, (list, tuple)):
+            # Convert list to dict format
+            subcarrier_dict = {}
+            for ue_pos in ue_positions:
+                ue_key = tuple(ue_pos.tolist())
+                subcarrier_dict[ue_key] = selected_subcarriers
+        elif isinstance(selected_subcarriers, torch.Tensor):
+            # Convert tensor to dict format
+            subcarrier_dict = {}
+            for ue_pos in ue_positions:
+                ue_key = tuple(ue_pos.tolist())
+                subcarrier_dict[ue_key] = selected_subcarriers.tolist()
+        else:
+            subcarrier_dict = selected_subcarriers
+        
+        # Create antenna embeddings tensor with proper shape
+        if antenna_embedding.dim() == 1:
+            # Single embedding, expand to match subcarriers
+            num_subcarriers = len(selected_subcarriers) if isinstance(selected_subcarriers, (list, tuple)) else selected_subcarriers.shape[0]
+            antenna_embeddings = antenna_embedding.unsqueeze(0).expand(num_subcarriers, -1)
+        else:
+            antenna_embeddings = antenna_embedding
+        
+        # Create antenna embeddings tensor with proper shape
+        if antenna_embedding.dim() == 1:
+            # Single embedding, expand to match subcarriers
+            if isinstance(selected_subcarriers, (list, tuple)):
+                num_subcarriers = len(selected_subcarriers)
+            elif isinstance(selected_subcarriers, torch.Tensor):
+                num_subcarriers = selected_subcarriers.shape[0]
+            else:  # dict
+                # Count total subcarriers across all UEs
+                num_subcarriers = sum(len(subcarriers) for subcarriers in selected_subcarriers.values())
+            antenna_embeddings = antenna_embedding.unsqueeze(0).expand(num_subcarriers, -1)
+        else:
+            antenna_embeddings = antenna_embedding
+        
+        all_results = self.trace_rays(
+            base_station_pos, ue_positions, subcarrier_dict, antenna_embeddings
+        )
+        
+        # Accumulate signals across all directions
+        accumulated_signals = {}
+        for (ue_pos, subcarrier, dir_idx), signal_strength in all_results.items():
+            key = (ue_pos, subcarrier)
+            if key not in accumulated_signals:
+                accumulated_signals[key] = 0.0
+            accumulated_signals[key] += signal_strength
+        
+        return accumulated_signals
+    
+    def adaptive_ray_tracing(self, 
+                           base_station_pos: torch.Tensor,
+                           antenna_embedding: torch.Tensor,
+                           ue_positions: List[torch.Tensor],
+                           selected_subcarriers: Union[Dict, torch.Tensor, List[int]],
+                           top_k: int = 32) -> Dict:
+        """
+        Perform adaptive ray tracing using built-in AntennaNetwork for direction selection.
+        
+        Args:
+            base_station_pos: Base station position
+            antenna_embedding: Base station's antenna embedding parameter C
+            ue_positions: List of UE positions
+            selected_subcarriers: Subcarrier information from training interface
+            top_k: Number of top directions to select
+        
+        Returns:
+            Accumulated signal strength for selected directions only
+        """
+        # For now, use the main accumulate_signals method
+        # In the future, this could implement MLP-based direction selection
+        return self.accumulate_signals(
+            base_station_pos, ue_positions, selected_subcarriers, antenna_embedding
+        )
+    
+    def pyramid_ray_tracing(self,
+                           base_station_pos: torch.Tensor,
+                           ue_positions: List[torch.Tensor],
+                           selected_subcarriers: Union[Dict, torch.Tensor, List[int]],
+                           antenna_embedding: torch.Tensor,
+                           pyramid_levels: int = 3) -> Dict:
+        """
+        Perform pyramid ray tracing with hierarchical sampling.
+        
+        Args:
+            base_station_pos: Base station position
+            ue_positions: List of UE positions
+            selected_subcarriers: Subcarrier information from training interface
+            antenna_embedding: Base station's antenna embedding parameter C
+            pyramid_levels: Number of hierarchical levels
+        
+        Returns:
+            Accumulated signal strength with pyramid sampling
+        """
+        accumulated_signals = {}
+        
+        # Implement hierarchical pyramid sampling
+        for level in range(pyramid_levels):
+            # Calculate sampling density for this level
+            level_factor = 2 ** level
+            level_azimuth_divisions = max(1, self.azimuth_divisions // level_factor)
+            level_elevation_divisions = max(1, self.elevation_divisions // level_factor)
+            
+            logger.debug(f"Pyramid level {level}: {level_azimuth_divisions}x{level_elevation_divisions} directions")
+            
+            # Sample directions for this pyramid level
+            for phi_idx in range(0, self.azimuth_divisions, level_factor):
+                for theta_idx in range(0, self.elevation_divisions, level_factor):
+                    direction = (phi_idx, theta_idx)
+                    
+                    # Trace ray for this direction
+                    ray_results = self.trace_ray(
+                        base_station_pos, direction, ue_positions,
+                        selected_subcarriers, antenna_embedding
+                    )
+                    
+                    # Accumulate signals with level weighting
+                    level_weight = 1.0 / (level + 1)  # Higher levels get lower weight
+                    for (ue_pos, subcarrier), signal_strength in ray_results.items():
+                        if (ue_pos, subcarrier) not in accumulated_signals:
+                            accumulated_signals[(ue_pos, subcarrier)] = 0.0
+                        accumulated_signals[(ue_pos, subcarrier)] += signal_strength * level_weight
+        
+        return accumulated_signals
+    
+    def get_ray_count_analysis(self, num_bs: int, num_ue: int, num_subcarriers: int) -> Dict:
+        """
+        Analyze the total number of rays in the system.
+        
+        Args:
+            num_bs: Number of base stations
+            num_ue: Number of user equipment devices
+            num_subcarriers: Number of subcarriers in the frequency domain
+        
+        Returns:
+            Dictionary with ray count analysis
+        """
+        total_rays = num_bs * self.total_directions * num_ue * num_subcarriers
+        
+        return {
+            'total_directions': self.total_directions,
+            'azimuth_divisions': self.azimuth_divisions,
+            'elevation_divisions': self.elevation_divisions,
+            'total_rays': total_rays,
+            'ray_count_formula': f"N_total = N_BS × A × B × N_UE × K = {num_bs} × {self.total_directions} × {num_ue} × {num_subcarriers}"
+        }

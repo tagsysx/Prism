@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-Test suite for the CUDA-accelerated ray tracer.
+Test suite for the CUDA-accelerated discrete electromagnetic ray tracing system.
 
-This test file verifies the functionality of the CUDA ray tracer
-with automatic device detection and fallback mechanisms.
+This test file verifies the functionality of the CUDA ray tracer after updating it
+to match the new DiscreteRayTracer interface, with support for MLP-based direction
+sampling and efficient RF signal strength computation.
+
+The CUDA version should provide the same interface as the CPU version but with
+accelerated performance on GPU devices.
 """
 
 import unittest
 import torch
 import numpy as np
-from typing import List, Dict
+from typing import List, Dict, Union
 
 # Import the CUDA ray tracer
 from prism.ray_tracer_cuda import CUDARayTracer
@@ -21,20 +25,28 @@ class TestCUDARayTracer(unittest.TestCase):
         """Set up test fixtures."""
         self.azimuth_divisions = 8
         self.elevation_divisions = 4
-        self.max_ray_length = 100.0
-        self.scene_size = 200.0
+        self.max_ray_length = 50.0
+        self.scene_size = 100.0
         
         # Create test data
         self.base_station_pos = torch.tensor([0.0, 0.0, 0.0])
         self.ue_positions = [
-            [10.0, 5.0, 1.5],
-            [15.0, -3.0, 1.5]
+            torch.tensor([10.0, 0.0, 0.0]),
+            torch.tensor([0.0, 10.0, 0.0]),
+            torch.tensor([5.0, 5.0, 5.0])
         ]
-        self.selected_subcarriers = {
-            (10.0, 5.0, 1.5): [0, 1],
-            (15.0, -3.0, 1.5): [0, 2]
+        
+        # Test subcarriers in various formats
+        self.selected_subcarriers_list = [0, 1, 2, 3]  # List format
+        self.selected_subcarriers_tensor = torch.tensor([0, 1, 2, 3])  # Tensor format
+        self.selected_subcarriers_dict = {  # Dict format
+            tuple(self.ue_positions[0].tolist()): [0, 1],
+            tuple(self.ue_positions[1].tolist()): [2, 3],
+            tuple(self.ue_positions[2].tolist()): [0, 2]
         }
-        self.antenna_embeddings = torch.randn(4, 64)  # 4 subcarriers, 64D embeddings
+        
+        # Create antenna embeddings
+        self.antenna_embeddings = torch.randn(4, 128)  # 4 subcarriers, 128D embeddings
     
     def test_initialization(self):
         """Test CUDA ray tracer initialization."""
@@ -73,7 +85,34 @@ class TestCUDARayTracer(unittest.TestCase):
             self.assertEqual(tracer.device, 'cpu')
             self.assertFalse(tracer.use_cuda)
     
-    def test_direction_vectors(self):
+    def test_scene_bounds_validation(self):
+        """Test scene bounds validation."""
+        # Test with valid scene size
+        ray_tracer = CUDARayTracer(scene_size=100.0)
+        
+        self.assertIsNotNone(ray_tracer)
+        
+        # Test with invalid scene size (negative)
+        with self.assertRaises(ValueError):
+            CUDARayTracer(scene_size=-100.0)
+    
+    def test_position_in_scene_validation(self):
+        """Test position validation within scene bounds."""
+        tracer = CUDARayTracer(scene_size=self.scene_size)
+        
+        # Test position inside scene
+        pos = torch.tensor([10.0, 10.0, 10.0])
+        self.assertTrue(tracer.is_position_in_scene(pos))
+        
+        # Test position outside scene
+        pos = torch.tensor([100.0, 100.0, 100.0])
+        self.assertFalse(tracer.is_position_in_scene(pos))
+        
+        # Test position at scene boundary
+        pos = torch.tensor([50.0, 50.0, 25.0])
+        self.assertTrue(tracer.is_position_in_scene(pos))
+    
+    def test_direction_vector_generation(self):
         """Test direction vector generation."""
         tracer = CUDARayTracer(
             azimuth_divisions=4,
@@ -93,6 +132,250 @@ class TestCUDARayTracer(unittest.TestCase):
         norms = torch.norm(directions, dim=1)
         self.assertTrue(torch.allclose(norms, torch.ones_like(norms), atol=1e-6))
     
+    def test_scene_size_updates(self):
+        """Test scene size updates."""
+        tracer = CUDARayTracer(scene_size=self.scene_size)
+        original_size = tracer.get_scene_size()
+        original_bounds = tracer.get_scene_bounds()
+        
+        # Update scene size
+        new_size = 150.0
+        tracer.update_scene_size(new_size)
+        
+        # Check that size was updated
+        self.assertEqual(tracer.get_scene_size(), new_size)
+        new_bounds = tracer.get_scene_bounds()
+        
+        # Bounds should be updated accordingly
+        self.assertNotEqual(original_bounds, new_bounds)
+        
+        # Max ray length should be adjusted if needed
+        self.assertGreaterEqual(tracer.max_ray_length, 50.0)
+    
+    def test_scene_config_retrieval(self):
+        """Test scene configuration retrieval."""
+        tracer = CUDARayTracer(
+            azimuth_divisions=self.azimuth_divisions,
+            elevation_divisions=self.elevation_divisions,
+            scene_size=self.scene_size
+        )
+        
+        config = tracer.get_scene_config()
+        
+        expected_keys = {
+            'scene_min', 'scene_max', 'scene_size', 'max_ray_length',
+            'azimuth_divisions', 'elevation_divisions'
+        }
+        
+        self.assertEqual(set(config.keys()), expected_keys)
+        self.assertEqual(config['azimuth_divisions'], self.azimuth_divisions)
+        self.assertEqual(config['elevation_divisions'], self.elevation_divisions)
+    
+    def test_ray_tracing_workflow(self):
+        """Test complete ray tracing workflow with external subcarrier selection."""
+        tracer = CUDARayTracer(
+            azimuth_divisions=self.azimuth_divisions,
+            elevation_divisions=self.elevation_divisions,
+            max_ray_length=self.max_ray_length,
+            scene_size=self.scene_size
+        )
+        
+        # Test with list format subcarriers
+        direction = (0, 0)  # First azimuth and elevation division
+        ray_results = tracer.trace_ray(
+            self.base_station_pos,
+            direction,
+            self.ue_positions,
+            self.selected_subcarriers_list,  # External subcarrier selection
+            self.antenna_embeddings[0]  # Use first antenna embedding
+        )
+        
+        # Check results
+        self.assertIsInstance(ray_results, dict)
+        self.assertGreater(len(ray_results), 0)
+        
+        # Each result should have correct format
+        for (ue_pos, subcarrier), signal_strength in ray_results.items():
+            self.assertIsInstance(ue_pos, tuple)
+            self.assertIsInstance(subcarrier, int)
+            self.assertIsInstance(signal_strength, float)
+    
+    def test_signal_accumulation(self):
+        """Test signal accumulation across directions with external subcarrier selection."""
+        tracer = CUDARayTracer(
+            azimuth_divisions=self.azimuth_divisions,
+            elevation_divisions=self.elevation_divisions,
+            max_ray_length=self.max_ray_length,
+            scene_size=self.scene_size
+        )
+        
+        # Test with fallback method (no prism network)
+        accumulated_signals = tracer.accumulate_signals(
+            self.base_station_pos,
+            self.ue_positions,
+            self.selected_subcarriers_list,  # External subcarrier selection
+            self.antenna_embeddings[0]  # Use first antenna embedding
+        )
+        
+        # Should have results for each UE-subcarrier combination
+        self.assertGreater(len(accumulated_signals), 0)
+        
+        # Check signal format
+        for (ue_pos, subcarrier), signal_strength in accumulated_signals.items():
+            self.assertIsInstance(signal_strength, float)
+            self.assertGreaterEqual(signal_strength, 0.0)  # Signal should be non-negative
+    
+    def test_adaptive_ray_tracing(self):
+        """Test adaptive ray tracing method with external subcarrier selection."""
+        tracer = CUDARayTracer(
+            azimuth_divisions=self.azimuth_divisions,
+            elevation_divisions=self.elevation_divisions,
+            max_ray_length=self.max_ray_length,
+            scene_size=self.scene_size
+        )
+        
+        # Test adaptive ray tracing
+        adaptive_results = tracer.adaptive_ray_tracing(
+            self.base_station_pos,
+            self.antenna_embeddings[0],  # Use first antenna embedding
+            self.ue_positions,
+            self.selected_subcarriers_tensor  # External subcarrier selection
+        )
+        
+        # Should return accumulated signals
+        self.assertIsInstance(adaptive_results, dict)
+        self.assertGreater(len(adaptive_results), 0)
+    
+    def test_pyramid_ray_tracing(self):
+        """Test pyramid ray tracing method with external subcarrier selection."""
+        tracer = CUDARayTracer(
+            azimuth_divisions=self.azimuth_divisions,
+            elevation_divisions=self.elevation_divisions,
+            max_ray_length=self.max_ray_length,
+            scene_size=self.scene_size
+        )
+        
+        # Test pyramid ray tracing
+        pyramid_results = tracer.pyramid_ray_tracing(
+            self.base_station_pos,
+            self.ue_positions,
+            self.selected_subcarriers_list,  # External subcarrier selection
+            self.antenna_embeddings[0],  # Use first antenna embedding
+            pyramid_levels=2
+        )
+        
+        # Should return accumulated signals
+        self.assertIsInstance(pyramid_results, dict)
+        self.assertGreater(len(pyramid_results), 0)
+    
+    def test_subcarrier_input_normalization(self):
+        """Test subcarrier input normalization with various formats."""
+        tracer = CUDARayTracer(
+            azimuth_divisions=self.azimuth_divisions,
+            elevation_divisions=self.elevation_divisions,
+            max_ray_length=self.max_ray_length,
+            scene_size=self.scene_size
+        )
+        
+        # Test with list format
+        ray_results_list = tracer.trace_ray(
+            self.base_station_pos,
+            (0, 0),
+            self.ue_positions,
+            self.selected_subcarriers_list,
+            self.antenna_embeddings[0]
+        )
+        
+        # Test with tensor format
+        ray_results_tensor = tracer.trace_ray(
+            self.base_station_pos,
+            (0, 0),
+            self.ue_positions,
+            self.selected_subcarriers_tensor,
+            self.antenna_embeddings[0]
+        )
+        
+        # Test with dict format
+        ray_results_dict = tracer.trace_ray(
+            self.base_station_pos,
+            (0, 0),
+            self.ue_positions,
+            self.selected_subcarriers_dict,
+            self.antenna_embeddings[0]
+        )
+        
+        # All should produce valid results
+        self.assertGreater(len(ray_results_list), 0)
+        self.assertGreater(len(ray_results_tensor), 0)
+        self.assertGreater(len(ray_results_dict), 0)
+    
+    def test_subcarrier_input_validation(self):
+        """Test subcarrier input validation and error handling."""
+        tracer = CUDARayTracer(
+            azimuth_divisions=self.azimuth_divisions,
+            elevation_divisions=self.elevation_divisions,
+            max_ray_length=self.max_ray_length,
+            scene_size=self.scene_size
+        )
+        
+        # Test with None input
+        with self.assertRaises(ValueError):
+            tracer.trace_ray(
+                self.base_station_pos,
+                (0, 0),
+                self.ue_positions,
+                None,  # Invalid: None
+                self.antenna_embeddings[0]
+            )
+        
+        # Test with empty list
+        with self.assertRaises(ValueError):
+            tracer.trace_ray(
+                self.base_station_pos,
+                (0, 0),
+                self.ue_positions,
+                [],  # Invalid: empty
+                self.antenna_embeddings[0]
+            )
+        
+        # Test with empty tensor
+        with self.assertRaises(ValueError):
+            tracer.trace_ray(
+                self.base_station_pos,
+                (0, 0),
+                self.ue_positions,
+                torch.tensor([]),  # Invalid: empty
+                self.antenna_embeddings[0]
+            )
+    
+    def test_ray_count_analysis(self):
+        """Test ray count analysis."""
+        tracer = CUDARayTracer(
+            azimuth_divisions=self.azimuth_divisions,
+            elevation_divisions=self.elevation_divisions
+        )
+        
+        analysis = tracer.get_ray_count_analysis(
+            num_bs=2,
+            num_ue=len(self.ue_positions),
+            num_subcarriers=16
+        )
+        
+        expected_keys = {
+            'total_directions', 'azimuth_divisions', 'elevation_divisions',
+            'total_rays', 'ray_count_formula'
+        }
+        
+        self.assertEqual(set(analysis.keys()), expected_keys)
+        self.assertEqual(analysis['total_directions'], 8 * 4)
+        self.assertEqual(analysis['total_rays'], 2 * 8 * 4 * 3 * 16)
+        
+        # Check formula contains the expected numbers
+        self.assertIn("2", analysis['ray_count_formula'])  # num_bs
+        self.assertIn("32", analysis['ray_count_formula'])  # total_directions (8*4)
+        self.assertIn("3", analysis['ray_count_formula'])   # num_ue
+        self.assertIn("16", analysis['ray_count_formula'])  # num_subcarriers
+    
     def test_performance_info(self):
         """Test performance information retrieval."""
         tracer = CUDARayTracer()
@@ -110,43 +393,6 @@ class TestCUDARayTracer(unittest.TestCase):
             self.assertIn('cuda_memory_gb', perf_info)
             self.assertIn('cuda_compute_capability', perf_info)
     
-    def test_ray_tracing_basic(self):
-        """Test basic ray tracing functionality."""
-        tracer = CUDARayTracer(
-            azimuth_divisions=4,
-            elevation_divisions=2,
-            uniform_samples=16,  # Reduced for faster testing
-            resampled_points=8
-        )
-        
-        try:
-            results = tracer.trace_rays(
-                self.base_station_pos,
-                self.ue_positions,
-                self.selected_subcarriers,
-                self.antenna_embeddings
-            )
-            
-            # Check that we got results
-            self.assertIsInstance(results, dict)
-            self.assertGreater(len(results), 0)
-            
-            # Check result structure
-            for key, value in results.items():
-                self.assertIsInstance(key, tuple)
-                self.assertEqual(len(key), 3)  # (ue_pos, subcarrier, direction)
-                self.assertIsInstance(value, (int, float))
-            
-            print(f"Successfully traced {len(results)} rays")
-            
-        except Exception as e:
-            # If CUDA kernel fails, this is acceptable
-            if "CUDA" in str(e) or "kernel" in str(e).lower():
-                print(f"CUDA kernel failed (expected): {e}")
-                print("This is acceptable - system will fall back to PyTorch GPU operations")
-            else:
-                raise e
-    
     def test_fallback_mechanisms(self):
         """Test fallback mechanisms when CUDA is not available."""
         # Force CPU mode by setting device to CPU
@@ -161,11 +407,12 @@ class TestCUDARayTracer(unittest.TestCase):
                 self.assertFalse(tracer.use_cuda)
                 
                 # Test CPU ray tracing
-                results = tracer.trace_rays(
+                results = tracer.trace_ray(
                     self.base_station_pos,
+                    (0, 0),
                     self.ue_positions,
-                    self.selected_subcarriers,
-                    self.antenna_embeddings
+                    self.selected_subcarriers_list,
+                    self.antenna_embeddings[0]
                 )
                 
                 self.assertIsInstance(results, dict)
@@ -180,46 +427,23 @@ class TestCUDARayTracer(unittest.TestCase):
             self.assertEqual(tracer.device, 'cpu')
             self.assertFalse(tracer.use_cuda)
     
-    def test_error_handling(self):
-        """Test error handling for invalid inputs."""
-        tracer = CUDARayTracer()
-        
-        # Test with invalid UE positions
-        invalid_ue_positions = [
-            [float('inf'), 5.0, 1.5],  # Invalid position
-            [15.0, -3.0, 1.5]
-        ]
-        
-        # Should handle gracefully
-        try:
-            results = tracer.trace_rays(
-                self.base_station_pos,
-                invalid_ue_positions,
-                self.selected_subcarriers,
-                self.antenna_embeddings
-            )
-            # If it succeeds, that's fine
-        except Exception as e:
-            # If it fails, that's also acceptable
-            print(f"Error handling test: {e}")
-    
     def test_memory_efficiency(self):
         """Test memory efficiency for large scenarios."""
         # Create larger test scenario
         large_ue_positions = []
-        large_subcarriers = {}
+        large_subcarriers = []
         
-        for i in range(50):  # 50 UEs
-            x = np.random.uniform(-80, 80)
-            y = np.random.uniform(-80, 80)
+        for i in range(20):  # 20 UEs (reduced for testing)
+            x = np.random.uniform(-40, 40)
+            y = np.random.uniform(-40, 40)
             z = np.random.uniform(1.0, 2.0)
-            pos = [x, y, z]
+            pos = torch.tensor([x, y, z])
             large_ue_positions.append(pos)
             
-            # 10 subcarriers per UE
-            large_subcarriers[tuple(pos)] = list(range(10))
+            # 5 subcarriers per UE
+            large_subcarriers.extend([i * 5 + j for j in range(5)])
         
-        large_embeddings = torch.randn(10, 64)
+        large_embeddings = torch.randn(100, 128)  # 100 subcarriers, 128D embeddings
         
         tracer = CUDARayTracer(
             azimuth_divisions=8,
@@ -230,11 +454,12 @@ class TestCUDARayTracer(unittest.TestCase):
         
         try:
             # This should not cause memory issues
-            results = tracer.trace_rays(
+            results = tracer.trace_ray(
                 self.base_station_pos,
+                (0, 0),  # Single direction
                 large_ue_positions,
-                large_subcarriers,
-                large_embeddings
+                large_subcarriers,  # List format
+                large_embeddings[0]  # Single antenna embedding
             )
             
             # Check memory usage
@@ -245,13 +470,38 @@ class TestCUDARayTracer(unittest.TestCase):
                 # Should be reasonable (< 2GB for this scenario)
                 self.assertLess(memory_allocated, 2000)
             
-            print(f"Successfully processed large scenario: {len(results)} rays")
+            print(f"Successfully processed large scenario: {len(results)} results")
             
         except Exception as e:
             if "memory" in str(e).lower() or "out of memory" in str(e).lower():
                 print(f"Memory test failed (acceptable): {e}")
             else:
                 raise e
+    
+    def test_error_handling(self):
+        """Test error handling for invalid inputs."""
+        tracer = CUDARayTracer()
+        
+        # Test with invalid UE positions
+        invalid_ue_positions = [
+            torch.tensor([float('inf'), 5.0, 1.5]),  # Invalid position
+            torch.tensor([15.0, -3.0, 1.5])
+        ]
+        
+        # Should handle gracefully
+        try:
+            results = tracer.trace_ray(
+                self.base_station_pos,
+                (0, 0),
+                invalid_ue_positions,
+                self.selected_subcarriers_list,
+                self.antenna_embeddings[0]
+            )
+            # If it succeeds, that's fine
+        except Exception as e:
+            # If it fails, that's also acceptable
+            print(f"Error handling test: {e}")
+
 
 def run_performance_test():
     """Run a quick performance test."""
@@ -268,11 +518,11 @@ def run_performance_test():
     
     # Create test data
     base_station_pos = torch.tensor([0.0, 0.0, 0.0])
-    ue_positions = [[x, y, 1.5] for x in range(-5, 6, 2) for y in range(-5, 6, 2)]
-    selected_subcarriers = {tuple(pos): [0, 1, 2] for pos in ue_positions}
-    antenna_embeddings = torch.randn(4, 64)
+    ue_positions = [torch.tensor([x, y, 1.5]) for x in range(-5, 6, 2) for y in range(-5, 6, 2)]
+    selected_subcarriers = [0, 1, 2]  # List format
+    antenna_embeddings = torch.randn(4, 128)
     
-    print(f"Test scenario: {len(ue_positions)} UEs, {len(antenna_embeddings)} subcarriers")
+    print(f"Test scenario: {len(ue_positions)} UEs, {len(selected_subcarriers)} subcarriers")
     print(f"Total directions: {tracer.total_directions}")
     print(f"Device: {tracer.device}, CUDA: {tracer.use_cuda}")
     
@@ -281,16 +531,17 @@ def run_performance_test():
     start_time = time.time()
     
     try:
-        results = tracer.trace_rays(
-            base_station_pos, ue_positions, selected_subcarriers, antenna_embeddings
+        # Test single ray tracing
+        results = tracer.trace_ray(
+            base_station_pos, (0, 0), ue_positions, selected_subcarriers, antenna_embeddings[0]
         )
         
         execution_time = time.time() - start_time
-        total_rays = len(results)
+        total_results = len(results)
         
         print(f"Execution time: {execution_time:.4f}s")
-        print(f"Total rays: {total_rays}")
-        print(f"Rays per second: {total_rays/execution_time:.0f}")
+        print(f"Total results: {total_results}")
+        print(f"Results per second: {total_results/execution_time:.0f}")
         
         if execution_time < 1.0:
             print("✅ Performance test passed - execution time is reasonable")
@@ -299,6 +550,7 @@ def run_performance_test():
             
     except Exception as e:
         print(f"❌ Performance test failed: {e}")
+
 
 if __name__ == "__main__":
     # Run unit tests

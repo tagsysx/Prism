@@ -156,8 +156,8 @@ training_interface:
   
   # Scene configuration
   scene_bounds:
-    min: [-50.0, -50.0, 0.0]          # Scene minimum bounds [x, y, z]
-    max: [50.0, 50.0, 30.0]           # Scene maximum bounds [x, y, z]
+    min: [-150.0, -150.0, 0.0]          # Scene minimum bounds [x, y, z]
+    max: [150.0, 150.0, 30.0]           # Scene maximum bounds [x, y, z]
   
   # Subcarrier selection
   subcarrier_sampling_ratio: 0.3       # Ratio of subcarriers to select (30%)
@@ -199,8 +199,8 @@ ray_tracer_integration:
   fallback_mode: 'prism_network'       # Fallback when ray_tracer fails
   
   # Ray tracer parameters (override ray_tracing section when integrated)
-  azimuth_divisions: 8                 # Initial angular divisions (curriculum learning)
-  elevation_divisions: 4               # Initial angular divisions (curriculum learning)
+  azimuth_divisions: 36                 # Initial angular divisions (curriculum learning)
+  elevation_divisions: 18               # Initial angular divisions (curriculum learning)
   max_ray_length: 100.0                # Maximum ray length for training
   scene_size: 100.0                    # Scene size for training
   
