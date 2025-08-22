@@ -453,7 +453,7 @@ The advanced features in the Prism system provide:
 These features enable the Prism system to handle the most demanding RF modeling scenarios while maintaining flexibility for different use cases and performance requirements.
 
 For detailed implementation information, see:
-- [CSI Architecture Guide](csi_architecture.md)
-- [Ray Tracing Implementation Guide](ray_tracing_guide.md)
+- [CSI Architecture Guide](CSI_ARCHITECTURE.md)
+- [Ray Tracing Implementation Guide](RAY_TRACING_GUIDE.md)
 - [Configuration Examples](configs/)
 - [API Documentation](api/)
