@@ -117,230 +117,351 @@ class PositionalEncoding:
 
 ## 4. Discrete Ray Tracing Engine
 
-### 4.1 Core Ray Tracing Algorithm
+The ray tracing engine implements the core electromagnetic wave propagation modeling based on the discrete radiance field approach. It integrates with the neural networks specified in [ARCHITECTURE_DESIGN.md](ARCHITECTURE_DESIGN.md) to compute attenuation factors and radiation patterns.
 
+### 4.1 Ray Tracer Core Design
+
+The ray tracer operates on the principle of discrete ray marching along direction $\omega$ from base station position $P_{\text{BS}}$, accumulating energy contributions from voxels along the ray path.
+
+#### 4.1.1 Single-Ray Tracing Function
+
+**Purpose**: Trace a single ray in direction $\omega$ and compute received energy from that direction.
+
+**Input Parameters**:
+- $P_{\text{BS}}$: Base station location (3D coordinates)
+- $\text{antenna\_index}$: Index of the base station antenna (0 to $N_{\text{BS}}-1$)
+- $\text{subcarrier\_index}$: Index of the subcarrier (0 to $K-1$)
+- $\omega$: Ray tracing direction vector (normalized 3D vector)
+- $D$: Scene depth (maximum tracing distance)
+
+**Output**: 
+- Received energy from direction $\omega$ for the specified antenna and subcarrier
+
+**Algorithm**:
 ```python
-class DiscreteRayTracer:
-    def __init__(self, voxel_grid, attenuation_net, radiation_net, config):
-        self.voxel_grid = voxel_grid
-        self.attenuation_net = attenuation_net
-        self.radiation_net = radiation_net
-        self.config = config
-        
-        # Optimization parameters
-        self.importance_sampling_enabled = config.get('importance_sampling', True)
-        self.pyramid_sampling_enabled = config.get('pyramid_sampling', True)
-        self.num_ray_steps = config.get('num_ray_steps', 100)
-        self.step_size = config.get('step_size', 0.1)
+def trace_single_ray(self, bs_position, antenna_index, subcarrier_index, direction, scene_depth):
+    """
+    Trace a single ray and compute received energy
     
-    def trace_ray(self, receiver_pos, direction, transmitter_pos):
-        """
-        Trace a single ray from receiver position in given direction
-        
-        Args:
-            receiver_pos: Receiver 3D position
-            direction: Ray direction vector (normalized)
-            transmitter_pos: Transmitter 3D position
-        
-        Returns:
-            received_signal: Complex signal strength
-        """
-        if self.importance_sampling_enabled:
-            return self._trace_ray_with_importance_sampling(
-                receiver_pos, direction, transmitter_pos
-            )
-        else:
-            return self._trace_ray_uniform_sampling(
-                receiver_pos, direction, transmitter_pos
-            )
+    Args:
+        bs_position: P_BS - Base station 3D position
+        antenna_index: Base station antenna index (0 to N_BS-1)
+        subcarrier_index: Subcarrier index (0 to K-1)
+        direction: ω - Ray direction vector (normalized)
+        scene_depth: D - Maximum tracing distance
     
-    def _trace_ray_uniform_sampling(self, receiver_pos, direction, transmitter_pos):
-        """Uniform sampling ray tracing"""
-        accumulated_signal = 0.0
-        cumulative_attenuation = 0.0
-        
-        for step in range(self.num_ray_steps):
-            # Calculate voxel position
-            voxel_pos = receiver_pos + step * self.step_size * direction
-            
-            # Get voxel at position
-            voxel = self._get_voxel_at_position(voxel_pos)
-            if voxel is None:
-                continue
-            
-            # Calculate local contribution
-            local_signal = self._calculate_local_signal(
-                voxel, -direction, transmitter_pos
-            )
-            
-            # Apply cumulative attenuation
-            if step > 0:
-                cumulative_attenuation += voxel.attenuation_coeff * self.step_size
-            
-            attenuated_signal = local_signal * torch.exp(-cumulative_attenuation)
-            accumulated_signal += attenuated_signal * self.step_size
-        
-        return accumulated_signal
+    Returns:
+        received_energy: Complex energy value received from this direction
+    """
+    # Stage 1: Uniform sampling for importance estimation
+    uniform_samples = self._generate_uniform_samples(bs_position, direction, scene_depth)
+    importance_weights = self._compute_importance_weights(uniform_samples, antenna_index, subcarrier_index)
+    
+    # Stage 2: Importance-based resampling using CDF
+    fine_samples = self._resample_with_importance(importance_weights, uniform_samples)
+    
+    # Stage 3: Energy accumulation along the ray
+    total_energy = self._accumulate_energy(fine_samples, antenna_index, subcarrier_index, direction)
+    
+    return total_energy
 ```
 
-### 4.2 Importance Sampling Implementation
+#### 4.1.2 Importance-Based Sampling Implementation
+
+**Stage 1: Uniform Sampling and Weight Computation**
 
 ```python
-def _trace_ray_with_importance_sampling(self, receiver_pos, direction, transmitter_pos):
-    """Importance sampling ray tracing with non-uniform sampling"""
+def _generate_uniform_samples(self, bs_position, direction, scene_depth):
+    """Generate uniform samples along ray for importance estimation"""
+    num_coarse_samples = self.config.get('coarse_samples', 100)
+    step_size = scene_depth / num_coarse_samples
     
-    # Stage 1: Coarse uniform sampling for importance estimation
-    coarse_positions = self._generate_coarse_samples(receiver_pos, direction)
-    coarse_attenuations = self._estimate_coarse_attenuations(coarse_positions)
+    samples = []
+    for i in range(num_coarse_samples):
+        # Sample position: P_BS + ω * t
+        t = i * step_size
+        sample_pos = bs_position + t * direction
+        samples.append({
+            'position': sample_pos,
+            'distance': t,
+            'step_size': step_size
+        })
     
-    # Stage 2: Calculate importance weights
-    importance_weights = self._calculate_importance_weights(coarse_attenuations)
-    
-    # Stage 3: Fine importance-based sampling
-    fine_positions = self._generate_fine_samples(importance_weights, coarse_positions)
-    
-    # Stage 4: Ray tracing with fine sampling
-    return self._trace_with_fine_samples(fine_positions, direction, transmitter_pos)
+    return samples
 
-def _generate_coarse_samples(self, receiver_pos, direction):
-    """Generate K uniform samples along ray"""
-    positions = []
-    for k in range(self.config['coarse_samples']):
-        pos = receiver_pos + k * self.config['coarse_step_size'] * direction
-        positions.append(pos)
-    return positions
-
-def _estimate_coarse_attenuations(self, positions):
-    """Estimate attenuation factors at coarse positions"""
-    attenuations = []
-    for pos in positions:
-        voxel = self._get_voxel_at_position(pos)
-        if voxel:
-            # Use real part of attenuation for importance calculation
-            beta = torch.real(voxel.attenuation_coeff)
-            attenuations.append(beta)
-        else:
-            attenuations.append(0.0)
-    return torch.tensor(attenuations)
-
-def _calculate_importance_weights(self, attenuations):
-    """Calculate importance weights for non-uniform sampling"""
+def _compute_importance_weights(self, samples, antenna_index, subcarrier_index):
+    """Compute importance weights based on attenuation factors"""
     weights = []
-    cumulative_attenuation = 0.0
     
-    for k, beta in enumerate(attenuations):
-        # Calculate segment weight
-        segment_weight = (1 - torch.exp(-beta * self.config['coarse_step_size'])) * \
-                        torch.exp(-cumulative_attenuation)
+    for sample in samples:
+        # Query AttenuationNetwork for attenuation factor
+        attenuation_factor = self._query_attenuation_network(
+            sample['position'], antenna_index, subcarrier_index
+        )
         
-        weights.append(segment_weight)
-        cumulative_attenuation += beta * self.config['coarse_step_size']
+        # Compute importance weight based on attenuation
+        # Higher attenuation = higher importance for sampling
+        weight = self._compute_sample_weight(attenuation_factor, sample['step_size'])
+        weights.append(weight)
     
-    # Normalize weights
+    # Normalize weights to form probability distribution
     weights = torch.tensor(weights)
     weights = weights / torch.sum(weights)
     
     return weights
-
-def _generate_fine_samples(self, importance_weights, coarse_positions):
-    """Generate fine samples based on importance weights"""
-    # Use inverse CDF sampling
-    cdf = torch.cumsum(importance_weights, dim=0)
-    
-    fine_positions = []
-    for i in range(self.config['fine_samples']):
-        # Generate random sample
-        u = torch.rand(1)
-        
-        # Find corresponding position using CDF
-        idx = torch.searchsorted(cdf, u)
-        idx = torch.clamp(idx, 0, len(coarse_positions) - 1)
-        
-        # Interpolate position
-        if idx == 0:
-            pos = coarse_positions[0]
-        else:
-            alpha = (u - cdf[idx-1]) / (cdf[idx] - cdf[idx-1])
-            pos = coarse_positions[idx-1] + alpha * (coarse_positions[idx] - coarse_positions[idx-1])
-        
-        fine_positions.append(pos)
-    
-    return fine_positions
 ```
 
-### 4.3 Pyramid Sampling Implementation
+**Stage 2: CDF-Based Resampling**
 
 ```python
-class PyramidSampler:
-    def __init__(self, config):
-        self.azimuth_divisions = config.get('azimuth_divisions', 36)  # A
-        self.elevation_divisions = config.get('elevation_divisions', 18)  # B
-        self.max_depth = config.get('max_depth', 100.0)
-        self.samples_per_pyramid = config.get('samples_per_pyramid', 10)
+def _resample_with_importance(self, importance_weights, uniform_samples):
+    """Resample ray using importance weights and CDF"""
+    num_fine_samples = self.config.get('fine_samples', 200)
     
-    def generate_directional_samples(self, receiver_pos):
-        """Generate directional samples using pyramid structure"""
-        directions = []
+    # Compute cumulative distribution function
+    cdf = torch.cumsum(importance_weights, dim=0)
+    
+    fine_samples = []
+    for i in range(num_fine_samples):
+        # Generate random sample u ~ U[0,1]
+        u = torch.rand(1)
         
-        for a in range(self.azimuth_divisions):
-            for b in range(self.elevation_divisions):
-                # Calculate pyramid boundaries
-                phi_min = 2 * torch.pi * a / self.azimuth_divisions
-                phi_max = 2 * torch.pi * (a + 1) / self.azimuth_divisions
-                theta_min = torch.pi * b / self.elevation_divisions
-                theta_max = torch.pi * (b + 1) / self.elevation_divisions
+        # Find corresponding position using inverse CDF
+        sample_idx = torch.searchsorted(cdf, u)
+        sample_idx = torch.clamp(sample_idx, 0, len(uniform_samples) - 1)
+        
+        # Interpolate position between uniform samples
+        if sample_idx == 0:
+            sample_pos = uniform_samples[0]['position']
+        else:
+            # Linear interpolation between samples
+            alpha = (u - cdf[sample_idx-1]) / (cdf[sample_idx] - cdf[sample_idx-1])
+            pos_prev = uniform_samples[sample_idx-1]['position']
+            pos_curr = uniform_samples[sample_idx]['position']
+            sample_pos = pos_prev + alpha * (pos_curr - pos_prev)
+        
+        fine_samples.append({
+            'position': sample_pos,
+            'importance_weight': importance_weights[sample_idx]
+        })
+    
+    return fine_samples
+```
+
+**Stage 3: Energy Accumulation**
+
+```python
+def _accumulate_energy(self, fine_samples, antenna_index, subcarrier_index, direction):
+    """Accumulate energy contributions along the ray"""
+    accumulated_energy = 0.0
+    cumulative_attenuation = 0.0
+    
+    for i, sample in enumerate(fine_samples):
+        # Query neural networks for this sample point
+        attenuation_factor = self._query_attenuation_network(
+            sample['position'], antenna_index, subcarrier_index
+        )
+        
+        radiation_factor = self._query_radiation_network(
+            sample['position'], direction, antenna_index, subcarrier_index
+        )
+        
+        # Apply cumulative attenuation from previous samples
+        if i > 0:
+            cumulative_attenuation += attenuation_factor * sample['step_size']
+        
+        # Compute local energy contribution
+        local_energy = attenuation_factor * radiation_factor
+        
+        # Apply attenuation and accumulate
+        attenuated_energy = local_energy * torch.exp(-cumulative_attenuation)
+        accumulated_energy += attenuated_energy * sample['step_size']
+    
+    return accumulated_energy
+```
+
+#### 4.1.3 Neural Network Integration
+
+The ray tracer integrates with the neural networks specified in [ARCHITECTURE_DESIGN.md](ARCHITECTURE_DESIGN.md):
+
+```python
+def _query_attenuation_network(self, position, antenna_index, subcarrier_index):
+    """Query AttenuationNetwork for attenuation factors"""
+    # Apply IPE encoding to position
+    ipe_features = self.positional_encoding.integrated_encode(position)
+    
+    # Query AttenuationNetwork (outputs 128D features)
+    features = self.attenuation_network(ipe_features)
+    
+    # Query Attenuation Decoder for specific antenna and subcarrier
+    # Output: N_UE × K attenuation factors
+    attenuation_factors = self.attenuation_decoder(features)
+    
+    # Extract specific antenna and subcarrier
+    return attenuation_factors[antenna_index, subcarrier_index]
+
+def _query_radiation_network(self, position, direction, antenna_index, subcarrier_index):
+    """Query RadianceNetwork for radiation patterns"""
+    # Apply IPE encoding to position and direction
+    pos_ipe = self.positional_encoding.integrated_encode(position)
+    dir_pe = self.positional_encoding.encode(direction)
+    
+    # Get antenna embedding from codebook
+    antenna_embedding = self.antenna_codebook[antenna_index]
+    
+    # Query RadianceNetwork
+    # Input: [IPE_pos, PE_direction, 128D_features, 64D_antenna_embedding]
+    radiation_output = self.radiance_network(
+        pos_ipe, dir_pe, self.current_features, antenna_embedding
+    )
+    
+    # Output: N_UE × K radiation factors
+    return radiation_output[antenna_index, subcarrier_index]
+```
+
+### 4.2 Multiple-Ray Tracing
+
+**Purpose**: Trace multiple rays in parallel for different antennas, subcarriers, and directions.
+
+**Input Parameters**:
+- $P_{\text{BS}}$: Base station location
+- $\text{antenna\_indices}$: Array of antenna indices to trace
+- $\text{subcarrier\_indices}$: Array of subcarrier indices to trace  
+- $\text{directions}$: Array of ray directions
+- $D$: Scene depth
+
+**Output**: 
+- Matrix of received energies: $[\text{num\_antennas}] \times [\text{num\_subcarriers}] \times [\text{num\_directions}]$
+
+**Implementation**:
+
+```python
+def trace_multiple_rays(self, bs_position, antenna_indices, subcarrier_indices, directions, scene_depth):
+    """
+    Trace multiple rays in parallel
+    
+    Args:
+        bs_position: Base station 3D position
+        antenna_indices: Array of antenna indices [num_antennas]
+        subcarrier_indices: Array of subcarrier indices [num_subcarriers]
+        directions: Array of ray directions [num_directions, 3]
+        scene_depth: Maximum tracing distance
+    
+    Returns:
+        energy_matrix: [num_antennas, num_subcarriers, num_directions] complex energy values
+    """
+    num_antennas = len(antenna_indices)
+    num_subcarriers = len(subcarrier_indices)
+    num_directions = len(directions)
+    
+    # Initialize output matrix
+    energy_matrix = torch.zeros(
+        (num_antennas, num_subcarriers, num_directions), 
+        dtype=torch.complex64
+    )
+    
+    # Process in batches for efficiency
+    batch_size = self.config.get('batch_size', 100)
+    
+    for ant_idx in range(0, num_antennas, batch_size):
+        ant_end = min(ant_idx + batch_size, num_antennas)
+        
+        for sub_idx in range(0, num_subcarriers, batch_size):
+            sub_end = min(sub_idx + batch_size, num_subcarriers)
+            
+            for dir_idx in range(0, num_directions, batch_size):
+                dir_end = min(dir_idx + batch_size, num_directions)
                 
-                # Generate samples within pyramid
-                pyramid_directions = self._sample_pyramid(
-                    phi_min, phi_max, theta_min, theta_max
+                # Process batch
+                batch_energies = self._trace_ray_batch(
+                    bs_position,
+                    antenna_indices[ant_idx:ant_end],
+                    subcarrier_indices[sub_idx:sub_end],
+                    directions[dir_idx:dir_end],
+                    scene_depth
                 )
-                directions.extend(pyramid_directions)
-        
-        return directions
+                
+                # Store results
+                energy_matrix[ant_idx:ant_end, sub_idx:sub_end, dir_idx:dir_end] = batch_energies
     
-    def _sample_pyramid(self, phi_min, phi_max, theta_min, theta_max):
-        """Sample directions within a single pyramid"""
-        directions = []
-        
-        for _ in range(self.samples_per_pyramid):
-            # Uniform sampling within pyramid
-            phi = phi_min + torch.rand(1) * (phi_max - phi_min)
-            theta = theta_min + torch.rand(1) * (theta_max - theta_min)
-            
-            # Convert to Cartesian coordinates
-            direction = torch.tensor([
-                torch.sin(theta) * torch.cos(phi),
-                torch.sin(theta) * torch.sin(phi),
-                torch.cos(theta)
-            ])
-            
-            directions.append(direction)
-        
-        return directions
+    return energy_matrix
+
+def _trace_ray_batch(self, bs_position, antenna_batch, subcarrier_batch, direction_batch, scene_depth):
+    """Process a batch of rays in parallel"""
+    batch_energies = []
+    
+    # Vectorized processing for the batch
+    for antenna_idx in antenna_batch:
+        for subcarrier_idx in subcarrier_batch:
+            for direction in direction_batch:
+                energy = self.trace_single_ray(
+                    bs_position, antenna_idx, subcarrier_idx, direction, scene_depth
+                )
+                batch_energies.append(energy)
+    
+    return torch.stack(batch_energies).reshape(len(antenna_batch), len(subcarrier_batch), len(direction_batch))
+```
+
+### 4.3 Configuration Parameters
+
+```python
+RAY_TRACER_CONFIG = {
+    # Sampling parameters
+    'coarse_samples': 100,      # Number of uniform samples for importance estimation
+    'fine_samples': 200,        # Number of importance-based samples for energy computation
+    'batch_size': 100,          # Batch size for multiple-ray tracing
+    
+    # Neural network integration
+    'use_attenuation_cache': True,    # Cache attenuation network outputs
+    'use_radiation_cache': True,      # Cache radiation network outputs
+    'cache_size': 10000,             # Maximum cache size
+    
+    # Performance optimization
+    'enable_parallel_processing': True,  # Enable parallel ray tracing
+    'num_worker_threads': 4,            # Number of worker threads
+    'gpu_acceleration': True            # Enable GPU acceleration if available
+}
 ```
 
 ## 5. Signal Aggregation and Training
 
 ### 5.1 Multi-Directional Signal Aggregation
 
+The signal aggregation process computes the total received energy at the base station by tracing rays in multiple directions and aggregating the results across all antennas and subcarriers.
+
 ```python
-def aggregate_signals(self, receiver_pos, transmitter_pos):
-    """Aggregate signals from all directions"""
+def aggregate_signals(self, bs_position, antenna_indices, subcarrier_indices, scene_depth):
+    """
+    Aggregate signals from all directions for multiple antennas and subcarriers
+    
+    Args:
+        bs_position: Base station 3D position
+        antenna_indices: Array of antenna indices to process
+        subcarrier_indices: Array of subcarrier indices to process
+        scene_depth: Maximum tracing distance
+    
+    Returns:
+        total_signals: [num_antennas, num_subcarriers] aggregated signal matrix
+    """
+    # Generate directional samples using pyramid structure
     if self.pyramid_sampling_enabled:
-        directions = self.pyramid_sampler.generate_directional_samples(receiver_pos)
+        directions = self.pyramid_sampler.generate_directional_samples(bs_position)
     else:
         directions = self._generate_uniform_directions()
     
-    total_signal = 0.0
-    for direction in directions:
-        signal = self.trace_ray(receiver_pos, direction, transmitter_pos)
-        total_signal += signal
+    # Trace multiple rays in parallel
+    energy_matrix = self.trace_multiple_rays(
+        bs_position, antenna_indices, subcarrier_indices, directions, scene_depth
+    )
     
-    return total_signal / len(directions)
+    # Aggregate across directions
+    # Shape: [num_antennas, num_subcarriers, num_directions] -> [num_antennas, num_subcarriers]
+    total_signals = torch.sum(energy_matrix, dim=2) / len(directions)
+    
+    return total_signals
 
 def _generate_uniform_directions(self):
-    """Generate uniform directional samples"""
-    # Fibonacci sphere sampling for uniform distribution
+    """Generate uniform directional samples using Fibonacci sphere sampling"""
     num_directions = self.config.get('num_directions', 100)
     directions = []
     
@@ -362,6 +483,8 @@ def _generate_uniform_directions(self):
 
 ### 5.2 Training Loss Function
 
+The training loss compares predicted aggregated signals with ground truth measurements across all antennas and subcarriers:
+
 ```python
 class RayTracingLoss(nn.Module):
     def __init__(self, loss_type='l2'):
@@ -377,11 +500,11 @@ class RayTracingLoss(nn.Module):
     
     def forward(self, predicted_signals, target_signals):
         """
-        Calculate training loss
+        Calculate training loss for multiple antennas and subcarriers
         
         Args:
-            predicted_signals: Model predictions [batch_size, num_receivers]
-            target_signals: Ground truth measurements [batch_size, num_receivers]
+            predicted_signals: Model predictions [batch_size, num_antennas, num_subcarriers]
+            target_signals: Ground truth measurements [batch_size, num_antennas, num_subcarriers]
         
         Returns:
             loss: Training loss value
@@ -391,7 +514,7 @@ class RayTracingLoss(nn.Module):
         elif self.loss_type == 'l1':
             return self.criterion(predicted_signals, target_signals)
         
-        # Complex signal handling
+        # Complex signal handling for RF modeling
         if torch.is_complex(predicted_signals) or torch.is_complex(target_signals):
             # Separate real and imaginary parts
             pred_real = torch.real(predicted_signals)
@@ -403,6 +526,41 @@ class RayTracingLoss(nn.Module):
             imag_loss = self.criterion(pred_imag, target_imag)
             
             return real_loss + imag_loss
+```
+
+### 5.3 Training Data Structure
+
+The training data should be organized to support the multi-antenna, multi-subcarrier architecture:
+
+```python
+class RayTracingDataset:
+    def __init__(self, data_path, num_antennas, num_subcarriers):
+        self.data_path = data_path
+        self.num_antennas = num_antennas
+        self.num_subcarriers = num_subcarriers
+        
+    def __getitem__(self, index):
+        """
+        Get training sample
+        
+        Returns:
+            sample: Dictionary containing:
+                - bs_position: Base station position [3]
+                - antenna_indices: Antenna indices to process
+                - subcarrier_indices: Subcarrier indices to process
+                - target_signals: Ground truth signals [num_antennas, num_subcarriers]
+                - scene_depth: Maximum tracing distance
+        """
+        # Load training data
+        data = torch.load(f"{self.data_path}/sample_{index}.pt")
+        
+        return {
+            'bs_position': data['bs_position'],
+            'antenna_indices': data['antenna_indices'],
+            'subcarrier_indices': data['subcarrier_indices'],
+            'target_signals': data['target_signals'],
+            'scene_depth': data['scene_depth']
+        }
 ```
 
 ## 6. Performance Optimization
@@ -577,9 +735,17 @@ class PrismRayTracer:
     def __init__(self, config=None):
         self.config = config or RAY_TRACING_CONFIG
         self.voxel_grid = None
-        self.attenuation_net = None
-        self.radiation_net = None
+        
+        # Neural networks (specified in ARCHITECTURE_DESIGN.md)
+        self.attenuation_network = None
+        self.attenuation_decoder = None
+        self.radiance_network = None
+        self.antenna_codebook = None
+        
+        # Ray tracing components
         self.ray_tracer = None
+        self.pyramid_sampler = None
+        self.positional_encoding = None
         
         self._initialize_networks()
         self._initialize_ray_tracer()
@@ -594,22 +760,51 @@ class PrismRayTracer:
     
     def train(self, training_data):
         """Train the neural networks"""
-        # Training implementation
+        # Training implementation using the loss function from section 5.2
         pass
     
-    def predict_signals(self, receiver_positions, transmitter_positions):
-        """Predict received signals for given positions"""
-        signals = []
+    def predict_signals(self, bs_position, antenna_indices, subcarrier_indices, scene_depth):
+        """
+        Predict received signals for given base station position
         
-        for rx_pos, tx_pos in zip(receiver_positions, transmitter_positions):
-            signal = self.ray_tracer.aggregate_signals(rx_pos, tx_pos)
-            signals.append(signal)
+        Args:
+            bs_position: Base station 3D position
+            antenna_indices: Array of antenna indices to process
+            subcarrier_indices: Array of subcarrier indices to process
+            scene_depth: Maximum tracing distance
         
-        return torch.stack(signals)
+        Returns:
+            predicted_signals: [num_antennas, num_subcarriers] signal matrix
+        """
+        return self.ray_tracer.aggregate_signals(
+            bs_position, antenna_indices, subcarrier_indices, scene_depth
+        )
     
-    def visualize_ray_path(self, receiver_pos, direction, transmitter_pos):
+    def trace_single_ray(self, bs_position, antenna_index, subcarrier_index, direction, scene_depth):
+        """
+        Trace a single ray for debugging and analysis
+        
+        Args:
+            bs_position: Base station 3D position
+            antenna_index: Specific antenna index
+            subcarrier_index: Specific subcarrier index
+            direction: Ray direction vector
+            scene_depth: Maximum tracing distance
+        
+        Returns:
+            received_energy: Energy received from this specific direction
+        """
+        return self.ray_tracer.trace_single_ray(
+            bs_position, antenna_index, subcarrier_index, direction, scene_depth
+        )
+    
+    def visualize_ray_path(self, bs_position, direction, scene_depth, antenna_index=0, subcarrier_index=0):
         """Visualize ray path for debugging"""
-        # Visualization implementation
+        # Visualization implementation showing:
+        # - Ray path from base station
+        # - Sample points along the ray
+        # - Importance weights at each sample
+        # - Energy accumulation
         pass
 ```
 
@@ -629,15 +824,56 @@ bounding_box = ray_tracer.load_scene('office_building.obj')
 if training_data_available:
     ray_tracer.train(training_data)
 
-# Predict signals
-receiver_positions = torch.tensor([[0, 0, 0], [10, 0, 0], [0, 10, 0]])
-transmitter_positions = torch.tensor([[5, 5, 5]] * 3)
+# Example 1: Single ray tracing for debugging
+bs_position = torch.tensor([0, 0, 0])  # Base station at origin
+antenna_index = 0                      # First antenna
+subcarrier_index = 0                   # First subcarrier
+direction = torch.tensor([1, 0, 0])   # Ray in +x direction
+scene_depth = 100.0                    # Maximum tracing distance
+
+single_ray_energy = ray_tracer.trace_single_ray(
+    bs_position, antenna_index, subcarrier_index, direction, scene_depth
+)
+print(f"Single ray energy: {single_ray_energy}")
+
+# Example 2: Multiple ray tracing for signal prediction
+bs_position = torch.tensor([5, 5, 5])           # Base station position
+antenna_indices = [0, 1, 2, 3]                 # 4 antennas
+subcarrier_indices = [0, 1, 2, 3, 4]           # 5 subcarriers
+scene_depth = 150.0                             # Maximum tracing distance
 
 predicted_signals = ray_tracer.predict_signals(
-    receiver_positions, transmitter_positions
+    bs_position, antenna_indices, subcarrier_indices, scene_depth
 )
-
+print(f"Predicted signals shape: {predicted_signals.shape}")
 print(f"Predicted signals: {predicted_signals}")
+
+# Example 3: Batch processing for multiple base station positions
+bs_positions = torch.tensor([
+    [0, 0, 0],    # Base station 1
+    [10, 0, 0],   # Base station 2
+    [0, 10, 0],   # Base station 3
+    [10, 10, 0]   # Base station 4
+])
+
+all_signals = []
+for bs_pos in bs_positions:
+    signals = ray_tracer.predict_signals(
+        bs_pos, antenna_indices, subcarrier_indices, scene_depth
+    )
+    all_signals.append(signals)
+
+all_signals = torch.stack(all_signals)
+print(f"All signals shape: {all_signals.shape}")  # [4, 4, 5] = [num_bs, num_antennas, num_subcarriers]
+
+# Example 4: Visualization for debugging
+ray_tracer.visualize_ray_path(
+    bs_position=torch.tensor([0, 0, 0]),
+    direction=torch.tensor([1, 1, 0]),
+    scene_depth=100.0,
+    antenna_index=0,
+    subcarrier_index=0
+)
 ```
 
 ## 9. Testing and Validation
