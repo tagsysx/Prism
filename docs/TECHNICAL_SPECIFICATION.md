@@ -10,7 +10,9 @@ This document provides a detailed description of the technical implementation de
 
 In the discrete representation, 3D scenes are divided into a finite collection of voxels:
 
-$\{P_v^i\}_{i=1}^N$
+```math
+\{P_v^i\}_{i=1}^N
+```
 
 Each voxel $P_v^i$ represents a localized volume element, serving as a radiation source with two key properties:
 - **Attenuation coefficient** $\rho(P_v^i)$: Describes the electromagnetic wave attenuation characteristics within the voxel
@@ -21,7 +23,9 @@ Each voxel $P_v^i$ represents a localized volume element, serving as a radiation
 To model these properties, we use two multi-layer perceptrons (MLPs):
 
 #### (1) AttenuationNetwork ($f_\theta$)
-$f_\theta\!\left(\text{IPE}(P_v^i)\right) \to \big(\rho(P_v^i), \mathcal{F}(P_v^i)\big)$
+```math
+f_\theta\!\left(\text{IPE}(P_v^i)\right) \to \big(\rho(P_v^i), \mathcal{F}(P_v^i)\big)
+```
 
 where IPE is the Integrated Positional Encoding (IPE). 
 
@@ -30,7 +34,9 @@ where IPE is the Integrated Positional Encoding (IPE).
 - Output: Attenuation coefficient $\rho(P_v^i)$ and 256-dimensional latent features $\mathcal{F}(P_v^i)$
 
 #### (2) RadiationNetwork ($f_\psi$)
-$f_\psi\!\left(\mathcal{F}(P_v^i), \text{PE}(\omega), \text{PE}(P_{\text{TX}})\right) \to S(P_v^i,\omega)$
+```math
+f_\psi\!\left(\mathcal{F}(P_v^i), \text{PE}(\omega), \text{PE}(P_{\text{TX}})\right) \to S(P_v^i,\omega)
+```
 
 where $\text{PE}(\cdot)$ is the standard positional encoding. 
 
@@ -44,7 +50,9 @@ where $\text{PE}(\cdot)$ is the standard positional encoding.
 
 The standard positional encoding function $\mathrm{PE}(\cdot)$ transforms input coordinates into high-dimensional representations, enhancing the model's expressive power:
 
-$\mathrm{PE}(x) = [\sin(2^0 \pi x), \cos(2^0 \pi x), \sin(2^1 \pi x), \cos(2^1 \pi x), \ldots, \sin(2^{L-1} \pi x), \cos(2^{L-1} \pi x)]$
+```math
+\mathrm{PE}(x) = [\sin(2^0 \pi x), \cos(2^0 \pi x), \sin(2^1 \pi x), \cos(2^1 \pi x), \ldots, \sin(2^{L-1} \pi x), \cos(2^{L-1} \pi x)]
+```
 
 This encoding allows the network to learn high-frequency functions by mapping input coordinates to a higher dimensional space.
 
@@ -52,7 +60,9 @@ This encoding allows the network to learn high-frequency functions by mapping in
 
 The Integrated Positional Encoding function $\mathrm{IPE}(\cdot)$ extends the standard encoding to handle spatial regions rather than single points. For a 3D point $\mathbf{x} \sim \mathcal{N}(\mu, \Sigma)$, the IPE is the expected value of the positional encoding:
 
-$\text{IPE}(\mu, \Sigma) = \left( \mathbb{E}[\sin(2^k \pi \mathbf{x})], \mathbb{E}[\cos(2^k \pi \mathbf{x})] \right)_{k=0}^{L-1}$
+```math
+\text{IPE}(\mu, \Sigma) = \left( \mathbb{E}[\sin(2^k \pi \mathbf{x})], \mathbb{E}[\cos(2^k \pi \mathbf{x})] \right)_{k=0}^{L-1}
+```
 
 Where:
 - $\mu$: Mean position of the Gaussian (center of the conical frustum)
@@ -60,8 +70,12 @@ Where:
 
 The expectation for each dimension (e.g., x-coordinate) is:
 
-$\mathbb{E}[\sin(2^k \pi x)] = \sin(2^k \pi \mu_x) \cdot \exp\left(-\frac{1}{2} (2^k \pi)^2 \Sigma_{xx}\right)$
-$\mathbb{E}[\cos(2^k \pi x)] = \cos(2^k \pi \mu_x) \cdot \exp\left(-\frac{1}{2} (2^k \pi)^2 \Sigma_{xx}\right)$
+```math
+\mathbb{E}[\sin(2^k \pi x)] = \sin(2^k \pi \mu_x) \cdot \exp\left(-\frac{1}{2} (2^k \pi)^2 \Sigma_{xx}\right)
+```
+```math
+\mathbb{E}[\cos(2^k \pi x)] = \cos(2^k \pi \mu_x) \cdot \exp\left(-\frac{1}{2} (2^k \pi)^2 \Sigma_{xx}\right)
+```
 
 The exponential term $\exp\left(-\frac{1}{2} (2^k \pi)^2 \Sigma_{xx}\right)$ acts as a low-pass filter, attenuating high frequencies for larger regions (higher variance), which prevents aliasing and enables efficient modeling of spatial volumes.
 
@@ -71,7 +85,9 @@ The exponential term $\exp\left(-\frac{1}{2} (2^k \pi)^2 \Sigma_{xx}\right)$ act
 
 The attenuation coefficient $\rho(P_v^i)$ is determined by local material properties and represented in complex form:
 
-$\rho(P_v^i) = \Delta A + j \Delta \phi$
+```math
+\rho(P_v^i) = \Delta A + j \Delta \phi
+```
 
 Where:
 - $\Delta A$: Amplitude attenuation (dB value per voxel step length)
@@ -89,7 +105,9 @@ Where:
 
 Given a ray starting from receiver position $P_{\text{RX}}$ with direction $\omega$, we discretize it into $M$ uniform sampling points:
 
-$P_v^k = P_{\text{RX}} + k\Delta t \cdot \omega, \quad k=1,\dots,M$
+```math
+P_v^k = P_{\text{RX}} + k\Delta t \cdot \omega, \quad k=1,\dots,M
+```
 
 Where $\Delta t$ is the step size.
 
@@ -97,18 +115,26 @@ Where $\Delta t$ is the step size.
 
 The radiation intensity received from direction $\omega$ is approximated as:
 
-$S(P_{\text{RX}}, \omega) \approx \sum_{k=1}^M \exp\!\left(-\sum_{j=1}^{k-1} \rho(P_v^j)\,\Delta t\right) \rho(P_v^k) S(P_v^k, -\omega) \,\Delta t$
+```math
+S(P_{\text{RX}}, \omega) \approx \sum_{k=1}^M \exp\!\left(-\sum_{j=1}^{k-1} \rho(P_v^j)\,\Delta t\right) \rho(P_v^k) S(P_v^k, -\omega) \,\Delta t
+```
 
 #### Formula Analysis
 
 **Term (1) - Cumulative Attenuation**:
-$\exp\!\left(-\sum_{j=1}^{k-1} \rho(P_v^j)\,\Delta t\right)$
+
+```math
+\exp\!\left(-\sum_{j=1}^{k-1} \rho(P_v^j)\,\Delta t\right)
+```
 
 - Represents the cumulative attenuation from the receiver to before the k-th voxel
 - Exponential decay model conforms to the physical laws of electromagnetic wave propagation
 
 **Term (2) - Local Radiation Contribution**:
-$\rho(P_v^k) S(P_v^k, -\omega)$
+
+```math
+\rho(P_v^k) S(P_v^k, -\omega)
+```
 
 - Represents the local radiation contribution of the k-th voxel
 - Direction is $-\omega$ (opposite to the incident direction)
@@ -117,7 +143,9 @@ $\rho(P_v^k) S(P_v^k, -\omega)$
 
 By summing over all sampling directions, we obtain the total received signal:
 
-$S_{\Omega}(P_{\text{RX}}) \approx \sum_{\omega \in \Omega} S(P_{\text{RX}}, \omega)\,\Delta \omega$
+```math
+S_{\Omega}(P_{\text{RX}}) \approx \sum_{\omega \in \Omega} S(P_{\text{RX}}, \omega)\,\Delta \omega
+```
 
 Where $\Omega$ is the set of sampling directions, and $\Delta \omega$ is the directional sampling interval.
 
@@ -128,7 +156,7 @@ Where $\Omega$ is the set of sampling directions, and $\Delta \omega$ is the dir
 Training loss is computed by comparing predicted aggregated signals with true measurements:
 
 ```math
-\mathcal{L}_{\text{signal}} = \sum_{P_{\text{RX}}\sim \mathcal{D}} \left\|S_{\Omega}(P_{\text{RX}}) - \widehat{S}_{\Omega}(P_{\text{RX}}) \right\|_2$
+\mathcal{L}_{\text{signal}} = \sum_{P_{\text{RX}}\sim \mathcal{D}} \left\|S_{\Omega}(P_{\text{RX}}) - \widehat{S}_{\Omega}(P_{\text{RX}}) \right\|_2
 ```
 
 Where:
@@ -190,7 +218,9 @@ This discrete model maintains the physical interpretability of electromagnetic w
 
 When voxel dimensions approach zero, the discrete model converges to the continuous radiance field model:
 
-$\lim_{\Delta t \to 0} S(P_{\text{RX}}, \omega) = \int_0^L \exp\!\left(-\int_0^s \rho(s')\,ds'\right) \rho(s) S(s, -\omega)\,ds$
+```math
+\lim_{\Delta t \to 0} S(P_{\text{RX}}, \omega) = \int_0^L \exp\!\left(-\int_0^s \rho(s')\,ds'\right) \rho(s) S(s, -\omega)\,ds
+```
 
 ## 7. Performance Analysis
 
@@ -213,7 +243,9 @@ $\lim_{\Delta t \to 0} S(P_{\text{RX}}, \omega) = \int_0^L \exp\!\left(-\int_0^s
 
 For practical implementation, continuous ray tracing integration is approximated by discretization. Specifically, directional rays over the interval $[0, D]$ (where $D$ represents maximum depth) are uniformly divided into $K$ segments, producing $K$ voxels at positions $\{P_{\text{v}}(t_1), P_{\text{v}}(t_2), \ldots, P_{\text{v}}(t_K)\}$. The received signal can be approximated as:
 
-$S\big(P_{\text{RX}}, \omega\big) \approx \sum_{k=1}^{K} \exp\!\left(-\sum_{j=1}^{k-1} \rho(P_{\text{v}}(t_j)) \Delta t \right) \big(1 - e^{-\rho(P_{\text{v}}(t_k)) \Delta t}\big) S(P_{\text{v}}(t_k), -\omega)$
+```math
+S\big(P_{\text{RX}}, \omega\big) \approx \sum_{k=1}^{K} \exp\!\left(-\sum_{j=1}^{k-1} \rho(P_{\text{v}}(t_j)) \Delta t \right) \big(1 - e^{-\rho(P_{\text{v}}(t_k)) \Delta t}\big) S(P_{\text{v}}(t_k), -\omega)
+```
 
 Where $\Delta t = D/K$.
 
@@ -229,7 +261,9 @@ Wireless propagation is inherently non-uniform—signals suffer significant atte
 **Importance weight calculation**:
 The unnormalized importance weight for the k-th segment is:
 
-$w_k = \big(1 - e^{-\beta_k \Delta t}\big)\, \exp\!\Big(-\!\!\sum_{j<k}\beta_j\,\Delta t\Big)$
+```math
+w_k = \big(1 - e^{-\beta_k \Delta t}\big)\, \exp\!\Big(-\!\!\sum_{j<k}\beta_j\,\Delta t\Big)
+```
 
 Weights $\{w_k\}$ are normalized to form a piecewise constant probability density function (PDF) along the ray.
 
@@ -245,7 +279,9 @@ Weights $\{w_k\}$ are normalized to form a piecewise constant probability densit
 
 Continuous aggregated received signals in all directions are discretized into $L$ sampling directions:
 
-$S_{\Omega}(P_{\text{RX}}) \approx \sum_{l=1}^{L} S(P_{\text{RX}}, \omega_l)$
+```math
+S_{\Omega}(P_{\text{RX}}) \approx \sum_{l=1}^{L} S(P_{\text{RX}}, \omega_l)
+```
 
 #### 8.2.2 Pyramid Structure
 
@@ -284,41 +320,7 @@ For a given direction:
 - **Hierarchical caching**: Cache computation results at different levels
 - **Batch processing**: Process multiple pyramids and rays simultaneously
 
-## 9. Application Scenarios
-
-### 9.1 Indoor Propagation Modeling
-
-- Electromagnetic wave propagation inside buildings
-- Multipath effect modeling
-- Signal strength prediction
-
-### 9.2 Wireless Communication Systems
-
-- 5G/6G network planning
-- Antenna array optimization
-- Interference analysis
-
-### 9.3 Radar Systems
-
-- Target detection and tracking
-- Clutter modeling
-- Signal processing algorithm validation
-
-## 10. Future Improvement Directions
-
-### 10.1 Algorithm Optimization
-
-- **Adaptive step size**: Dynamically adjust step size based on scene complexity
-- **Parallel computation**: Utilize GPU parallelization for ray tracing
-- **Hierarchical representation**: Multi-resolution voxel representation
-
-### 10.2 Model Extensions
-
-- **Time-varying scenarios**: Support dynamic scene modeling
-- **Multi-frequency modeling**: Consider frequency dependence
-- **Polarization effects**: Include electromagnetic wave polarization information
-
-## 11. Summary
+## 9. Summary
 
 The discrete radiance field model achieves efficient electromagnetic wave propagation modeling by discretizing continuous 3D scenes into voxel grids. This model offers the following advantages:
 
@@ -327,7 +329,7 @@ The discrete radiance field model achieves efficient electromagnetic wave propag
 3. **Interpretability**: Each voxel's contribution has clear physical meaning
 4. **Scalability**: Easy to integrate into larger systems
 
-This model provides a powerful technical foundation for indoor propagation modeling, wireless communication system design, and radar system analysis.
+This model provides a powerful technical foundation for electromagnetic wave propagation modeling and ray tracing applications.
 
 ---
 
