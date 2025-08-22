@@ -110,6 +110,43 @@ To model the radiation pattern of each base station antenna, we construct an $N_
 - **Easy Extension**: Can add new antennas by extending the codebook
 - **Transfer Learning**: Pre-trained embeddings can be fine-tuned for new scenarios
 
+### 5. AntNetwork
+
+**Purpose**: Process antenna embeddings to generate directional importance indicators for efficient directional sampling
+
+**Input**: 
+- 64-dimensional antenna embedding from the antenna codebook
+
+**Output**: 
+- $A \times B$ directional importance matrix (indicator matrix)
+- Each element indicates the importance of a specific direction in the $A \times B$ directional grid
+
+**Architecture**: 
+- **Shallow Network**: Lightweight architecture for efficient processing
+- **Input**: 64D antenna embedding → **Hidden**: 128D → **Output**: $A \times B$ importance values
+- **Activation**: Softmax or sigmoid to normalize importance scores
+- **Output Shape**: $A \times B$ matrix where $A$ and $B$ are configurable directional divisions
+
+**Directional Space Division**:
+- **Azimuth Division**: $A$ directions (e.g., 8, 16, or 32 azimuthal angles)
+- **Elevation Division**: $B$ directions (e.g., 4, 8, or 16 elevation angles)
+- **Total Directions**: $A \times B$ possible directional combinations
+- **Centered at Antenna**: Directional space is centered at the antenna position
+
+**Top-K Sampling**:
+- **Importance Ranking**: Sort all $A \times B$ directions by importance score
+- **Top-K Selection**: Select the $K$ most important directions for detailed processing
+- **Sampling Efficiency**: Reduces computational complexity from $A \times B$ to $K$ directions
+- **Configurable K**: $K$ can be adjusted based on accuracy vs. efficiency requirements
+
+**Key Benefits**:
+- **Directional Awareness**: Captures antenna-specific directional preferences
+- **Efficient Sampling**: Reduces directional space from $A \times B$ to $K$ important directions
+- **Lightweight Processing**: Shallow network minimizes computational overhead
+- **Configurable Resolution**: $A$ and $B$ can be adjusted for different angular resolutions
+- **Antenna-Specific**: Each antenna learns its own directional importance patterns
+- **Integration Ready**: Seamlessly integrates with existing RadianceNetwork for focused processing
+
 ## Parameter Configuration
 
 ### Core Parameters
@@ -125,6 +162,14 @@ model:
   antenna_embedding_dim: 64     # Antenna embedding dimension
   use_antenna_codebook: true    # Enable antenna-specific embeddings
   use_ipe_encoding: true        # Enable IPE encoding for spatial inputs
+  
+  # AntNetwork Configuration
+  ant_network:
+    azimuth_divisions: A         # A: Number of azimuthal directions
+    elevation_divisions: B      # B: Number of elevation directions
+    top_k_directions: K_dir     # K_dir: Top-K important directions to sample
+    hidden_dim: 128             # Hidden layer dimension for AntNetwork
+    activation: "softmax"       # Activation function for importance normalization
 ```
 
 ### Virtual Link Configuration
@@ -150,15 +195,21 @@ virtual_links:
    ↓
 5. N_{\text{UE}} × K Attenuation Factors (All UE Antenna Channels)
    
-6. IPE-encoded UE Position + IPE-encoded View Direction + 128D Features + Antenna Index
+6. Antenna Index → Antenna Embedding Codebook (N_{\text{BS}} × 64D)
    ↓
-7. Antenna Embedding Codebook (N_{\text{BS}} × 64D)
+7. 64D Antenna Embedding
    ↓
-8. 64D Antenna Embedding
+8. AntNetwork (Shallow Network)
    ↓
-9. RadianceNetwork (Single Network)
+9. A × B Directional Importance Matrix
    ↓
-10. N_{\text{UE}} × K Radiation Factors (All UE Antenna Channels)
+10. Top-K Important Directions Selection
+    ↓
+11. IPE-encoded UE Position + IPE-encoded View Direction + 128D Features + Antenna Embedding + Selected Directions
+    ↓
+12. RadianceNetwork (Single Network)
+    ↓
+13. N_{\text{UE}} × K Radiation Factors (All UE Antenna Channels)
 ```
 
 
@@ -173,4 +224,7 @@ virtual_links:
 5. **Antenna Codebook**: $N_{\text{BS}} \times 64D$ learnable embeddings for antenna-specific radiation patterns
 6. **Codebook Management**: Efficient lookup table implementation with gradient flow to all embeddings
 7. **IPE Encoding**: All spatial inputs (positions and viewing directions) are IPE-encoded for better spatial representation learning
+8. **AntNetwork Integration**: Shallow network for directional importance prediction, enabling efficient top-K directional sampling
+9. **Directional Sampling**: Reduces computational complexity from $A \times B$ to $K$ important directions per antenna
+10. **Configurable Resolution**: $A$ and $B$ can be adjusted for different angular resolutions based on application requirements
 

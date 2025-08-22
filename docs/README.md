@@ -5,29 +5,28 @@ Welcome to the documentation for **Prism: Wideband RF Neural Radiance Fields for
 ## 📚 **Documentation Structure**
 
 ### **Getting Started**
-- [Installation Guide](INSTALLATION.md)
+- [Installation Guide](INSTALLATION.md) - Complete setup and installation instructions
 
 ### **Core Documentation**
-- [Technical Specification](TECHNICAL_SPECIFICATION.md) - Detailed technical implementation
-- [Architecture Design](ARCHITECTURE_DESIGN.md) - System architecture overview
-- [Advanced Features](ADVANCED_FEATURES.md) - Advanced functionality and features
+- [Specification](SPECIFICATION.md) - Discrete Radiance Field Model technical specification
+- [Network Design](NETWORK_DESIGN.md) - System architecture and network design overview
+- [Training Design](TRAINING_DESIGN.md) - Comprehensive training methodology and implementation
+- [Ray Tracing Design](RAY_TRACING_DESIGN.md) - Advanced ray tracing system design
 
 ### **Implementation Guides**
-- [CSI Architecture](CSI_ARCHITECTURE.md) - Channel State Information architecture
-- [Ray Tracing Guide](RAY_TRACING_GUIDE.md) - Ray tracing implementation details
-- [GPU Ray Tracing](GPU_RAY_TRACING_README.md) - GPU-accelerated ray tracing
-- [GPU Testing](GPU_TESTING_README.md) - GPU testing procedures
+- [Installation Guide](INSTALLATION.md) - Setup and environment configuration
+- [Ray Tracing Design](RAY_TRACING_DESIGN.md) - Ray tracing implementation and optimization
 
 ### **Integration & Compatibility**
-- [Sionna Integration](SIONNA_INTEGRATION.md) - Integration with Sionna framework
+- [Installation Guide](INSTALLATION.md) - Dependencies and compatibility information
 
 ## 🚀 **Quick Navigation**
 
 - **New to Prism?** Start with the [Installation Guide](INSTALLATION.md)
-- **Understanding the system?** Check the [Technical Specification](TECHNICAL_SPECIFICATION.md)
-- **Implementation details?** See [Architecture Design](ARCHITECTURE_DESIGN.md)
-- **Advanced features?** Explore [Advanced Features](ADVANCED_FEATURES.md)
-- **Ray tracing?** Read the [Ray Tracing Guide](RAY_TRACING_GUIDE.md)
+- **Understanding the system?** Check the [Network Design](NETWORK_DESIGN.md)
+- **Training the model?** See [Training Design](TRAINING_DESIGN.md)
+- **Technical details?** Read the [Specification](SPECIFICATION.md)
+- **Ray tracing implementation?** Explore [Ray Tracing Design](RAY_TRACING_DESIGN.md)
 
 ## 📖 **Documentation Conventions**
 

@@ -62,6 +62,105 @@ The system implements two key optimization strategies (as detailed in the Techni
 - **Hierarchical sampling**: Implements multi-level sampling strategy
 - **Monte Carlo integration**: Improves accuracy within truncated cone regions
 
+#### 2.3.3 MLP-Based Direction Sampling
+The system implements an intelligent direction sampling strategy using a shallow Multi-Layer Perceptron (MLP) to optimize ray tracing efficiency:
+
+**MLP Architecture**:
+- **Input layer**: Accepts the base station's antenna embedding parameter $C$ (typically a high-dimensional vector)
+- **Hidden layers**: 2-3 fully connected layers with ReLU activation functions
+- **Output layer**: Produces an $A \times B$ indicator matrix $M_{ij}$ where each element $M_{ij} \in \{0, 1\}$
+- **Activation**: Sigmoid activation at the output layer, followed by thresholding to produce binary indicators
+
+**Direction Selection Process**:
+```math
+M_{ij} = \text{Threshold}(\text{MLP}(C)_{ij}) = \begin{cases} 
+1 & \text{if } \text{MLP}(C)_{ij} > \tau \\
+0 & \text{otherwise}
+\end{cases}
+```
+
+Where:
+- $M_{ij}$: Binary indicator for direction $(\phi_i, \theta_j)$
+- $\text{MLP}(C)_{ij}$: MLP output for direction $(\phi_i, \theta_j)$ given antenna embedding $C$
+- $\tau$: Threshold parameter (typically $\tau = 0.5$)
+
+**Training Strategy**:
+- **Supervised learning**: Train on historical ray tracing data with known optimal direction sets
+- **Loss function**: Binary cross-entropy loss comparing predicted indicators with ground truth optimal directions
+- **Regularization**: L2 regularization to prevent overfitting
+- **Data augmentation**: Generate training samples from different antenna configurations and environmental conditions
+
+**Implementation Benefits**:
+- **Adaptive sampling**: Automatically adjusts direction sampling based on antenna characteristics
+- **Computational efficiency**: Reduces ray count from $A \times B$ to $\sum_{i,j} M_{ij}$ directions
+- **Antenna-specific optimization**: Learns optimal sampling patterns for different antenna types and configurations
+- **Real-time adaptation**: Can be updated online as antenna parameters change
+
+**Integration with Ray Tracing**:
+The MLP-based direction sampling integrates seamlessly with the existing ray tracing pipeline:
+
+```python
+def mlp_direction_sampling(antenna_embedding, mlp_model):
+    """
+    Use trained MLP to determine which directions to trace
+    
+    Args:
+        antenna_embedding: Base station's antenna embedding parameter C
+        mlp_model: Trained MLP model for direction sampling
+    
+    Returns:
+        A x B binary indicator matrix M_ij
+    """
+    # Forward pass through MLP
+    raw_output = mlp_model(antenna_embedding)
+    
+    # Apply sigmoid and threshold to get binary indicators
+    threshold = 0.5
+    indicator_matrix = (raw_output > threshold).astype(int)
+    
+    return indicator_matrix
+
+def adaptive_ray_tracing(base_station_pos, antenna_embedding, ue_positions, 
+                        selected_subcarriers, mlp_model):
+    """
+    Perform ray tracing only on MLP-selected directions
+    
+    Args:
+        base_station_pos: Base station position
+        antenna_embedding: Base station's antenna embedding parameter C
+        ue_positions: List of UE positions
+        selected_subcarriers: Dictionary mapping UE to selected subcarriers
+        mlp_model: Trained MLP model for direction sampling
+    
+    Returns:
+        Accumulated signal strength for selected directions only
+    """
+    # Get direction indicators from MLP
+    direction_indicators = mlp_direction_sampling(antenna_embedding, mlp_model)
+    
+    accumulated_signals = {}
+    
+    # Only trace rays for directions indicated by MLP
+    for phi in range(num_azimuth_divisions):
+        for theta in range(num_elevation_divisions):
+            if direction_indicators[phi, theta] == 1:
+                direction = (phi, theta)
+                
+                # Trace ray for this selected direction
+                ray_results = trace_ray(
+                    base_station_pos, direction, ue_positions, 
+                    selected_subcarriers, antenna_embedding
+                )
+                
+                # Accumulate signals
+                for (ue_pos, subcarrier), signal_strength in ray_results.items():
+                    if (ue_pos, subcarrier) not in accumulated_signals:
+                        accumulated_signals[(ue_pos, subcarrier)] = 0
+                    accumulated_signals[(ue_pos, subcarrier)] += signal_strength
+    
+    return accumulated_signals
+```
+
 ## 3. RF Signal Computation
 
 ### 3.1 Ray Count Analysis
@@ -243,7 +342,9 @@ The ray tracing system integrates seamlessly with the discrete radiance field mo
 
 ### 7.1 Advanced Optimization Techniques
 
-- **Machine learning-based directional sampling**: Set up a MLP to learn which directions should be sampled based on the antenna embedding $C$.
+- **Machine learning-based directional sampling**: The system now implements MLP-based direction sampling (Section 2.3.3) that automatically learns optimal direction selection based on antenna embedding $C$.
+- **Dynamic threshold optimization**: Adaptive threshold adjustment for MLP outputs based on performance metrics and computational constraints.
+- **Multi-antenna coordination**: Extend MLP to handle multiple antenna scenarios and learn coordinated direction sampling strategies.
 
 
 ---
