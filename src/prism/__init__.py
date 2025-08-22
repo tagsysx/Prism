@@ -22,12 +22,6 @@ from .ray_tracer_cuda import (
 
 
 
-from .rf_signal_processor import (
-    RFSignalProcessor,
-    SignalStrengthCalculator,
-    SubcarrierSelector
-)
-
 from .networks import (
     AttenuationNetwork,
     AttenuationDecoder,
@@ -43,14 +37,20 @@ from .networks import (
     PrismNetworkConfig
 )
 
+from .training_interface import (
+    PrismTrainingInterface
+)
 
+from .loss_functions import (
+    PrismLoss,
+    FrequencyAwareLoss,
+    CSIVirtualLinkLoss
+)
 
 __all__ = [
     # Core ray tracing
     'DiscreteRayTracer',
     'Ray',
-    'RayIntersection',
-    'RayPath',
     'BaseStation',
     'UserEquipment',
     
@@ -58,11 +58,6 @@ __all__ = [
     'CUDARayTracer',
     
 
-    
-    # RF signal processing
-    'RFSignalProcessor',
-    'SignalStrengthCalculator',
-    'SubcarrierSelector',
     
     # Neural networks
     'AttenuationNetwork',
@@ -78,7 +73,13 @@ __all__ = [
     'RadianceNetworkConfig',
     'PrismNetworkConfig',
     
-
+    # Training interface
+    'PrismTrainingInterface',
+    
+    # Loss functions
+    'PrismLoss',
+    'FrequencyAwareLoss',
+    'CSIVirtualLinkLoss',
     
     # Version info
     '__version__',

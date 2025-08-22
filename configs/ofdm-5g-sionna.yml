@@ -5,31 +5,34 @@
 ray_tracing:
   # Enable ray tracing system
   enabled: true
-  
+
   # Angular sampling (configurable)
   azimuth_divisions: 36           # Number of azimuth divisions A (0° to 360°)
   elevation_divisions: 18         # Number of elevation divisions B (-90° to +90°)
-  
+  # 代码实现与配置一致，见DiscreteRayTracer初始化参数
+
   # Spatial sampling (configurable)
-  uniform_samples: 128            # First stage: uniform sampling points per ray
-  resampled_points: 128            # Second stage: importance-based resampled points
-  
+  uniform_samples: 128            # First stage: uniform sampling points per ray (代码实现为128)
+  resampled_points: 64            # Second stage: importance-based resampled points (代码实现为64)
+
   # Coverage calculations
   total_directions: 648           # 36 × 18 = 648 angle combinations
-  total_spatial_points: 41472     # 648 × 64 = 41,472 spatial samples
-  
+  total_spatial_points: 41472     # 648 × 64 = 41,472 spatial samples (与resampled_points一致)
+
   # Resolution settings
-  azimuth_resolution: 10          # 10° between azimuth samples
-  elevation_resolution: 10        # 10° between elevation samples
-  
+  azimuth_resolution: 10          # 10° between azimuth samples (仅注释，实际由azimuth_divisions计算)
+  elevation_resolution: 10        # 10° between elevation samples (仅注释，实际由elevation_divisions计算)
+
   # Physical parameters
-  max_ray_length: 100.0           # Maximum ray length in meters
+  max_ray_length: 300.0           # Maximum ray length in meters
   scene_size: 200.0               # Scene size D (cubic environment)
-  
+  # 代码实现支持动态调整scene_size和max_ray_length
+
   # Performance options
   gpu_acceleration: true          # Enable GPU acceleration
   enable_early_termination: true  # Enable early termination optimization
   signal_threshold: 1e-6          # Signal strength threshold for early termination
+  # 代码实现有对应参数
 
 # Neural Network Configuration
 neural_networks:
@@ -81,59 +84,48 @@ neural_networks:
     num_ue: 1000                  # Number of UE devices
     activation: 'relu'            # Activation function
 
-# RF Signal Processing Configuration
-rf_signal_processing:
-  # Enable RF signal processing
-  enabled: true
-  
-  # Subcarrier configuration
-  total_subcarriers: 408          # Total number of subcarriers K
-  sampling_ratio: 0.3             # Subcarrier sampling ratio α (30%)
-  selected_subcarriers: 122       # K' = α × K = 0.3 × 408 = 122
-  
-  # Frequency configuration
-  frequency_band: 2.4e9           # Center frequency (2.4 GHz)
-  subcarrier_spacing: 15e3        # Subcarrier spacing (15 kHz)
-  
-  # Signal processing options
-  enable_path_loss_calculation: true
-  enable_antenna_factor: true
-  enable_material_attenuation: true
+
 
 # Base Station Configuration
 base_station:
   # Default configuration
   default_position: [0.0, 0.0, 0.0]  # Base station at origin
-  num_antennas: 64                     # Number of BS antennas
-  antenna_embedding_dim: 64            # Antenna embedding dimension
-  
+  num_antennas: 64                   # Number of BS antennas
+  antenna_embedding_dim: 64          # Antenna embedding dimension
+  # 代码实现：BaseStation类支持num_antennas和embedding_dim参数，默认位置一致
+
   # Antenna properties
-  antenna_type: 'mimo'                 # MIMO antenna configuration
-  polarization: 'dual'                 # Dual polarization support
+  antenna_type: 'mimo'               # MIMO antenna configuration
+  polarization: 'dual'               # Dual polarization support
+  # 代码实现：天线类型和极化方式为注释说明，实际实现支持MIMO和极化配置
 
 # User Equipment Configuration
 user_equipment:
   # UE configuration
-  num_ue: 1000                         # Number of UE devices
-  antenna_config: '4x4'                # 4 UE antennas per device
-  
+  num_ue: 1                       # Number of UE devices
+  antenna_config: '4x4'              # 4 UE antennas per device
+  # 代码实现：UserEquipment类支持num_ue，天线配置为注释说明
+
   # Position distribution
-  position_range: [-100.0, 100.0]      # UE position range in meters
-  height_range: [1.0, 2.0]             # UE height range in meters
+  position_range: [-150.0, 150.0]    # UE position range in meters
+  height_range: [1.0, 2.0]           # UE height range in meters
+  # 代码实现：UE位置范围与场景大小一致，支持自定义分布
 
 # Importance Sampling Configuration
 importance_sampling:
   # Enable importance-based sampling
   enabled: true
-  
+
   # Sampling parameters
-  power_factor: 2.0                # Power factor for weight calculation
-  min_weights: 1e-6                # Minimum weight threshold
-  normalize_weights: true          # Normalize importance weights
-  
+  power_factor: 2.0                  # Power factor for weight calculation
+  min_weights: 1e-6                  # Minimum weight threshold
+  normalize_weights: true            # Normalize importance weights
+  # 代码实现：DiscreteRayTracer._compute_importance_weights 支持power_factor、min_weights、normalize_weights参数
+
   # Resampling parameters
-  resampling_method: 'multinomial' # Resampling method
-  replacement: true                 # Allow replacement during resampling
+  resampling_method: 'multinomial'   # Resampling method
+  replacement: true                  # Allow replacement during resampling
+  # 代码实现：DiscreteRayTracer._importance_based_resampling 支持multinomial和replacement参数
 
 # Performance Configuration
 performance:
@@ -141,14 +133,124 @@ performance:
   device: 'cuda'                       # Device for computation ('cuda' or 'cpu')
   batch_size: 256                      # Batch size for processing
   max_concurrent_rays: 1000            # Maximum concurrent rays
-  
+  # 代码实现：DiscreteRayTracer支持device参数，batch_size和max_concurrent_rays用于并行和批处理
+
   # Memory management
   gpu_memory_fraction: 0.8             # GPU memory usage fraction
   enable_mixed_precision: true         # Enable mixed precision for efficiency
-  
+  # 代码实现：支持混合精度和显存分配
+
   # Parallel processing
   num_workers: 4                       # Number of parallel workers
   enable_distributed: false            # Enable distributed processing
+  # 代码实现：支持多进程和分布式配置
+
+# Training Interface Configuration
+training_interface:
+  # Enable integrated training interface
+  enabled: true
+  
+  # Ray tracing integration
+  use_ray_tracer: true                 # Use integrated ray_tracer for signal computation
+  num_sampling_points: 64              # Number of sampling points per ray
+  
+  # Scene configuration
+  scene_bounds:
+    min: [-50.0, -50.0, 0.0]          # Scene minimum bounds [x, y, z]
+    max: [50.0, 50.0, 30.0]           # Scene maximum bounds [x, y, z]
+  
+  # Subcarrier selection
+  subcarrier_sampling_ratio: 0.3       # Ratio of subcarriers to select (30%)
+  antenna_specific_selection: true      # Enable antenna-specific subcarrier selection
+  
+  # Checkpoint and recovery
+  checkpoint_dir: "checkpoints"         # Directory for saving checkpoints
+  auto_checkpoint: true                 # Enable automatic checkpointing
+  checkpoint_frequency: 100            # Save checkpoint every N batches
+  
+  # Curriculum learning
+  curriculum_learning:
+    enabled: true                      # Enable curriculum learning
+    phases:
+      - phase: 0
+        azimuth_divisions: 8           # Coarse angular resolution
+        elevation_divisions: 4
+        top_k_directions: 16           # Fewer directions for initial training
+      - phase: 1
+        azimuth_divisions: 16          # Medium angular resolution
+        elevation_divisions: 8
+        top_k_directions: 32
+      - phase: 2
+        azimuth_divisions: 36          # Fine angular resolution
+        elevation_divisions: 18
+        top_k_directions: 64           # More directions for final training
+  
+  # CSI computation
+  csi_computation:
+    signal_to_csi_conversion: true     # Enable signal strength to CSI conversion
+    phase_calculation_method: 'distance_based'  # Method for phase calculation
+    wavelength_normalization: 100.0   # Normalization factor for wavelength
+    complex_output: true               # Output complex CSI values
+
+# Ray Tracer Integration Configuration
+ray_tracer_integration:
+  # Integration settings
+  enabled: true                        # Enable ray_tracer integration
+  fallback_mode: 'prism_network'       # Fallback when ray_tracer fails
+  
+  # Ray tracer parameters (override ray_tracing section when integrated)
+  azimuth_divisions: 8                 # Initial angular divisions (curriculum learning)
+  elevation_divisions: 4               # Initial angular divisions (curriculum learning)
+  max_ray_length: 100.0                # Maximum ray length for training
+  scene_size: 100.0                    # Scene size for training
+  
+  # Signal processing
+  signal_threshold: 1e-6               # Signal strength threshold
+  enable_early_termination: true       # Enable early ray termination
+  
+  # AntennaNetwork integration
+  use_antenna_network_directions: true # Use AntennaNetwork for direction selection
+  direction_selection_method: 'top_k'  # Method for selecting directions
+  adaptive_direction_count: true       # Adapt direction count based on training phase
+  
+  # Performance optimization
+  batch_processing: true               # Enable batch processing for efficiency
+  cpu_offload: true                    # Offload ray_tracer computation to CPU
+  parallel_antenna_processing: false   # Process antennas in parallel (memory intensive)
+
+# Training Configuration
+training:
+  # Training parameters
+  batch_size: 32                       # Training batch size
+  learning_rate: 1e-4                  # Initial learning rate
+  num_epochs: 100                      # Number of training epochs
+  
+  # Loss function
+  loss_function: 'mse'                 # Loss function type
+  loss_weights:
+    csi_loss: 1.0                      # Weight for CSI prediction loss
+    regularization: 0.01               # Weight for regularization terms
+  
+  # Optimizer
+  optimizer: 'adam'                    # Optimizer type
+  optimizer_params:
+    beta1: 0.9                         # Adam beta1 parameter
+    beta2: 0.999                       # Adam beta2 parameter
+    weight_decay: 1e-5                 # Weight decay for regularization
+  
+  # Learning rate scheduling
+  lr_scheduler:
+    enabled: true                      # Enable learning rate scheduling
+    type: 'step'                       # Scheduler type
+    step_size: 30                      # Step size for StepLR
+    gamma: 0.1                         # Multiplicative factor for LR decay
+  
+  # Early stopping
+  early_stopping:
+    enabled: true                      # Enable early stopping
+    patience: 10                       # Number of epochs to wait for improvement
+    min_delta: 1e-6                    # Minimum change to qualify as improvement
+    restore_best_weights: true         # Restore best weights on early stopping
 
 # Output Configuration
 output:
@@ -156,8 +258,19 @@ output:
   save_results: true                   # Save ray tracing results
   output_format: 'hdf5'                # Output file format
   compression_level: 6                 # Compression level for output files
+
+  # Training outputs
+  save_training_outputs: true          # Save training interface outputs
+  save_ray_tracer_results: true        # Save ray_tracer intermediate results
+  save_csi_predictions: true           # Save CSI predictions
+  
+  # Checkpoint outputs
+  checkpoint_format: 'pytorch'         # Checkpoint file format
+  save_optimizer_state: true           # Save optimizer state in checkpoints
+  save_training_history: true          # Save training history
   
   # Logging
   log_level: 'INFO'                    # Logging level
   enable_progress_bar: true            # Enable progress bars
-  save_training_history: true          # Save neural network training history
+  log_ray_tracer_stats: true           # Log ray_tracer statistics
+  log_training_metrics: true           # Log training metrics

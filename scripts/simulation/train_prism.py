@@ -44,12 +44,13 @@ logger = logging.getLogger(__name__)
 class PrismTrainer:
     """Main trainer class for Prism network"""
     
-    def __init__(self, config_path: str, data_path: str, output_dir: str):
+    def __init__(self, config_path: str, data_path: str, output_dir: str, resume_from: str = None):
         """Initialize trainer with configuration and data paths"""
         self.config_path = config_path
         self.data_path = data_path
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.resume_from = resume_from
         
         # Load configuration
         self.config = self._load_config()
@@ -61,6 +62,10 @@ class PrismTrainer:
         # Initialize model and training components
         self._setup_model()
         self._setup_training()
+        
+        # Resume from checkpoint if specified
+        if self.resume_from:
+            self._resume_from_checkpoint()
         
         # Setup tensorboard
         self.writer = SummaryWriter(log_dir=self.output_dir / 'tensorboard')
@@ -278,6 +283,67 @@ class PrismTrainer:
             best_model_path = self.output_dir / 'best_model.pt'
             torch.save(checkpoint, best_model_path)
             logger.info(f"Best model saved: {best_model_path}")
+        
+        # Save latest checkpoint for resuming
+        latest_checkpoint_path = self.output_dir / 'latest_checkpoint.pt'
+        torch.save(checkpoint, latest_checkpoint_path)
+        logger.info(f"Latest checkpoint saved: {latest_checkpoint_path}")
+        
+        # Clean up old checkpoints (keep last 5)
+        self._cleanup_old_checkpoints()
+    
+    def _cleanup_old_checkpoints(self):
+        """Clean up old checkpoints to save disk space"""
+        checkpoints = list(self.output_dir.glob('checkpoint_epoch_*.pt'))
+        if len(checkpoints) > 5:
+            # Sort by epoch number and remove oldest
+            checkpoints.sort(key=lambda x: int(x.stem.split('_')[-1]))
+            for checkpoint in checkpoints[:-5]:
+                checkpoint.unlink()
+                logger.info(f"Removed old checkpoint: {checkpoint}")
+    
+    def _resume_from_checkpoint(self):
+        """Resume training from a checkpoint"""
+        logger.info(f"Resuming training from checkpoint: {self.resume_from}")
+        
+        if not os.path.exists(self.resume_from):
+            logger.error(f"Checkpoint file not found: {self.resume_from}")
+            raise FileNotFoundError(f"Checkpoint file not found: {self.resume_from}")
+        
+        try:
+            checkpoint = torch.load(self.resume_from, map_location=self.device)
+            
+            # Load model state
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            logger.info("Model state loaded successfully")
+            
+            # Load optimizer state
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            logger.info("Optimizer state loaded successfully")
+            
+            # Load scheduler state
+            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            logger.info("Scheduler state loaded successfully")
+            
+            # Load training state
+            self.start_epoch = checkpoint['epoch'] + 1
+            self.best_val_loss = checkpoint.get('val_loss', float('inf'))
+            
+            logger.info(f"Resuming from epoch {self.start_epoch}")
+            logger.info(f"Best validation loss so far: {self.best_val_loss:.6f}")
+            
+            # Load training history if available
+            if 'train_losses' in checkpoint:
+                self.train_losses = checkpoint['train_losses']
+                self.val_losses = checkpoint['val_losses']
+                logger.info(f"Loaded training history: {len(self.train_losses)} epochs")
+            else:
+                self.train_losses = []
+                self.val_losses = []
+            
+        except Exception as e:
+            logger.error(f"Failed to load checkpoint: {e}")
+            raise
     
     def _log_metrics(self, epoch: int, train_loss: float, val_loss: float, lr: float):
         """Log metrics to tensorboard"""
@@ -299,11 +365,19 @@ class PrismTrainer:
         # Load data
         self._load_data()
         
-        # Training history
-        train_losses = []
-        val_losses = []
+        # Initialize training state
+        if hasattr(self, 'start_epoch'):
+            start_epoch = self.start_epoch
+            train_losses = self.train_losses
+            val_losses = self.val_losses
+            logger.info(f"Resuming training from epoch {start_epoch}")
+        else:
+            start_epoch = 1
+            train_losses = []
+            val_losses = []
+            logger.info("Starting training from epoch 1")
         
-        for epoch in range(1, self.num_epochs + 1):
+        for epoch in range(start_epoch, self.num_epochs + 1):
             logger.info(f"\n{'='*50}")
             logger.info(f"Epoch {epoch}/{self.num_epochs}")
             logger.info(f"{'='*50}")
@@ -380,11 +454,13 @@ def main():
                        help='Path to training data HDF5 file')
     parser.add_argument('--output', type=str, default='results/training',
                        help='Output directory for results')
+    parser.add_argument('--resume', type=str, default=None,
+                       help='Path to checkpoint file to resume training from')
     
     args = parser.parse_args()
     
     # Create trainer and start training
-    trainer = PrismTrainer(args.config, args.data, args.output)
+    trainer = PrismTrainer(args.config, args.data, args.output, args.resume)
     trainer.train()
 
 if __name__ == '__main__':

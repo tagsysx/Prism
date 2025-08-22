@@ -4,12 +4,24 @@ Discrete Electromagnetic Ray Tracing System for Prism
 This module implements the discrete electromagnetic ray tracing system as described
 in the design document, with support for MLP-based direction sampling and
 efficient RF signal strength computation.
+
+IMPORTANT NOTE: This ray tracer does NOT select subcarriers internally. All subcarrier
+selection must be provided by the calling code (typically PrismTrainingInterface) to
+ensure consistency across the training pipeline and proper loss computation.
+
+The ray tracer expects:
+- selected_subcarriers: Dictionary or tensor specifying which subcarriers to process
+- subcarrier_indices: Explicit indices of subcarriers to trace
+- No internal subcarrier selection logic
+
+This design ensures that the training interface has full control over which subcarriers
+are used for loss computation, preventing any mismatch between ray tracing and loss calculation.
 """
 
 import torch
 import logging
 import math
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -224,7 +236,7 @@ class DiscreteRayTracer:
                   base_station_pos: torch.Tensor,
                   direction: Tuple[int, int],
                   ue_positions: List[torch.Tensor],
-                  selected_subcarriers: Dict,
+                  selected_subcarriers: Union[Dict, torch.Tensor, List[int]],
                   antenna_embedding: torch.Tensor) -> Dict:
         """
         Trace RF signal along a single ray direction.
@@ -233,12 +245,19 @@ class DiscreteRayTracer:
             base_station_pos: Base station position P_BS
             direction: Direction indices (phi_idx, theta_idx)
             ue_positions: List of UE positions
-            selected_subcarriers: Dictionary mapping UE to selected subcarriers
+            selected_subcarriers: Subcarrier information from training interface
+                           - Dict: Mapping UE to subcarrier indices
+                           - torch.Tensor: Tensor of subcarrier indices
+                           - List[int]: List of subcarrier indices
+                           Note: This MUST be provided by the calling code
             antenna_embedding: Base station's antenna embedding parameter C
         
         Returns:
             Dictionary mapping (ue_pos, subcarrier) to received RF signal strength
         """
+        # Validate and normalize selected_subcarriers input
+        subcarrier_indices = self._normalize_subcarrier_input(selected_subcarriers, ue_positions)
+        
         phi_idx, theta_idx = direction
         
         # Convert indices to angles
@@ -260,7 +279,8 @@ class DiscreteRayTracer:
         for ue_pos in ue_positions:
             ue_pos_tensor = torch.tensor(ue_pos, dtype=torch.float32, device=self.device)
             
-            for subcarrier_idx in selected_subcarriers:
+            # Use the normalized subcarrier indices
+            for subcarrier_idx in subcarrier_indices:
                 # Apply discrete radiance field model for ray tracing
                 signal_strength = self._discrete_radiance_ray_tracing(
                     ray, ue_pos_tensor, subcarrier_idx, antenna_embedding
@@ -268,6 +288,60 @@ class DiscreteRayTracer:
                 results[(tuple(ue_pos), subcarrier_idx)] = signal_strength
         
         return results
+    
+    def _normalize_subcarrier_input(self, 
+                                  selected_subcarriers: Union[Dict, torch.Tensor, List[int]], 
+                                  ue_positions: List[torch.Tensor]) -> List[int]:
+        """
+        Normalize subcarrier input to a list of indices.
+        
+        Args:
+            selected_subcarriers: Various formats of subcarrier selection
+            ue_positions: List of UE positions for validation
+            
+        Returns:
+            Normalized list of subcarrier indices
+            
+        Raises:
+            ValueError: If subcarrier input is invalid or empty
+        """
+        if selected_subcarriers is None:
+            raise ValueError("selected_subcarriers cannot be None. Must be provided by calling code.")
+        
+        if isinstance(selected_subcarriers, dict):
+            # Dictionary format: extract unique subcarrier indices
+            all_indices = set()
+            for ue_pos in ue_positions:
+                # Convert tensor to tuple for comparison
+                ue_key = tuple(ue_pos.tolist())
+                if ue_key in selected_subcarriers:
+                    indices = selected_subcarriers[ue_key]
+                    if isinstance(indices, (list, tuple)):
+                        all_indices.update(indices)
+                    elif isinstance(indices, torch.Tensor):
+                        all_indices.update(indices.tolist())
+                    else:
+                        all_indices.add(int(indices))
+            
+            if not all_indices:
+                raise ValueError("No valid subcarrier indices found in selected_subcarriers dictionary")
+            
+            return sorted(list(all_indices))
+            
+        elif isinstance(selected_subcarriers, torch.Tensor):
+            # Tensor format: convert to list
+            if selected_subcarriers.numel() == 0:
+                raise ValueError("selected_subcarriers tensor is empty")
+            return selected_subcarriers.flatten().tolist()
+            
+        elif isinstance(selected_subcarriers, (list, tuple)):
+            # List/tuple format: validate and return
+            if not selected_subcarriers:
+                raise ValueError("selected_subcarriers list is empty")
+            return [int(idx) for idx in selected_subcarriers]
+            
+        else:
+            raise ValueError(f"Unsupported selected_subcarriers type: {type(selected_subcarriers)}")
     
     def _discrete_radiance_ray_tracing(self, 
                                      ray: Ray,
@@ -564,7 +638,7 @@ class DiscreteRayTracer:
     def accumulate_signals(self, 
                           base_station_pos: torch.Tensor,
                           ue_positions: List[torch.Tensor],
-                          selected_subcarriers: Dict,
+                          selected_subcarriers: Union[Dict, torch.Tensor, List[int]],
                           antenna_embedding: torch.Tensor) -> Dict:
         """
         Accumulate RF signals using MLP-based direction sampling with antenna embedding C.
@@ -577,7 +651,11 @@ class DiscreteRayTracer:
         Args:
             base_station_pos: Base station position
             ue_positions: List of UE positions
-            selected_subcarriers: Dictionary mapping UE to selected subcarriers
+            selected_subcarriers: Subcarrier information from training interface
+                           - Dict: Mapping UE to subcarrier indices
+                           - torch.Tensor: Tensor of subcarrier indices
+                           - List[int]: List of subcarrier indices
+                           Note: This MUST be provided by the calling code
             antenna_embedding: Base station's antenna embedding parameter C
         
         Returns:
@@ -633,7 +711,7 @@ class DiscreteRayTracer:
     def _accumulate_signals_fallback(self, 
                                    base_station_pos: torch.Tensor,
                                    ue_positions: List[torch.Tensor],
-                                   selected_subcarriers: Dict,
+                                   selected_subcarriers: Union[Dict, torch.Tensor, List[int]],
                                    antenna_embedding: torch.Tensor) -> Dict:
         """
         Fallback method: accumulate signals from all directions (traditional approach).
@@ -641,7 +719,11 @@ class DiscreteRayTracer:
         Args:
             base_station_pos: Base station position
             ue_positions: List of UE positions
-            selected_subcarriers: Dictionary mapping UE to selected subcarriers
+            selected_subcarriers: Subcarrier information from training interface
+                           - Dict: Mapping UE to subcarrier indices
+                           - torch.Tensor: Tensor of subcarrier indices
+                           - List[int]: List of subcarrier indices
+                           Note: This MUST be provided by the calling code
             antenna_embedding: Base station's antenna embedding parameter C
         
         Returns:
@@ -670,7 +752,7 @@ class DiscreteRayTracer:
     def pyramid_ray_tracing(self,
                            base_station_pos: torch.Tensor,
                            ue_positions: List[torch.Tensor],
-                           selected_subcarriers: Dict,
+                           selected_subcarriers: Union[Dict, torch.Tensor, List[int]],
                            antenna_embedding: torch.Tensor,
                            pyramid_levels: int = 3) -> Dict:
         """
@@ -684,7 +766,11 @@ class DiscreteRayTracer:
         Args:
             base_station_pos: Base station position
             ue_positions: List of UE positions
-            selected_subcarriers: Dictionary mapping UE to selected subcarriers
+            selected_subcarriers: Subcarrier information from training interface
+                           - Dict: Mapping UE to subcarrier indices
+                           - torch.Tensor: Tensor of subcarrier indices
+                           - List[int]: List of subcarrier indices
+                           Note: This MUST be provided by the calling code
             antenna_embedding: Base station's antenna embedding parameter C
             pyramid_levels: Number of hierarchical levels
         
@@ -726,7 +812,7 @@ class DiscreteRayTracer:
                                        base_station_pos: torch.Tensor,
                                        center_direction: Tuple[int, int],
                                        ue_positions: List[torch.Tensor],
-                                       selected_subcarriers: Dict,
+                                       selected_subcarriers: Union[Dict, torch.Tensor, List[int]],
                                        antenna_embedding: torch.Tensor,
                                        pyramid_size: int,
                                        num_samples: int = 4) -> Dict:
@@ -737,7 +823,11 @@ class DiscreteRayTracer:
             base_station_pos: Base station position
             center_direction: Center direction of the pyramid
             ue_positions: List of UE positions
-            selected_subcarriers: Dictionary mapping UE to selected subcarriers
+            selected_subcarriers: Subcarrier information from training interface
+                           - Dict: Mapping UE to subcarrier indices
+                           - torch.Tensor: Tensor of subcarrier indices
+                           - List[int]: List of subcarrier indices
+                           Note: This MUST be provided by the calling code
             antenna_embedding: Antenna embedding parameter
             pyramid_size: Size of the pyramidal region
             num_samples: Number of Monte Carlo samples
@@ -778,7 +868,7 @@ class DiscreteRayTracer:
                            base_station_pos: torch.Tensor,
                            antenna_embedding: torch.Tensor,
                            ue_positions: List[torch.Tensor],
-                           selected_subcarriers: Dict,
+                           selected_subcarriers: Union[Dict, torch.Tensor, List[int]],
                            top_k: int = 32) -> Dict:
         """
         Perform adaptive ray tracing using built-in AntennaNetwork for direction selection.
@@ -790,7 +880,11 @@ class DiscreteRayTracer:
             base_station_pos: Base station position
             antenna_embedding: Base station's antenna embedding parameter C
             ue_positions: List of UE positions
-            selected_subcarriers: Dictionary mapping UE to selected subcarriers
+            selected_subcarriers: Subcarrier information from training interface
+                           - Dict: Mapping UE to subcarrier indices
+                           - torch.Tensor: Tensor of subcarrier indices
+                           - List[int]: List of subcarrier indices
+                           Note: This MUST be provided by the calling code
             top_k: Number of top directions to select
         
         Returns:
@@ -801,21 +895,17 @@ class DiscreteRayTracer:
             base_station_pos, ue_positions, selected_subcarriers, antenna_embedding
         )
     
-
-    def select_subcarriers(self, num_total_subcarriers: int, sampling_ratio: float) -> List[int]:
-        """
-        Randomly select a subset of subcarriers for each UE.
-        
-        Args:
-            num_total_subcarriers: Total number of available subcarriers K
-            sampling_ratio: Fraction of subcarriers to select α
-        
-        Returns:
-            List of selected subcarrier indices
-        """
-        import random
-        num_selected = int(num_total_subcarriers * sampling_ratio)
-        return random.sample(range(num_total_subcarriers), num_selected)
+    # NOTE: This ray tracer does NOT select subcarriers internally.
+    # All subcarrier selection must be provided by the calling code (typically PrismTrainingInterface)
+    # to ensure consistency across the training pipeline and proper loss computation.
+    #
+    # The ray tracer expects:
+    # - selected_subcarriers: Dictionary, tensor, or list specifying which subcarriers to process
+    # - No internal subcarrier selection logic
+    # - Full control by the training interface over which subcarriers are used
+    #
+    # This design ensures that the training interface has full control over which subcarriers
+    # are used for loss computation, preventing any mismatch between ray tracing and loss calculation.
     
     def get_ray_count_analysis(self, num_bs: int, num_ue: int, num_subcarriers: int) -> Dict:
         """

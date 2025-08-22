@@ -108,12 +108,19 @@ class TrainingPipeline:
         logger.info("STEP 2: Training Prism network")
         logger.info("=" * 60)
         
+        # Check if there's a latest checkpoint to resume from
+        latest_checkpoint = self.training_dir / 'latest_checkpoint.pt'
+        resume_arg = []
+        if latest_checkpoint.exists():
+            resume_arg = ['--resume', str(latest_checkpoint)]
+            logger.info(f"Found checkpoint to resume from: {latest_checkpoint}")
+        
         cmd = [
             sys.executable, 'scripts/simulation/train_prism.py',
             '--config', self.config_path,
             '--data', str(self.train_data_path),
             '--output', str(self.training_dir)
-        ]
+        ] + resume_arg
         
         logger.info(f"Running training: {' '.join(cmd)}")
         
