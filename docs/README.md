@@ -6,48 +6,28 @@ Welcome to the documentation for **Prism: Wideband RF Neural Radiance Fields for
 
 ### **Getting Started**
 - [Installation Guide](INSTALLATION.md)
-- [Quick Start Tutorial](quickstart.md)
-- [Basic Usage Examples](examples/basic_usage.md)
 
-### **User Guide**
-- [Model Architecture](user_guide/architecture.md)
-- [Configuration](user_guide/configuration.md)
-- [Training](user_guide/training.md)
-- [Inference](user_guide/inference.md)
-- [Data Preparation](user_guide/data.md)
+### **Core Documentation**
+- [Technical Specification](TECHNICAL_SPECIFICATION.md) - Detailed technical implementation
+- [Architecture Design](ARCHITECTURE_DESIGN.md) - System architecture overview
+- [Advanced Features](ADVANCED_FEATURES.md) - Advanced functionality and features
 
-### **API Reference**
-- [Core Models](api/models.md)
-- [Data Loaders](api/dataloaders.md)
-- [Renderers](api/renderers.md)
-- [Utilities](api/utils.md)
+### **Implementation Guides**
+- [CSI Architecture](CSI_ARCHITECTURE.md) - Channel State Information architecture
+- [Ray Tracing Guide](RAY_TRACING_GUIDE.md) - Ray tracing implementation details
+- [GPU Ray Tracing](GPU_RAY_TRACING_README.md) - GPU-accelerated ray tracing
+- [GPU Testing](GPU_TESTING_README.md) - GPU testing procedures
 
-### **Advanced Topics**
-- [Custom Configurations](advanced/custom_configs.md)
-- [Model Extensions](advanced/extensions.md)
-- [Performance Optimization](advanced/optimization.md)
-- [Troubleshooting](advanced/troubleshooting.md)
-- [Technical Specification](TECHNICAL_SPECIFICATION.md)
-
-### **Examples & Tutorials**
-- [OFDM Scenarios](examples/ofdm_scenarios.md)
-- [MIMO Configurations](examples/mimo_configs.md)
-- [Visualization](examples/visualization.md)
-- [Real-world Applications](examples/applications.md)
-
-### **Development**
-- [Contributing Guidelines](development/contributing.md)
-- [Code Style](development/code_style.md)
-- [Testing](development/testing.md)
-- [Building from Source](development/building.md)
+### **Integration & Compatibility**
+- [Sionna Integration](SIONNA_INTEGRATION.md) - Integration with Sionna framework
 
 ## 🚀 **Quick Navigation**
 
-- **New to Prism?** Start with [Installation](INSTALLATION.md) and [Quick Start](quickstart.md)
-- **Want to train a model?** See [Training Guide](user_guide/training.md)
-- **Need help with configuration?** Check [Configuration Guide](user_guide/configuration.md)
-- **Looking for examples?** Browse [Examples & Tutorials](examples/)
-- **Want to contribute?** Read [Contributing Guidelines](development/contributing.md)
+- **New to Prism?** Start with the [Installation Guide](INSTALLATION.md)
+- **Understanding the system?** Check the [Technical Specification](TECHNICAL_SPECIFICATION.md)
+- **Implementation details?** See [Architecture Design](ARCHITECTURE_DESIGN.md)
+- **Advanced features?** Explore [Advanced Features](ADVANCED_FEATURES.md)
+- **Ray tracing?** Read the [Ray Tracing Guide](RAY_TRACING_GUIDE.md)
 
 ## 📖 **Documentation Conventions**
 
@@ -64,8 +44,8 @@ Use the search functionality to quickly find specific topics, functions, or conf
 ## 📝 **Feedback & Contributions**
 
 - **Found an error?** Please report it via [GitHub Issues](https://github.com/tagsysx/Prism/issues)
-- **Want to improve docs?** Submit a pull request following our [Contributing Guidelines](development/contributing.md)
-- **Need help?** Check our [Troubleshooting Guide](advanced/troubleshooting.md) or ask on [GitHub Discussions](https://github.com/tagsysx/Prism/discussions)
+- **Want to improve docs?** Submit a pull request to the repository
+- **Need help?** Ask on [GitHub Discussions](https://github.com/tagsysx/Prism/discussions)
 
 ---
 
