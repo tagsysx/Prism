@@ -11,7 +11,7 @@ This document outlines the design and implementation of the discrete electromagn
 The ray tracing system consists of three main components:
 
 1. **Voxel Scene Representation**: Discretized 3D scene into voxel grid
-2. **Neural Network Models**: Attenuation and radiation property networks
+2. **Neural Network Models**: Attenuation and radiation property networks (see [ARCHITECTURE_DESIGN.md](ARCHITECTURE_DESIGN.md))
 3. **Ray Tracing Engine**: Discrete ray marching with optimization strategies
 
 ### 1.2 Data Flow
@@ -72,69 +72,16 @@ def voxelize_scene(scene_geometry, voxel_size):
 
 ## 3. Neural Network Models
 
-### 3.1 Attenuation Network
+The neural network architecture for the Prism project is fully specified in the [Architecture Design Document](ARCHITECTURE_DESIGN.md). This document covers:
 
-```python
-class AttenuationNetwork(nn.Module):
-    def __init__(self, input_dim=63, hidden_dim=256, output_dim=257):
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, output_dim)
-        )
-    
-    def forward(self, ipe_features):
-        """
-        Args:
-            ipe_features: Integrated Positional Encoding [63]
-        
-        Returns:
-            attenuation: Complex attenuation coefficient [1]
-            features: Latent features [256]
-        """
-        output = self.mlp(ipe_features)
-        attenuation = output[0]  # Real part for amplitude
-        features = output[1:]    # 256-dimensional features
-        
-        return attenuation, features
-```
+- **AttenuationNetwork**: Spatial position encoding with 128D feature output
+- **Attenuation Decoder**: Conversion to N_UE × K attenuation factors  
+- **RadianceNetwork**: Radiation pattern modeling with antenna-specific embeddings
+- **Antenna Embedding Codebook**: Learnable antenna representations
 
-### 3.2 Radiation Network
+For complete implementation details, network architectures, and parameter configurations, please refer to [ARCHITECTURE_DESIGN.md](ARCHITECTURE_DESIGN.md).
 
-```python
-class RadiationNetwork(nn.Module):
-    def __init__(self, feature_dim=256, direction_dim=63, tx_pos_dim=63):
-        super().__init__()
-        input_dim = feature_dim + direction_dim + tx_pos_dim
-        
-        self.mlp = nn.Sequential(
-            nn.Linear(input_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Linear(128, 1)
-        )
-    
-    def forward(self, voxel_features, direction_pe, tx_position_pe):
-        """
-        Args:
-            voxel_features: Voxel latent features [256]
-            direction_pe: Direction positional encoding [63]
-            tx_position_pe: Transmitter position encoding [63]
-        
-        Returns:
-            radiation_intensity: Directional radiation [1]
-        """
-        combined_input = torch.cat([voxel_features, direction_pe, tx_position_pe], dim=-1)
-        return self.mlp(combined_input)
-```
+The ray tracing system described in this document integrates with these pre-defined neural networks to perform electromagnetic wave propagation modeling.
 
 ### 3.3 Positional Encoding
 
