@@ -1,62 +1,66 @@
 """
-Prism: Wideband RF Neural Radiance Fields for OFDM Communication
+Prism: Discrete Electromagnetic Ray Tracing System
 
-A PyTorch-based implementation extending NeRF2 for wideband RF signals
-in Orthogonal Frequency-Division Multiplexing (OFDM) scenarios.
+A PyTorch-based implementation of discrete electromagnetic ray tracing
+with MLP-based direction sampling for RF signal strength computation.
 """
 
-__version__ = "0.1.0"
+__version__ = "2.0.0"
 __author__ = "Prism Project Team"
 __email__ = "contact@prism-project.org"
 
-from .model import (
-    PrismModel,
-    PrismLoss,
-    AttenuationNetwork,
-    AttenuationDecoder,
-    RadianceNetwork,
-    create_prism_model
-)
-
-from .dataloader import (
-    PrismDataset,
-    PrismDataLoader
-)
-
-from .renderer import PrismRenderer
-
-# Advanced features
-from .csi_processor import CSIVirtualLinkProcessor
 from .ray_tracer import (
-    AdvancedRayTracer, Environment, Building, Plane, 
-    Ray, RayGenerator, PathTracer
+    DiscreteRayTracer,
+    Ray,
+    RayIntersection,
+    RayPath,
+    BaseStation,
+    UserEquipment,
+    Environment,
+    VoxelGrid
+)
+
+from .mlp_direction_sampler import (
+    MLPDirectionSampler,
+    DirectionSamplingConfig
+)
+
+from .rf_signal_processor import (
+    RFSignalProcessor,
+    SignalStrengthCalculator,
+    SubcarrierSelector
+)
+
+from .utils import (
+    RayTracingUtils,
+    SignalProcessingUtils,
+    GeometryUtils
 )
 
 __all__ = [
-    # Core models
-    'PrismModel',
-    'PrismLoss',
-    'AttenuationNetwork',
-    'AttenuationDecoder',
-    'RadianceNetwork',
-    'create_prism_model',
-    
-    # Data handling
-    'PrismDataset',
-    'PrismDataLoader',
-    
-    # Visualization
-    'PrismRenderer',
-    
-    # Advanced features
-    'CSIVirtualLinkProcessor',
-    'AdvancedRayTracer',
-    'Environment',
-    'Building',
-    'Plane',
+    # Core ray tracing
+    'DiscreteRayTracer',
     'Ray',
-    'RayGenerator',
-    'PathTracer',
+    'RayIntersection',
+    'RayPath',
+    'BaseStation',
+    'UserEquipment',
+    'Environment',
+    'VoxelGrid',
+    
+    # MLP direction sampling
+    'MLPDirectionSampler',
+    'DirectionSamplingConfig',
+    
+    # RF signal processing
+    'RFSignalProcessor',
+    'SignalStrengthCalculator',
+    'SubcarrierSelector',
+    
+    # Utilities
+    'RayTracingUtils',
+    'SignalProcessingUtils',
+    'GeometryUtils',
     
     # Version info
     '__version__',

@@ -1,17 +1,13 @@
 """
-Utility modules for Prism: Wideband RF Neural Radiance Fields.
+Utility modules for the Prism discrete electromagnetic ray tracing system.
 """
 
-from .ofdm_utils import (
-    OFDMSignalProcessor,
-    MIMOChannelProcessor,
-    create_ofdm_processor,
-    create_mimo_processor
-)
+from .ray_tracing_utils import RayTracingUtils
+from .signal_processing_utils import SignalProcessingUtils
+from .geometry_utils import GeometryUtils
 
 __all__ = [
-    'OFDMSignalProcessor',
-    'MIMOChannelProcessor',
-    'create_ofdm_processor',
-    'create_mimo_processor'
+    'RayTracingUtils',
+    'SignalProcessingUtils',
+    'GeometryUtils'
 ]

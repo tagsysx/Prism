@@ -1,155 +1,43 @@
-# Configuration for Prism: WiFi-like OFDM with 52 subcarriers
-# This configuration extends NeRF2 for WiFi CSI scenarios
+# Configuration for Prism: WiFi Discrete Electromagnetic Ray Tracing
+# This configuration implements WiFi ray tracing with MLP-based direction sampling
 
-model:
-  # Model architecture parameters
-  num_subcarriers: 52            # Number of subcarriers (WiFi-like)
-  num_ue_antennas: 2            # Number of UE antennas
-  num_bs_antennas: 4            # Number of BS antennas
-  position_dim: 3               # 3D position coordinates
-  hidden_dim: 256               # Hidden layer dimension
+# Core Ray Tracing Configuration
+ray_tracing:
+  enabled: true
+  azimuth_divisions: 18           # Reduced for WiFi scenarios
+  elevation_divisions: 9          # Reduced for WiFi scenarios
+  points_per_ray: 16              # Reduced spatial sampling for WiFi
+  max_ray_length: 50.0            # Typical WiFi range
   
-  # Network architecture
-  attenuation_network:
-    num_layers: 8
-    activation: 'relu'
-  
-  radiance_network:
-    num_layers: 8
-    activation: 'relu'
-  
-  rf_prism_module:
-    hidden_dim: 256
-    activation: 'relu'
+  # Performance options
+  gpu_acceleration: true
+  parallel_processing: true
 
-data:
-  # Dataset configuration
-  data_dir: 'data/ofdm_wifi'     # Dataset directory
-  num_samples: 30000            # Total number of samples
-  
-  # Data split ratios
-  train_ratio: 0.7              # Training set ratio
-  val_ratio: 0.15               # Validation set ratio
-  test_ratio: 0.15              # Test set ratio
-  
-  # Data parameters
-  num_subcarriers: 52           # Must match model config
-  num_ue_antennas: 2            # Must match model config
-  num_bs_antennas: 4            # Must match model config
-  position_dim: 3               # Must match model config
-  
-  # Data loading
-  num_workers: 4                # Number of data loading workers
-  pin_memory: true              # Pin memory for faster GPU transfer
+# MLP Direction Sampling Configuration
+mlp_direction_sampling:
+  enabled: true
+  input_dim: 128
+  hidden_dim: 64                  # Reduced for WiFi efficiency
+  num_hidden_layers: 2
+  output_dim: 162                 # 18 × 9 = 162 directions
+  target_efficiency: 0.5          # Higher efficiency for WiFi
 
-training:
-  # Training parameters
-  num_epochs: 500               # Number of training epochs
-  batch_size: 128               # Batch size
-  learning_rate: 0.001          # Learning rate
-  weight_decay: 1e-5            # Weight decay
-  
-  # Learning rate scheduling
-  lr_step_size: 100             # Step size for LR scheduler
-  lr_gamma: 0.9                 # Gamma for LR scheduler
-  
-  # Optimization
-  optimizer: 'adam'              # Optimizer type
-  gradient_clip: 1.0            # Gradient clipping value
-  
-  # Checkpointing
-  save_freq: 25                 # Save checkpoint every N epochs
-  checkpoint_dir: 'checkpoints/ofdm_wifi'  # Checkpoint directory
-  
-  # Early stopping
-  patience: 50                  # Early stopping patience
-  min_delta: 1e-6              # Minimum improvement for early stopping
+# RF Signal Processing Configuration
+rf_signal_processing:
+  enabled: true
+  total_subcarriers: 64           # WiFi: 64 subcarriers
+  sampling_ratio: 0.5             # 50% sampling for WiFi
+  frequency_band: 2.4e9           # 2.4 GHz WiFi
+  subcarrier_spacing: 312.5e3     # 312.5 kHz spacing
 
-loss:
-  # Loss function configuration
-  loss_type: 'mse'              # Loss type (mse, l1)
-  
-  # Subcarrier-specific loss weights (optional)
-  subcarrier_weights: null      # Weights for each subcarrier
-  
-  # Frequency-aware loss
-  frequency_weighting: true     # Enable frequency-dependent weighting
-  low_freq_weight: 1.0         # Weight for low-frequency subcarriers
-  high_freq_weight: 1.1        # Weight for high-frequency subcarriers
+# Base Station Configuration
+base_station:
+  default_position: [0.0, 0.0, 2.5]  # WiFi AP height
+  num_antennas: 4                     # WiFi AP antennas
+  antenna_embedding_dim: 128
 
-validation:
-  # Validation parameters
-  val_freq: 5                   # Validate every N epochs
-  save_best: true               # Save best model based on validation
-  
-  # Metrics to track
-  metrics: ['mse', 'mae', 'rmse']  # Validation metrics
-
-testing:
-  # Testing parameters
-  batch_size: 256               # Test batch size
-  save_predictions: true        # Save model predictions
-  output_dir: 'results/ofdm_wifi'  # Output directory for results
-  
-  # Analysis options
-  analyze_subcarriers: true     # Analyze performance per subcarrier
-  create_visualizations: true   # Create visualization plots
-  save_animations: false        # Save animated visualizations
-
-hardware:
-  # Hardware configuration
-  device: 'cuda'                # Device to use (cuda, cpu)
-  gpu_id: 0                     # GPU device ID
-  mixed_precision: true         # Use mixed precision training
-  
-  # Memory optimization
-  gradient_accumulation: 1      # Gradient accumulation steps
-  memory_efficient: true        # Enable memory-efficient operations
-
-logging:
-  # Logging configuration
-  log_level: 'INFO'             # Logging level
-  log_freq: 50                  # Log every N iterations
-  
-  # TensorBoard logging
-  tensorboard: true             # Enable TensorBoard logging
-  log_dir: 'logs/ofdm_wifi'     # TensorBoard log directory
-  
-  # Progress tracking
-  progress_bar: true            # Show progress bar
-  save_plots: true              # Save training plots
-
-# OFDM-specific parameters
-ofdm:
-  # Frequency configuration
-  center_frequency: 2.4e9       # Center frequency (2.4 GHz)
-  bandwidth: 20e6               # Bandwidth (20 MHz for WiFi)
-  subcarrier_spacing: 312.5e3   # Subcarrier spacing (312.5 kHz)
-  
-  # Signal characteristics
-  cyclic_prefix: 0.25           # Cyclic prefix ratio
-  pilot_density: 0.15           # Pilot subcarrier density
-  
-  # Channel modeling
-  multipath_components: 6       # Number of multipath components
-  doppler_shift: 50             # Maximum Doppler shift (Hz)
-  
-  # MIMO configuration
-  mimo_type: 'spatial_multiplexing'  # MIMO type
-  precoding: 'zero_forcing'     # Precoding method
-  detection: 'maximum_likelihood'     # Detection method
-
-# Environment configuration
-environment:
-  # Room/environment parameters
-  room_dimensions: [15, 15, 3]  # Room dimensions [length, width, height]
-  obstacle_density: 0.2         # Obstacle density in environment
-  
-  # Material properties
-  wall_reflection: 0.6          # Wall reflection coefficient
-  floor_reflection: 0.7         # Floor reflection coefficient
-  ceiling_reflection: 0.5       # Ceiling reflection coefficient
-  
-  # Propagation model
-  path_loss_exponent: 2.2       # Path loss exponent
-  shadowing_std: 3.5            # Shadowing standard deviation (dB)
+# Performance Configuration
+performance:
+  device: 'cuda'
+  batch_size: 64                  # Smaller batches for WiFi
+  max_concurrent_rays: 200
