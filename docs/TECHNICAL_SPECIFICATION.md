@@ -10,9 +10,7 @@ This document provides a detailed description of the technical implementation de
 
 In the discrete representation, 3D scenes are divided into a finite collection of voxels:
 
-$
-\{P_v^i\}_{i=1}^N
-$
+$\{P_v^i\}_{i=1}^N$
 
 Each voxel $P_v^i$ represents a localized volume element, serving as a radiation source with two key properties:
 - **Attenuation coefficient** $\rho(P_v^i)$: Describes the electromagnetic wave attenuation characteristics within the voxel
@@ -129,7 +127,9 @@ Where $\Omega$ is the set of sampling directions, and $\Delta \omega$ is the dir
 
 Training loss is computed by comparing predicted aggregated signals with true measurements:
 
-$\mathcal{L}_{\text{signal}} = \sum_{P_{\text{RX}}\sim \mathcal{D}} \left\|S_{\Omega}(P_{\text{RX}}) - \widehat{S}_{\Omega}(P_{\text{RX}}) \right\|_2$
+```math
+\mathcal{L}_{\text{signal}} = \sum_{P_{\text{RX}}\sim \mathcal{D}} \left\|S_{\Omega}(P_{\text{RX}}) - \widehat{S}_{\Omega}(P_{\text{RX}}) \right\|_2$
+```
 
 Where:
 - $\mathcal{D}$: Training dataset
