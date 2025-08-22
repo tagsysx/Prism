@@ -158,7 +158,10 @@ class PrismTrainingInterface(nn.Module):
                             csi_predictions[b, bs_antenna_idx, u, k_idx] = csi_value
                         else:
                             # Fallback for missing results
-                            csi_predictions[b, bs_antenna_idx, u, k_idx] = torch.complex(0.0, 0.0)
+                            csi_predictions[b, bs_antenna_idx, u, k_idx] = torch.complex(
+                                torch.tensor(0.0, device=ue_positions.device), 
+                                torch.tensor(0.0, device=ue_positions.device)
+                            )
                 
                 batch_signal_strengths.append(ray_results)
             
@@ -238,7 +241,7 @@ class PrismTrainingInterface(nn.Module):
         phase = 2 * torch.pi * subcarrier_idx * distance / 100.0  # Normalized wavelength
         
         # Convert signal strength to complex CSI with phase
-        amplitude = torch.sqrt(torch.tensor(signal_strength, dtype=torch.float32))
+        amplitude = torch.sqrt(torch.tensor(signal_strength, dtype=torch.float32, device=bs_pos.device))
         csi_value = torch.complex(
             amplitude * torch.cos(phase), 
             amplitude * torch.sin(phase)

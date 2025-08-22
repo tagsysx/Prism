@@ -23,6 +23,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from datetime import datetime
 import json
+import time
 
 # Add src to path for imports
 sys.path.append(str(Path(__file__).parent.parent.parent / "src"))
@@ -67,9 +68,21 @@ class PrismTrainer:
         # Resume from checkpoint if specified
         if self.resume_from:
             self._resume_from_checkpoint()
+        else:
+            # Auto-detect checkpoint if available
+            auto_checkpoint = self._auto_detect_checkpoint()
+            if auto_checkpoint:
+                print(f"🔄 Auto-resuming from checkpoint: {auto_checkpoint}")
+                self.resume_from = auto_checkpoint
+                self._resume_from_checkpoint()
+            else:
+                print("🆕 Starting fresh training (no checkpoints found)")
         
         # Setup tensorboard
         self.writer = SummaryWriter(log_dir=self.output_dir / 'tensorboard')
+        
+        # Display checkpoint information
+        self._display_checkpoint_info()
         
     def _load_config(self):
         """Load configuration from YAML file"""
@@ -102,10 +115,13 @@ class PrismTrainer:
         
         # Create DiscreteRayTracer
         self.ray_tracer = DiscreteRayTracer(
-            scene_bounds=rt_config.get('scene_bounds', None),
-            angular_divisions=(rt_config['azimuth_divisions'], rt_config['elevation_divisions']),
-            spatial_sampling=rt_config.get('spatial_sampling', 64),
-            gpu_acceleration=rt_config.get('gpu_acceleration', True)
+            azimuth_divisions=rt_config['azimuth_divisions'],
+            elevation_divisions=rt_config['elevation_divisions'],
+            max_ray_length=rt_config.get('max_ray_length', 100.0),
+            scene_size=rt_config.get('scene_size', 200.0),
+            device=self.device.type,
+            signal_threshold=rt_config.get('signal_threshold', 1e-6),
+            enable_early_termination=rt_config.get('enable_early_termination', True)
         )
         
         # Create PrismTrainingInterface
@@ -157,38 +173,46 @@ class PrismTrainer:
     def _load_data(self):
         """Load training data from HDF5 file"""
         logger.info(f"Loading training data from {self.data_path}")
+        print(f"📂 Loading data from: {self.data_path}")
         
         with h5py.File(self.data_path, 'r') as f:
             # Load UE positions
             ue_positions = f['ue_positions'][:]
             logger.info(f"Loaded {len(ue_positions)} UE positions")
+            print(f"   📍 UE positions: {len(ue_positions)} samples")
             
             # Load channel responses (CSI)
             csi_data = f['channel_responses'][:]
             logger.info(f"Loaded CSI data with shape: {csi_data.shape}")
+            print(f"   📡 CSI data: {csi_data.shape}")
             
             # Load BS position
             bs_position = f['bs_position'][:]
             logger.info(f"BS position: {bs_position}")
+            print(f"   🏢 BS position: {bs_position}")
             
             # Load antenna indices if available
             if 'antenna_indices' in f:
                 antenna_indices = f['antenna_indices'][:]
                 logger.info(f"Loaded antenna indices with shape: {antenna_indices.shape}")
+                print(f"   📡 Antenna indices: {antenna_indices.shape}")
             else:
                 # Create default antenna indices if not available
                 num_bs_antennas = csi_data.shape[1] if len(csi_data.shape) > 1 else 1
                 antenna_indices = np.arange(num_bs_antennas)
                 logger.info(f"Created default antenna indices: {antenna_indices}")
+                print(f"   📡 Created default antenna indices: {len(antenna_indices)}")
             
             # Load simulation parameters
             params = dict(f['simulation_params'].attrs)
             logger.info(f"Simulation parameters: {params}")
+            print(f"   ⚙️  Simulation parameters loaded")
             
             # Check if this is split data
             if 'split_type' in f.attrs:
                 split_info = dict(f.attrs)
                 logger.info(f"Data split info: {split_info}")
+                print(f"   📊 Data split: {split_info.get('split_type', 'unknown')} ({split_info.get('num_samples', 'unknown')} samples)")
         
         # Convert to tensors
         self.ue_positions = torch.tensor(ue_positions, dtype=torch.float32)
@@ -212,12 +236,20 @@ class PrismTrainer:
         )
         
         logger.info(f"Training data loaded: {len(self.dataset)} samples, batch_size={self.batch_size}")
+        print(f"✅ Data loaded successfully!")
+        print(f"   📊 Dataset size: {len(self.dataset)} samples")
+        print(f"   🔄 Batch size: {self.batch_size}")
+        print(f"   📦 Number of batches: {len(self.dataloader)}")
+        print(f"   💾 Data types: UE (float32), CSI (complex64), BS (float32), Antenna (long)")
         
     def _train_epoch(self, epoch: int):
         """Train for one epoch using TrainingInterface"""
         self.model.train()
         total_loss = 0.0
         num_batches = 0
+        
+        print(f"\n🔄 Training Epoch {epoch}")
+        print(f"{'='*60}")
         
         for batch_idx, (ue_pos, bs_pos, antenna_idx, csi_target) in enumerate(self.dataloader):
             ue_pos = ue_pos.to(self.device)
@@ -256,15 +288,23 @@ class PrismTrainer:
                 # Update training state in TrainingInterface
                 self.model.update_training_state(epoch, batch_idx, loss.item())
                 
-                # Log progress
-                if batch_idx % 10 == 0:
-                    logger.info(f"Epoch {epoch}, Batch {batch_idx}/{len(self.dataloader)}, Loss: {loss.item():.6f}")
+                # Enhanced progress logging
+                if batch_idx % 5 == 0 or batch_idx == len(self.dataloader) - 1:
+                    progress = (batch_idx + 1) / len(self.dataloader) * 100
+                    avg_loss_so_far = total_loss / num_batches
+                    print(f"  📊 Batch {batch_idx+1:3d}/{len(self.dataloader):3d} ({progress:5.1f}%) | "
+                          f"Loss: {loss.item():.6f} | Avg: {avg_loss_so_far:.6f}")
+                    
+                    # Log to tensorboard
+                    self.writer.add_scalar(f'Loss/Batch_{epoch}', loss.item(), batch_idx)
                     
             except Exception as e:
-                logger.error(f"Error in batch {batch_idx}: {e}")
+                logger.error(f"❌ Error in batch {batch_idx}: {e}")
+                print(f"  ❌ Batch {batch_idx+1} failed: {e}")
                 continue
         
         avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
+        print(f"✅ Epoch {epoch} Training Complete | Avg Loss: {avg_loss:.6f}")
         return avg_loss
     
     def _validate(self, epoch: int):
@@ -272,6 +312,8 @@ class PrismTrainer:
         self.model.eval()
         total_loss = 0.0
         num_batches = 0
+        
+        print(f"🔍 Validating Epoch {epoch}...")
         
         # Use a subset for validation
         val_size = min(100, len(self.dataset))
@@ -300,14 +342,18 @@ class PrismTrainer:
                     num_batches += 1
                     
                 except Exception as e:
-                    logger.error(f"Validation error: {e}")
+                    logger.error(f"❌ Validation error: {e}")
+                    print(f"  ❌ Validation batch failed: {e}")
                     continue
         
         avg_val_loss = total_loss / num_batches if num_batches > 0 else 0.0
+        print(f"✅ Validation Complete | Val Loss: {avg_val_loss:.6f}")
         return avg_val_loss
     
     def _save_checkpoint(self, epoch: int, train_loss: float, val_loss: float):
         """Save model checkpoint using TrainingInterface"""
+        print(f"💾 Saving checkpoint for epoch {epoch}...")
+        
         # Save TrainingInterface checkpoint
         self.model.save_checkpoint(f'checkpoint_epoch_{epoch}.pt')
         
@@ -318,7 +364,11 @@ class PrismTrainer:
             'scheduler_state_dict': self.scheduler.state_dict(),
             'train_loss': train_loss,
             'val_loss': val_loss,
-            'config': self.config
+            'config': self.config,
+            'train_losses': getattr(self, 'train_losses', []),
+            'val_losses': getattr(self, 'val_losses', []),
+            'best_val_loss': getattr(self, 'best_val_loss', float('inf')),
+            'timestamp': datetime.now().isoformat()
         }
         
         checkpoint_path = self.output_dir / f'training_state_epoch_{epoch}.pt'
@@ -330,17 +380,75 @@ class PrismTrainer:
             self.best_val_loss = val_loss
             best_model_path = self.output_dir / 'best_model.pt'
             self.model.save_checkpoint('best_model.pt')
-            torch.save(training_state, best_model_path.replace('.pt', '_state.pt'))
+            torch.save(training_state, str(best_model_path).replace('.pt', '_state.pt'))
             logger.info(f"Best model saved: {best_model_path}")
+            print(f"🏆 New best model saved! (Val Loss: {val_loss:.6f})")
         
         # Save latest checkpoint for resuming
         latest_checkpoint_path = self.output_dir / 'latest_checkpoint.pt'
         self.model.save_checkpoint('latest_checkpoint.pt')
-        torch.save(training_state, latest_checkpoint_path.replace('.pt', '_state.pt'))
+        torch.save(training_state, str(latest_checkpoint_path).replace('.pt', '_state.pt'))
         logger.info(f"Latest checkpoint saved: {latest_checkpoint_path}")
+        
+        # Save emergency checkpoint every epoch for better recovery
+        emergency_checkpoint_path = self.output_dir / 'emergency_checkpoint.pt'
+        self.model.save_checkpoint('emergency_checkpoint.pt')
+        torch.save(training_state, str(emergency_checkpoint_path).replace('.pt', '_state.pt'))
+        
+        print(f"✅ Checkpoint saved: Epoch {epoch}, Loss: {train_loss:.6f}, Val: {val_loss:.6f}")
         
         # Clean up old checkpoints (keep last 5)
         self._cleanup_old_checkpoints()
+    
+    def _save_emergency_checkpoint(self, epoch: int, train_loss: float, val_loss: float):
+        """Save emergency checkpoint for quick recovery"""
+        try:
+            # Save TrainingInterface emergency checkpoint
+            self.model.save_checkpoint('emergency_checkpoint.pt')
+            
+            # Save minimal training state for emergency recovery
+            emergency_state = {
+                'epoch': epoch,
+                'train_loss': train_loss,
+                'val_loss': val_loss,
+                'timestamp': datetime.now().isoformat(),
+                'emergency': True
+            }
+            
+            emergency_path = self.output_dir / 'emergency_checkpoint_state.pt'
+            torch.save(emergency_state, emergency_path)
+            
+        except Exception as e:
+            logger.warning(f"Emergency checkpoint failed: {e}")
+    
+    def _auto_detect_checkpoint(self):
+        """Automatically detect the best checkpoint to resume from"""
+        print("🔍 Auto-detecting checkpoints...")
+        
+        # Priority order for checkpoint detection
+        checkpoint_candidates = [
+            self.output_dir / 'emergency_checkpoint.pt',  # Most recent
+            self.output_dir / 'latest_checkpoint.pt',    # Latest epoch
+            self.output_dir / 'best_model.pt'            # Best performance
+        ]
+        
+        for checkpoint_path in checkpoint_candidates:
+            if checkpoint_path.exists():
+                print(f"✅ Found checkpoint: {checkpoint_path}")
+                return str(checkpoint_path)
+        
+        # Check for epoch-specific checkpoints
+        checkpoint_dir = self.output_dir / 'checkpoints'
+        if checkpoint_dir.exists():
+            checkpoints = list(checkpoint_dir.glob('checkpoint_epoch_*.pt'))
+            if checkpoints:
+                # Get the latest epoch checkpoint
+                latest_checkpoint = max(checkpoints, key=lambda x: int(x.stem.split('_')[-1]))
+                print(f"✅ Found epoch checkpoint: {latest_checkpoint}")
+                return str(latest_checkpoint)
+        
+        print("❌ No checkpoints found")
+        return None
     
     def _cleanup_old_checkpoints(self):
         """Clean up old checkpoints to save disk space"""
@@ -437,9 +545,13 @@ class PrismTrainer:
     def train(self):
         """Main training loop using TrainingInterface"""
         logger.info("Starting training with TrainingInterface...")
+        print("\n🚀 Starting Prism Network Training with TrainingInterface")
+        print("=" * 80)
         
         # Load data
+        print("📂 Loading training data...")
         self._load_data()
+        print(f"✅ Data loaded: {len(self.dataset)} samples")
         
         # Initialize training state
         if hasattr(self, 'start_epoch'):
@@ -447,16 +559,30 @@ class PrismTrainer:
             train_losses = self.train_losses
             val_losses = self.val_losses
             logger.info(f"Resuming training from epoch {start_epoch}")
+            print(f"🔄 Resuming training from epoch {start_epoch}")
         else:
             start_epoch = 1
             train_losses = []
             val_losses = []
             logger.info("Starting training from epoch 1")
+            print("🆕 Starting training from epoch 1")
+        
+        print(f"\n📈 Training Configuration:")
+        print(f"   • Total epochs: {self.num_epochs}")
+        print(f"   • Batch size: {self.batch_size}")
+        print(f"   • Learning rate: {self.learning_rate:.2e}")
+        print(f"   • Device: {self.device}")
+        print(f"   • Model parameters: {sum(p.numel() for p in self.model.parameters()):,}")
+        print("=" * 80)
+        
+        start_time = time.time()
         
         for epoch in range(start_epoch, self.num_epochs + 1):
-            logger.info(f"\n{'='*50}")
-            logger.info(f"Epoch {epoch}/{self.num_epochs}")
-            logger.info(f"{'='*50}")
+            epoch_start_time = time.time()
+            
+            print(f"\n{'='*80}")
+            print(f"🎯 EPOCH {epoch}/{self.num_epochs}")
+            print(f"{'='*80}")
             
             # Train
             train_loss = self._train_epoch(epoch)
@@ -470,25 +596,62 @@ class PrismTrainer:
             self.scheduler.step(val_loss)
             current_lr = self.optimizer.param_groups[0]['lr']
             
+            # Calculate timing
+            epoch_time = time.time() - epoch_start_time
+            total_time = time.time() - start_time
+            avg_epoch_time = total_time / (epoch - start_epoch + 1)
+            eta = avg_epoch_time * (self.num_epochs - epoch)
+            
+            # Enhanced epoch summary
+            print(f"\n📊 EPOCH {epoch} SUMMARY:")
+            print(f"   • Training Loss: {train_loss:.6f}")
+            print(f"   • Validation Loss: {val_loss:.6f}")
+            print(f"   • Learning Rate: {current_lr:.2e}")
+            print(f"   • Epoch Time: {epoch_time:.1f}s")
+            print(f"   • Total Time: {total_time/3600:.1f}h")
+            print(f"   • ETA: {eta/3600:.1f}h")
+            
             # Log metrics
-            logger.info(f"Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}, LR: {current_lr:.2e}")
+            logger.info(f"Epoch {epoch}: Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}, LR: {current_lr:.2e}")
             self._log_metrics(epoch, train_loss, val_loss, current_lr)
             
             # Save checkpoint
             if epoch % self.save_interval == 0 or epoch == self.num_epochs:
+                print(f"💾 Saving checkpoint for epoch {epoch}...")
                 self._save_checkpoint(epoch, train_loss, val_loss)
+                print(f"✅ Checkpoint saved successfully")
+            
+            # Save emergency checkpoint every epoch for better recovery
+            if epoch % 1 == 0:  # Every epoch
+                self._save_emergency_checkpoint(epoch, train_loss, val_loss)
             
             # Early stopping check
             if current_lr < 1e-7:
+                print(f"⚠️  Learning rate too low ({current_lr:.2e}), stopping training")
                 logger.info("Learning rate too low, stopping training")
                 break
+            
+            print(f"{'='*80}")
+        
+        # Training completion summary
+        total_training_time = time.time() - start_time
+        print(f"\n🎉 TRAINING COMPLETED!")
+        print(f"{'='*80}")
+        print(f"   • Total epochs completed: {len(train_losses)}")
+        print(f"   • Total training time: {total_training_time/3600:.2f} hours")
+        print(f"   • Final training loss: {train_losses[-1]:.6f}")
+        print(f"   • Final validation loss: {val_losses[-1]:.6f}")
+        print(f"   • Best validation loss: {min(val_losses):.6f}")
+        print(f"   • Results saved to: {self.output_dir}")
         
         # Save training history
         history = {
             'train_losses': train_losses,
             'val_losses': val_losses,
             'config': self.config,
-            'training_interface_info': self.model.get_training_info()
+            'training_interface_info': self.model.get_training_info(),
+            'total_training_time': total_training_time,
+            'final_epoch': len(train_losses)
         }
         
         history_path = self.output_dir / 'training_history.json'
@@ -521,6 +684,53 @@ class PrismTrainer:
         plt.close()
         
         logger.info(f"Training curves saved: {plot_path}")
+
+    def _display_checkpoint_info(self):
+        """Display information about available checkpoint files."""
+        print("\n📁 Available Checkpoint Files:")
+        print("=" * 20)
+        
+        # Display TrainingInterface checkpoints
+        checkpoint_dir = Path(self.model.checkpoint_dir)
+        if checkpoint_dir.exists():
+            print(f"TrainingInterface Checkpoints (in {self.model.checkpoint_dir}):")
+            checkpoints = list(checkpoint_dir.glob('checkpoint_epoch_*.pt'))
+            if checkpoints:
+                print(f"  - Latest: {checkpoints[-1]}")
+                print(f"  - Total: {len(checkpoints)}")
+            else:
+                print("  - No TrainingInterface checkpoints found.")
+        else:
+            print(f"TrainingInterface Checkpoints directory not found: {self.model.checkpoint_dir}")
+
+        # Display emergency checkpoint
+        emergency_checkpoint_path = self.output_dir / 'emergency_checkpoint.pt'
+        if emergency_checkpoint_path.exists():
+            print(f"\nEmergency Checkpoint (in {self.output_dir}):")
+            print(f"  - Path: {emergency_checkpoint_path}")
+        else:
+            print(f"\nEmergency Checkpoint (in {self.output_dir}):")
+            print("  - Not found.")
+
+        # Display latest checkpoint
+        latest_checkpoint_path = self.output_dir / 'latest_checkpoint.pt'
+        if latest_checkpoint_path.exists():
+            print(f"\nLatest Checkpoint (in {self.output_dir}):")
+            print(f"  - Path: {latest_checkpoint_path}")
+        else:
+            print(f"\nLatest Checkpoint (in {self.output_dir}):")
+            print("  - Not found.")
+
+        # Display best model
+        best_model_path = self.output_dir / 'best_model.pt'
+        if best_model_path.exists():
+            print(f"\nBest Model (in {self.output_dir}):")
+            print(f"  - Path: {best_model_path}")
+        else:
+            print(f"\nBest Model (in {self.output_dir}):")
+            print("  - Not found.")
+
+        print("=" * 20)
 
 def main():
     """Main function"""
