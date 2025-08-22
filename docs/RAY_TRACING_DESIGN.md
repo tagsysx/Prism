@@ -4,7 +4,7 @@
 
 This document outlines the design and implementation of the discrete electromagnetic ray tracing system for the Prism project. The system implements an efficient voxel-based ray tracing approach that combines discrete radiance field modeling with advanced optimization strategies to achieve both accuracy and computational efficiency.
 
-The core concept is that the system computes **RF signal strength** $S_{\text{ray}}$ at the base station's antenna from each direction, which includes both amplitude and phase information of the electromagnetic wave.
+The core concept is that the system computes **RF signal strength** $S_{\text{ray}}$ at the base station's antenna from each direction, which includes both amplitude and phase information of the electromagnetic wave. A key architectural advantage is that **ray tracing operations are independent**, enabling efficient parallelization using CUDA or multi-threading for significant performance acceleration.
 
 ## 1. Core Design
 
@@ -114,6 +114,8 @@ Where:
 
 ## 4. Implementation Details
 
+**Implementation Note**: Since ray tracing operations are independent, the system is designed to leverage parallel computing architectures. Consider implementing CUDA kernels or multi-threaded processing for optimal performance.
+
 ### 4.1 Ray Tracing Algorithm
 
 ```python
@@ -201,7 +203,16 @@ def accumulate_signals(base_station_pos, ue_positions, selected_subcarriers, ant
 
 ## 5. Performance Considerations
 
-### 5.1 Computational Efficiency
+### 5.1 Ray Tracing Independence and Parallelization
+
+**Important Notice**: The tracing of rays are **independent** of each other. Each ray can be processed independently without dependencies on other rays. This makes the system highly suitable for parallel computing acceleration.
+
+**Recommended Acceleration Strategies**:
+- **CUDA/GPU Computing**: Utilize GPU parallelization for massive ray tracing workloads
+- **Multi-threading**: Implement multi-threaded processing for CPU-based acceleration
+- **Distributed Computing**: Scale across multiple compute nodes for large-scale deployments
+
+### 5.2 Computational Efficiency
 
 - **Parallel processing**: Ray tracing can be parallelized across directions and UEs
 - **Memory management**: Efficient caching of voxel properties and ray intersection results
@@ -232,15 +243,8 @@ The ray tracing system integrates seamlessly with the discrete radiance field mo
 
 ### 7.1 Advanced Optimization Techniques
 
-- **Machine learning-based sampling**: Learn optimal subcarrier selection patterns
-- **Dynamic directional adaptation**: Adjust grid resolution based on scene complexity
-- **Real-time ray tracing**: Support for dynamic environments and mobile scenarios
+- **Machine learning-based directional sampling**: Set up a MLP to learn which directions should be sampled based on the antenna embedding $C$.
 
-### 7.2 Extended Functionality
-
-- **Multi-path modeling**: Support for reflection, diffraction, and scattering
-- **Temporal evolution**: Time-dependent ray tracing for dynamic scenes
-- **Interference analysis**: Multi-user interference modeling and optimization
 
 ---
 
