@@ -1,130 +1,154 @@
-# 离散辐射场模型技术文档
+# Discrete Radiance Field Model Technical Specification
 
-## 概述
+## Overview
 
-本文档详细描述了Prism项目中离散辐射场模型（Discrete Radiance Field Model）的技术实现细节。该模型通过将3D场景离散化为有限数量的体素，实现了高效的电磁波传播建模和射线追踪。
+This document provides a detailed description of the technical implementation details of the Discrete Radiance Field Model in the Prism project. This model achieves efficient electromagnetic wave propagation modeling and ray tracing by discretizing 3D scenes into a finite number of voxels.
 
-## 1. 离散辐射场模型架构
+## 1. Discrete Radiance Field Model Architecture
 
-### 1.1 体素化场景表示
+### 1.1 Voxelized Scene Representation
 
-在离散化表述中，3D场景被分割为有限数量的体素集合：
+In the discrete representation, 3D scenes are divided into a finite collection of voxels:
 
 $$\{P_v^i\}_{i=1}^N$$
 
-每个体素 $P_v^i$ 代表一个局部化的体积元素，作为辐射源具有两个关键属性：
-- **衰减系数** $\rho(P_v^i)$：描述电磁波在体素中的衰减特性
-- **辐射属性** $S(P_v^i,\omega)$：描述体素在方向 $\omega$ 上的辐射强度
+Each voxel $P_v^i$ represents a localized volume element, serving as a radiation source with two key properties:
+- **Attenuation coefficient** $\rho(P_v^i)$: Describes the electromagnetic wave attenuation characteristics within the voxel
+- **Radiation properties** $S(P_v^i,\omega)$: Describes the radiation intensity of the voxel in direction $\omega$
 
-### 1.2 神经网络建模
+### 1.2 Neural Network Modeling
 
-为了建模这些属性，我们使用两个多层感知机（MLP）：
+To model these properties, we use two multi-layer perceptrons (MLPs):
 
-#### 衰减MLP ($f_\theta$)
-```python
-f_\theta\!\left(\text{PE}(P_v^i)\right) \to \big(\rho(P_v^i), \mathcal{F}(P_v^i)\big)
-```
+#### (1) AttenuationNetwork ($f_\theta$)
+$$
+f_\theta\!\left(\text{IPE}(P_v^i)\right) \to \big(\rho(P_v^i), \mathcal{F}(P_v^i)\big)
+$$
+where IPE is the Integrated Positional Encoding (IPE). 
 
-**功能**：
-- 输入：体素位置的位置编码 $\text{PE}(P_v^i)$
-- 输出：衰减系数 $\rho(P_v^i)$ 和256维潜在特征 $\mathcal{F}(P_v^i)$
+**Function**:
+- Input: Position encoding $\text{IPE}(P_v^i)$ of voxel position
+- Output: Attenuation coefficient $\rho(P_v^i)$ and 256-dimensional latent features $\mathcal{F}(P_v^i)$
 
-#### 辐射MLP ($f_\psi$)
-```python
+#### (2) RadiationNetwork ($f_\psi$)
+$$
 f_\psi\!\left(\mathcal{F}(P_v^i), \text{PE}(\omega), \text{PE}(P_{\text{TX}})\right) \to S(P_v^i,\omega)
-```
+$$
+where $\text{PE}(\cdot)$ is the standard positional encoding. 
 
-**功能**：
-- 输入：体素特征、方向编码、发射器位置编码
-- 输出：方向相关的体素辐射强度 $S(P_v^i,\omega)$
+**Function**:
+- Input: Voxel features, direction encoding, transmitter position encoding
+- Output: Direction-dependent voxel radiation intensity $S(P_v^i,\omega)$
 
-### 1.3 位置编码
+### 1.3 Positional Encoding
 
-位置编码函数 $\mathrm{PE}(\cdot)$ 将输入坐标转换为高维表示，增强模型的表达能力：
+#### 1.3.1 Standard Positional Encoding
 
-$$\mathrm{PE}(x) = [\sin(2^0 \pi x), \cos(2^0 \pi x), \sin(2^1 \pi x), \cos(2^1 \pi x), \ldots]$$
+The standard positional encoding function $\mathrm{PE}(\cdot)$ transforms input coordinates into high-dimensional representations, enhancing the model's expressive power:
 
-## 2. 衰减系数建模
+$$\mathrm{PE}(x) = [\sin(2^0 \pi x), \cos(2^0 \pi x), \sin(2^1 \pi x), \cos(2^1 \pi x), \ldots, \sin(2^{L-1} \pi x), \cos(2^{L-1} \pi x)]$$
 
-### 2.1 复数衰减表示
+This encoding allows the network to learn high-frequency functions by mapping input coordinates to a higher dimensional space.
 
-衰减系数 $\rho(P_v^i)$ 由局部材料属性决定，表示为复数形式：
+#### 1.3.2 Integrated Positional Encoding (IPE)
+
+The Integrated Positional Encoding function $\mathrm{IPE}(\cdot)$ extends the standard encoding to handle spatial regions rather than single points. For a 3D point $\mathbf{x} \sim \mathcal{N}(\mu, \Sigma)$, the IPE is the expected value of the positional encoding:
+
+$$
+\text{IPE}(\mu, \Sigma) = \left( \mathbb{E}[\sin(2^k \pi \mathbf{x})], \mathbb{E}[\cos(2^k \pi \mathbf{x})] \right)_{k=0}^{L-1}
+$$
+
+Where:
+- $\mu$: Mean position of the Gaussian (center of the conical frustum)
+- $\Sigma$: Covariance matrix modeling the spatial extent
+
+The expectation for each dimension (e.g., x-coordinate) is:
+$$\mathbb{E}[\sin(2^k \pi x)] = \sin(2^k \pi \mu_x) \cdot \exp\left(-\frac{1}{2} (2^k \pi)^2 \Sigma_{xx}\right)$$
+$$\mathbb{E}[\cos(2^k \pi x)] = \cos(2^k \pi \mu_x) \cdot \exp\left(-\frac{1}{2} (2^k \pi)^2 \Sigma_{xx}\right)$$
+
+The exponential term $\exp\left(-\frac{1}{2} (2^k \pi)^2 \Sigma_{xx}\right)$ acts as a low-pass filter, attenuating high frequencies for larger regions (higher variance), which prevents aliasing and enables efficient modeling of spatial volumes.
+
+## 2. Attenuation Coefficient Modeling
+
+### 2.1 Complex Attenuation Representation
+
+The attenuation coefficient $\rho(P_v^i)$ is determined by local material properties and represented in complex form:
 
 $$\rho(P_v^i) = \Delta A + j \Delta \phi$$
 
-其中：
-- $\Delta A$：幅度衰减（每体素步长的dB值）
-- $\Delta \phi$：相位偏移（每体素步长的弧度值）
+Where:
+- $\Delta A$: Amplitude attenuation (dB value per voxel step length)
+- $\Delta \phi$: Phase shift (radian value per voxel step length)
 
-### 2.2 物理意义
+### 2.2 Physical Significance
 
-- **幅度衰减**：反映电磁波在传播过程中的能量损失
-- **相位偏移**：反映电磁波在传播过程中的相位变化
-- **复数表示**：同时考虑幅度和相位信息，符合电磁波传播的物理特性
+- **Amplitude attenuation**: Reflects energy loss of electromagnetic waves during propagation
+- **Phase shift**: Reflects phase changes of electromagnetic waves during propagation
+- **Complex representation**: Simultaneously considers amplitude and phase information, conforming to the physical characteristics of electromagnetic wave propagation
 
-## 3. 离散电磁射线追踪
+## 3. Discrete Electromagnetic Ray Tracing
 
-### 3.1 射线离散化
+### 3.1 Ray Discretization
 
-给定从接收器位置 $P_\text{RX}$ 出发、方向为 $\omega$ 的射线，我们将其离散化为 $M$ 个均匀采样点：
+Given a ray starting from receiver position $P_\text{RX}$ with direction $\omega$, we discretize it into $M$ uniform sampling points:
 
 $$P_v^k = P_\text{RX} + k\Delta t \cdot \omega, \quad k=1,\dots,M$$
 
-其中 $\Delta t$ 为步长。
+Where $\Delta t$ is the step size.
 
-### 3.2 接收辐射计算
+### 3.2 Received Radiation Calculation
 
-从方向 $\omega$ 接收到的辐射强度近似为：
+The radiation intensity received from direction $\omega$ is approximated as:
 
 $$S(P_\text{RX}, \omega) \approx \sum_{k=1}^M \underbrace{\exp\!\left(-\sum_{j=1}^{k-1} \rho(P_v^j)\,\Delta t\right)}_{(1)} \underbrace{\rho(P_v^k) S(P_v^k, -\omega)}_{(2)} \,\Delta t$$
 
-#### 公式解析
+#### Formula Analysis
 
-**项(1) - 累积衰减**：
+**Term (1) - Cumulative Attenuation**:
 $$\exp\!\left(-\sum_{j=1}^{k-1} \rho(P_v^j)\,\Delta t\right)$$
 
-- 表示从接收器到第k个体素之前的累积衰减
-- 指数衰减模型符合电磁波传播的物理规律
+- Represents the cumulative attenuation from the receiver to before the k-th voxel
+- Exponential decay model conforms to the physical laws of electromagnetic wave propagation
 
-**项(2) - 局部辐射贡献**：
+**Term (2) - Local Radiation Contribution**:
 $$\rho(P_v^k) S(P_v^k, -\omega)$$
 
-- 表示第k个体素的局部辐射贡献
-- 方向为 $-\omega$（与入射方向相反）
+- Represents the local radiation contribution of the k-th voxel
+- Direction is $-\omega$ (opposite to the incident direction)
 
-### 3.3 总接收信号
+### 3.3 Total Received Signal
 
-通过对所有采样方向求和，得到总接收信号：
+By summing over all sampling directions, we obtain the total received signal:
 
 $$S_{\Omega}(P_\text{RX}) \approx \sum_{\omega \in \Omega} S(P_\text{RX}, \omega)\,\Delta \omega$$
 
-其中 $\Omega$ 为采样方向集合，$\Delta \omega$ 为方向采样间隔。
+Where $\Omega$ is the set of sampling directions, and $\Delta \omega$ is the directional sampling interval.
 
-## 4. 训练目标函数
+## 4. Training Objective Function
 
-### 4.1 信号损失函数
+### 4.1 Signal Loss Function
 
-训练损失通过比较预测的聚合信号与真实测量值：
+Training loss is computed by comparing predicted aggregated signals with true measurements:
 
 $$\mathcal{L}_\text{signal} = \sum_{P_\text{RX}\sim \mathcal{D}} \left\|S_{\Omega}(P_\text{RX}) - \widehat{S}_{\Omega}(P_\text{RX}) \right\|_2$$
 
-其中：
-- $\mathcal{D}$：训练数据集
-- $\widehat{S}_{\Omega}(P_\text{RX})$：真实测量值
-- $\|\cdot\|_2$：L2范数
+Where:
+- $\mathcal{D}$: Training dataset
+- $\widehat{S}_{\Omega}(P_\text{RX})$: True measurement values
+- $\|\cdot\|_2$: L2 norm
 
-### 4.2 损失函数特性
+### 4.2 Loss Function Characteristics
 
-- **物理一致性**：损失函数基于电磁波传播的物理规律
-- **端到端训练**：整个模型可以端到端地训练
-- **数值稳定性**：离散化确保了数值计算的稳定性
+- **Physical consistency**: Loss function is based on the physical laws of electromagnetic wave propagation
+- **End-to-end training**: The entire model can be trained end-to-end
+- **Numerical stability**: Discretization ensures numerical computation stability
 
-## 5. 实现细节
+## 5. Implementation Details
 
-### 5.1 数值计算优化
+### 5.1 Numerical Computation Optimization
 
 ```python
-# 伪代码示例
+# Pseudocode example
 def compute_received_radiance(receiver_pos, direction, voxels, step_size):
     accumulated_radiance = 0
     cumulative_attenuation = 0
@@ -133,179 +157,182 @@ def compute_received_radiance(receiver_pos, direction, voxels, step_size):
         voxel_pos = receiver_pos + k * step_size * direction
         voxel = get_voxel_at_position(voxel_pos)
         
-        # 计算累积衰减
+        # Calculate cumulative attenuation
         if k > 0:
             cumulative_attenuation += voxel.attenuation * step_size
         
-        # 计算局部辐射贡献
+        # Calculate local radiation contribution
         local_radiance = voxel.attenuation * voxel.radiance(-direction)
         
-        # 应用衰减并累加
+        # Apply attenuation and accumulate
         attenuated_radiance = local_radiance * exp(-cumulative_attenuation)
         accumulated_radiance += attenuated_radiance * step_size
     
     return accumulated_radiance
 ```
 
-### 5.2 内存优化策略
+### 5.2 Memory Optimization Strategies
 
-- **体素缓存**：缓存已计算的体素属性
-- **批处理**：同时处理多个射线方向
-- **稀疏表示**：对空体素使用稀疏存储
+- **Voxel caching**: Cache computed voxel properties
+- **Batch processing**: Process multiple ray directions simultaneously
+- **Sparse representation**: Use sparse storage for empty voxels
 
-## 6. 物理解释性
+## 6. Physical Interpretability
 
-### 6.1 电磁波传播模型
+### 6.1 Electromagnetic Wave Propagation Model
 
-该离散模型保持了电磁波传播的物理可解释性：
+This discrete model maintains the physical interpretability of electromagnetic wave propagation:
 
-1. **衰减累积**：指数衰减模型符合Beer-Lambert定律
-2. **相位传播**：复数衰减系数考虑了相位信息
-3. **方向性**：体素辐射具有方向依赖性
+1. **Attenuation accumulation**: Exponential decay model conforms to Beer-Lambert law
+2. **Phase propagation**: Complex attenuation coefficients consider phase information
+3. **Directionality**: Voxel radiation has directional dependence
 
-### 6.2 与连续模型的对应
+### 6.2 Correspondence with Continuous Models
 
-当体素尺寸趋近于零时，离散模型收敛到连续辐射场模型：
+When voxel dimensions approach zero, the discrete model converges to the continuous radiance field model:
 
 $$\lim_{\Delta t \to 0} S(P_\text{RX}, \omega) = \int_0^L \exp\!\left(-\int_0^s \rho(s')\,ds'\right) \rho(s) S(s, -\omega)\,ds$$
 
-## 7. 性能分析
+## 7. Performance Analysis
 
-### 7.1 计算复杂度
+### 7.1 Computational Complexity
 
-- **时间复杂度**：$O(M \cdot N)$，其中 $M$ 为射线步数，$N$ 为体素数量
-- **空间复杂度**：$O(N)$，主要存储体素属性和特征
+- **Time complexity**: $O(M \cdot N)$, where $M$ is the number of ray steps and $N$ is the number of voxels
+- **Space complexity**: $O(N)$, mainly storing voxel properties and features
 
-### 7.2 精度与效率权衡
+### 7.2 Accuracy vs. Efficiency Trade-offs
 
-- **步长选择**：较小的步长提高精度但增加计算量
-- **体素分辨率**：较高的分辨率提高精度但增加内存需求
-- **方向采样**：更多的方向采样提高角度分辨率但增加计算量
+- **Step size selection**: Smaller step sizes improve accuracy but increase computation
+- **Voxel resolution**: Higher resolution improves accuracy but increases memory requirements
+- **Directional sampling**: More directional sampling improves angular resolution but increases computation
 
-## 8. 优化策略
+## 8. Optimization Strategies
 
-### 8.1 重要性采样优化
+### 8.1 Importance Sampling Optimization
 
-#### 8.1.1 离散射线追踪近似
+#### 8.1.1 Discrete Ray Tracing Approximation
 
-对于实际实现，连续射线追踪积分被离散化近似。具体地，在区间 $[0, D]$ 上的方向射线（其中 $D$ 表示最大深度）被均匀地分为 $K$ 段，产生 $K$ 个体素，位置为 $\{P_\text{v}(t_1), P_\text{v}(t_2), \ldots, P_\text{v}(t_K)\}$。接收信号可以近似为：
+For practical implementation, continuous ray tracing integration is approximated by discretization. Specifically, directional rays over the interval $[0, D]$ (where $D$ represents maximum depth) are uniformly divided into $K$ segments, producing $K$ voxels at positions $\{P_\text{v}(t_1), P_\text{v}(t_2), \ldots, P_\text{v}(t_K)\}$. The received signal can be approximated as:
 
 $$S\big(P_\text{RX}, \omega\big) \approx \sum_{k=1}^{K} \underbrace{\exp\!\left(-\sum_{j=1}^{k-1} \rho(P_\text{v}(t_j)) \Delta t \right)}_{A_k} \;\underbrace{\big(1 - e^{-\rho(P_\text{v}(t_k)) \Delta t}\big)}_{\alpha_k} \;\underbrace{S(P_\text{v}(t_k), -\omega)}_{S_k}$$
 
-其中 $\Delta t = D/K$。
+Where $\Delta t = D/K$.
 
-#### 8.1.2 非均匀采样策略
+#### 8.1.2 Non-uniform Sampling Strategy
 
-无线传播本质上是非均匀的——信号在密集材料（如混凝土墙）中遭受显著衰减，但在开放空气或稀疏植被中损失可忽略。为了利用这一特性，我们采用重要性采样策略，实现RF域中沿每条射线的非均匀采样。
+Wireless propagation is inherently non-uniform—signals suffer significant attenuation in dense materials (such as concrete walls) but experience negligible loss in open air or sparse vegetation. To leverage this property, we adopt an importance sampling strategy, implementing non-uniform sampling along each ray in the RF domain.
 
-**粗采样阶段**：
-- 沿每条传播路径均匀采样 $K$ 个位置 $\{P_\text{v}(t_k)\}_{k=1}^K$
-- 估计衰减因子 $\hat{\rho}(P_\text{v}(t_k))$
-- 使用实部 $\beta_k=\Re(\hat{\rho}(P_\text{v}(t_k)))$ 构建采样分布
+**Coarse sampling stage**:
+- Uniformly sample $K$ positions $\{P_\text{v}(t_k)\}_{k=1}^K$ along each propagation path
+- Estimate attenuation factors $\hat{\rho}(P_\text{v}(t_k))$
+- Use the real part $\beta_k=\Re(\hat{\rho}(P_\text{v}(t_k)))$ to construct sampling distribution
 
-**重要性权重计算**：
-第 $k$ 段的未归一化重要性权重为：
+**Importance weight calculation**:
+The unnormalized importance weight for the k-th segment is:
 
 $$w_k = \big(1 - e^{-\beta_k \Delta t}\big)\, \exp\!\Big(-\!\!\sum_{j<k}\beta_j\,\Delta t\Big)$$
 
-权重 $\{w_k\}$ 被归一化，形成沿射线的分段常数概率密度函数（PDF）。
+Weights $\{w_k\}$ are normalized to form a piecewise constant probability density function (PDF) along the ray.
 
-**精细采样阶段**：
-- 通过分配更多点到高权重段来重新采样射线
-- 绘制 $K$ 个分层样本 $u_i \sim \mathcal{U}[0,1]$
-- 对每个 $u_i$，确定对应位置 $t'_i$，使得 $\mathrm{CDF}(t'_i) = u_i$
-- 更新段长度为 $\Delta t_i = t'_i - t'_{i-1}$
+**Fine sampling stage**:
+- Resample rays by allocating more points to high-weight segments
+- Draw $K$ stratified samples $u_i \sim \mathcal{U}[0,1]$
+- For each $u_i$, determine corresponding position $t'_i$ such that $\mathrm{CDF}(t'_i) = u_i$
+- Update segment lengths as $\Delta t_i = t'_i - t'_{i-1}$
 
-### 8.2 金字塔采样优化
+### 8.2 Pyramid Sampling Optimization
 
-#### 8.2.1 方向空间离散化
+#### 8.2.1 Directional Space Discretization
 
-连续聚合接收信号在所有方向上被离散化为 $L$ 个采样方向：
+Continuous aggregated received signals in all directions are discretized into $L$ sampling directions:
 
 $$S_{\Omega}(P_\text{RX}) \approx \sum_{l=1}^{L} S(P_\text{RX}, \omega_l)$$
 
-#### 8.2.2 金字塔结构
+#### 8.2.2 Pyramid Structure
 
-以天线为中心的方向空间被划分为 $L = A \times B$ 个四边形金字塔，其中：
-- $A$：方位角 ($\phi$) 的划分数
-- $B$：仰角 ($\theta$) 的划分数
-- 每个金字塔的特征：角分辨率 $\Delta \theta = \pi/A$ 和 $\Delta \phi = 2\pi/B$
-- 金字塔基座位于半径为 $D$ 的球壳上
+The antenna-centered directional space is divided into $L = A \times B$ quadrilateral pyramids, where:
+- $A$: Number of divisions for azimuth angle ($\phi$)
+- $B$: Number of divisions for elevation angle ($\theta$)
+- Each pyramid features: angular resolution $\Delta \theta = \pi/A$ and $\Delta \phi = 2\pi/B$
+- Pyramid bases are located on a spherical shell with radius $D$
 
-#### 8.2.3 分层采样策略
+#### 8.2.3 Hierarchical Sampling Strategy
 
-对于给定方向：
-1. **径向重要性采样**：沿其中轴线放置 $K$ 个样本
-2. **金字塔细分**：将对应金字塔细分为 $K$ 个连续的截锥体（截断金字塔）
-3. **蒙特卡洛采样**：在每个截锥体内，随机绘制 $M$ 个均匀分布点
-4. **截锥体级属性**：截锥体级衰减因子、衰减特征和辐射定义为这些采样点的平均值
-5. **射线追踪**：平均值参与射线追踪过程
+For a given direction:
+1. **Radial importance sampling**: Place $K$ samples along the central axis
+2. **Pyramid subdivision**: Subdivide the corresponding pyramid into $K$ consecutive truncated cones (truncated pyramids)
+3. **Monte Carlo sampling**: Within each truncated cone, randomly draw $M$ uniformly distributed points
+4. **Truncated cone level properties**: Truncated cone level attenuation factors, attenuation features, and radiation are defined as averages of these sampling points
+5. **Ray tracing**: Averages participate in the ray tracing process
 
-### 8.3 优化效果
+### 8.3 Optimization Effects
 
-#### 8.3.1 计算效率提升
+#### 8.3.1 Computational Efficiency Improvement
 
-- **重要性采样**：将计算资源集中在高衰减区域，减少无效计算
-- **金字塔采样**：避免沿无穷小射线的追踪，提高数值稳定性
-- **自适应采样**：根据场景特性动态调整采样密度
+- **Importance sampling**: Concentrates computational resources in high-attenuation regions, reducing ineffective computation
+- **Pyramid sampling**: Avoids tracing along infinitesimal rays, improving numerical stability
+- **Adaptive sampling**: Dynamically adjusts sampling density based on scene characteristics
 
-#### 8.3.2 精度保持
+#### 8.3.2 Accuracy Preservation
 
-- **非均匀采样**：在高衰减区域保持高采样密度
-- **分层策略**：确保方向空间的均匀覆盖
-- **蒙特卡洛积分**：提高截锥体内的积分精度
+- **Non-uniform sampling**: Maintains high sampling density in high-attenuation regions
+- **Hierarchical strategy**: Ensures uniform coverage of directional space
+- **Monte Carlo integration**: Improves integration accuracy within truncated cones
 
-#### 8.3.3 内存优化
+#### 8.3.3 Memory Optimization
 
-- **稀疏表示**：对透明区域使用稀疏存储
-- **分层缓存**：缓存不同层级的计算结果
-- **批处理**：同时处理多个金字塔和射线
+- **Sparse representation**: Use sparse storage for transparent regions
+- **Hierarchical caching**: Cache computation results at different levels
+- **Batch processing**: Process multiple pyramids and rays simultaneously
 
-## 9. 应用场景
+## 9. Application Scenarios
 
-### 9.1 室内传播建模
+### 9.1 Indoor Propagation Modeling
 
-- 建筑物内部电磁波传播
-- 多径效应建模
-- 信号强度预测
+- Electromagnetic wave propagation inside buildings
+- Multipath effect modeling
+- Signal strength prediction
 
-### 9.2 无线通信系统
+### 9.2 Wireless Communication Systems
 
-- 5G/6G网络规划
-- 天线阵列优化
-- 干扰分析
+- 5G/6G network planning
+- Antenna array optimization
+- Interference analysis
 
-### 9.3 雷达系统
+### 9.3 Radar Systems
 
-- 目标检测与跟踪
-- 杂波建模
-- 信号处理算法验证
+- Target detection and tracking
+- Clutter modeling
+- Signal processing algorithm validation
 
-## 10. 未来改进方向
+## 10. Future Improvement Directions
 
-### 10.1 算法优化
+### 10.1 Algorithm Optimization
 
-- **自适应步长**：根据场景复杂度动态调整步长
-- **并行计算**：利用GPU并行化射线追踪
-- **层次化表示**：多分辨率体素表示
+- **Adaptive step size**: Dynamically adjust step size based on scene complexity
+- **Parallel computation**: Utilize GPU parallelization for ray tracing
+- **Hierarchical representation**: Multi-resolution voxel representation
 
-### 10.2 模型扩展
+### 10.2 Model Extensions
 
-- **时变场景**：支持动态场景建模
-- **多频率建模**：考虑频率依赖性
-- **极化效应**：包含电磁波极化信息
+- **Time-varying scenarios**: Support dynamic scene modeling
+- **Multi-frequency modeling**: Consider frequency dependence
+- **Polarization effects**: Include electromagnetic wave polarization information
 
-## 11. 总结
+## 11. Summary
 
-离散辐射场模型通过将连续的3D场景离散化为体素网格，实现了高效的电磁波传播建模。该模型具有以下优势：
+The discrete radiance field model achieves efficient electromagnetic wave propagation modeling by discretizing continuous 3D scenes into voxel grids. This model offers the following advantages:
 
-1. **物理准确性**：保持电磁波传播的物理规律
-2. **计算效率**：离散化实现高效的数值计算
-3. **可解释性**：每个体素的贡献都有明确的物理意义
-4. **可扩展性**：易于集成到更大的系统中
+1. **Physical accuracy**: Maintains the physical laws of electromagnetic wave propagation
+2. **Computational efficiency**: Discretization enables efficient numerical computation
+3. **Interpretability**: Each voxel's contribution has clear physical meaning
+4. **Scalability**: Easy to integrate into larger systems
 
-该模型为室内传播建模、无线通信系统设计和雷达系统分析提供了强大的技术基础。
+This model provides a powerful technical foundation for indoor propagation modeling, wireless communication system design, and radar system analysis.
 
 ---
 
-*本文档基于Prism项目的技术实现，如有疑问或建议，请联系开发团队。*
+*This document is based on the technical implementation of the Prism project. For questions or suggestions, please contact the development team.*
+
+
+
