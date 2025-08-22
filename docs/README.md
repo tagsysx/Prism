@@ -27,6 +27,7 @@ Welcome to the documentation for **Prism: Wideband RF Neural Radiance Fields for
 - [Model Extensions](advanced/extensions.md)
 - [Performance Optimization](advanced/optimization.md)
 - [Troubleshooting](advanced/troubleshooting.md)
+- [Technical Specification](technical_specification.md)
 
 ### **Examples & Tutorials**
 - [OFDM Scenarios](examples/ofdm_scenarios.md)
