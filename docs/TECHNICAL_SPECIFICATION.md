@@ -10,7 +10,9 @@ This document provides a detailed description of the technical implementation de
 
 In the discrete representation, 3D scenes are divided into a finite collection of voxels:
 
-$$\{P_v^i\}_{i=1}^N$$
+$
+\{P_v^i\}_{i=1}^N
+$
 
 Each voxel $P_v^i$ represents a localized volume element, serving as a radiation source with two key properties:
 - **Attenuation coefficient** $\rho(P_v^i)$: Describes the electromagnetic wave attenuation characteristics within the voxel
@@ -21,9 +23,8 @@ Each voxel $P_v^i$ represents a localized volume element, serving as a radiation
 To model these properties, we use two multi-layer perceptrons (MLPs):
 
 #### (1) AttenuationNetwork ($f_\theta$)
-$$
-f_\theta\!\left(\text{IPE}(P_v^i)\right) \to \big(\rho(P_v^i), \mathcal{F}(P_v^i)\big)
-$$
+$f_\theta\!\left(\text{IPE}(P_v^i)\right) \to \big(\rho(P_v^i), \mathcal{F}(P_v^i)\big)$
+
 where IPE is the Integrated Positional Encoding (IPE). 
 
 **Function**:
@@ -31,9 +32,8 @@ where IPE is the Integrated Positional Encoding (IPE).
 - Output: Attenuation coefficient $\rho(P_v^i)$ and 256-dimensional latent features $\mathcal{F}(P_v^i)$
 
 #### (2) RadiationNetwork ($f_\psi$)
-$$
-f_\psi\!\left(\mathcal{F}(P_v^i), \text{PE}(\omega), \text{PE}(P_{\text{TX}})\right) \to S(P_v^i,\omega)
-$$
+$f_\psi\!\left(\mathcal{F}(P_v^i), \text{PE}(\omega), \text{PE}(P_{\text{TX}})\right) \to S(P_v^i,\omega)$
+
 where $\text{PE}(\cdot)$ is the standard positional encoding. 
 
 **Function**:
@@ -46,7 +46,7 @@ where $\text{PE}(\cdot)$ is the standard positional encoding.
 
 The standard positional encoding function $\mathrm{PE}(\cdot)$ transforms input coordinates into high-dimensional representations, enhancing the model's expressive power:
 
-$$\mathrm{PE}(x) = [\sin(2^0 \pi x), \cos(2^0 \pi x), \sin(2^1 \pi x), \cos(2^1 \pi x), \ldots, \sin(2^{L-1} \pi x), \cos(2^{L-1} \pi x)]$$
+$\mathrm{PE}(x) = [\sin(2^0 \pi x), \cos(2^0 \pi x), \sin(2^1 \pi x), \cos(2^1 \pi x), \ldots, \sin(2^{L-1} \pi x), \cos(2^{L-1} \pi x)]$
 
 This encoding allows the network to learn high-frequency functions by mapping input coordinates to a higher dimensional space.
 
@@ -54,17 +54,16 @@ This encoding allows the network to learn high-frequency functions by mapping in
 
 The Integrated Positional Encoding function $\mathrm{IPE}(\cdot)$ extends the standard encoding to handle spatial regions rather than single points. For a 3D point $\mathbf{x} \sim \mathcal{N}(\mu, \Sigma)$, the IPE is the expected value of the positional encoding:
 
-$$
-\text{IPE}(\mu, \Sigma) = \left( \mathbb{E}[\sin(2^k \pi \mathbf{x})], \mathbb{E}[\cos(2^k \pi \mathbf{x})] \right)_{k=0}^{L-1}
-$$
+$\text{IPE}(\mu, \Sigma) = \left( \mathbb{E}[\sin(2^k \pi \mathbf{x})], \mathbb{E}[\cos(2^k \pi \mathbf{x})] \right)_{k=0}^{L-1}$
 
 Where:
 - $\mu$: Mean position of the Gaussian (center of the conical frustum)
 - $\Sigma$: Covariance matrix modeling the spatial extent
 
 The expectation for each dimension (e.g., x-coordinate) is:
-$$\mathbb{E}[\sin(2^k \pi x)] = \sin(2^k \pi \mu_x) \cdot \exp\left(-\frac{1}{2} (2^k \pi)^2 \Sigma_{xx}\right)$$
-$$\mathbb{E}[\cos(2^k \pi x)] = \cos(2^k \pi \mu_x) \cdot \exp\left(-\frac{1}{2} (2^k \pi)^2 \Sigma_{xx}\right)$$
+
+$\mathbb{E}[\sin(2^k \pi x)] = \sin(2^k \pi \mu_x) \cdot \exp\left(-\frac{1}{2} (2^k \pi)^2 \Sigma_{xx}\right)$
+$\mathbb{E}[\cos(2^k \pi x)] = \cos(2^k \pi \mu_x) \cdot \exp\left(-\frac{1}{2} (2^k \pi)^2 \Sigma_{xx}\right)$
 
 The exponential term $\exp\left(-\frac{1}{2} (2^k \pi)^2 \Sigma_{xx}\right)$ acts as a low-pass filter, attenuating high frequencies for larger regions (higher variance), which prevents aliasing and enables efficient modeling of spatial volumes.
 
@@ -74,7 +73,7 @@ The exponential term $\exp\left(-\frac{1}{2} (2^k \pi)^2 \Sigma_{xx}\right)$ act
 
 The attenuation coefficient $\rho(P_v^i)$ is determined by local material properties and represented in complex form:
 
-$$\rho(P_v^i) = \Delta A + j \Delta \phi$$
+$\rho(P_v^i) = \Delta A + j \Delta \phi$
 
 Where:
 - $\Delta A$: Amplitude attenuation (dB value per voxel step length)
@@ -90,9 +89,9 @@ Where:
 
 ### 3.1 Ray Discretization
 
-Given a ray starting from receiver position $P_\text{RX}$ with direction $\omega$, we discretize it into $M$ uniform sampling points:
+Given a ray starting from receiver position $P_{\text{RX}}$ with direction $\omega$, we discretize it into $M$ uniform sampling points:
 
-$$P_v^k = P_\text{RX} + k\Delta t \cdot \omega, \quad k=1,\dots,M$$
+$P_v^k = P_{\text{RX}} + k\Delta t \cdot \omega, \quad k=1,\dots,M$
 
 Where $\Delta t$ is the step size.
 
@@ -100,18 +99,18 @@ Where $\Delta t$ is the step size.
 
 The radiation intensity received from direction $\omega$ is approximated as:
 
-$$S(P_\text{RX}, \omega) \approx \sum_{k=1}^M \underbrace{\exp\!\left(-\sum_{j=1}^{k-1} \rho(P_v^j)\,\Delta t\right)}_{(1)} \underbrace{\rho(P_v^k) S(P_v^k, -\omega)}_{(2)} \,\Delta t$$
+$S(P_{\text{RX}}, \omega) \approx \sum_{k=1}^M \exp\!\left(-\sum_{j=1}^{k-1} \rho(P_v^j)\,\Delta t\right) \rho(P_v^k) S(P_v^k, -\omega) \,\Delta t$
 
 #### Formula Analysis
 
 **Term (1) - Cumulative Attenuation**:
-$$\exp\!\left(-\sum_{j=1}^{k-1} \rho(P_v^j)\,\Delta t\right)$$
+$\exp\!\left(-\sum_{j=1}^{k-1} \rho(P_v^j)\,\Delta t\right)$
 
 - Represents the cumulative attenuation from the receiver to before the k-th voxel
 - Exponential decay model conforms to the physical laws of electromagnetic wave propagation
 
 **Term (2) - Local Radiation Contribution**:
-$$\rho(P_v^k) S(P_v^k, -\omega)$$
+$\rho(P_v^k) S(P_v^k, -\omega)$
 
 - Represents the local radiation contribution of the k-th voxel
 - Direction is $-\omega$ (opposite to the incident direction)
@@ -120,7 +119,7 @@ $$\rho(P_v^k) S(P_v^k, -\omega)$$
 
 By summing over all sampling directions, we obtain the total received signal:
 
-$$S_{\Omega}(P_\text{RX}) \approx \sum_{\omega \in \Omega} S(P_\text{RX}, \omega)\,\Delta \omega$$
+$S_{\Omega}(P_{\text{RX}}) \approx \sum_{\omega \in \Omega} S(P_{\text{RX}}, \omega)\,\Delta \omega$
 
 Where $\Omega$ is the set of sampling directions, and $\Delta \omega$ is the directional sampling interval.
 
@@ -130,11 +129,11 @@ Where $\Omega$ is the set of sampling directions, and $\Delta \omega$ is the dir
 
 Training loss is computed by comparing predicted aggregated signals with true measurements:
 
-$$\mathcal{L}_\text{signal} = \sum_{P_\text{RX}\sim \mathcal{D}} \left\|S_{\Omega}(P_\text{RX}) - \widehat{S}_{\Omega}(P_\text{RX}) \right\|_2$$
+$\mathcal{L}_{\text{signal}} = \sum_{P_{\text{RX}}\sim \mathcal{D}} \left\|S_{\Omega}(P_{\text{RX}}) - \widehat{S}_{\Omega}(P_{\text{RX}}) \right\|_2$
 
 Where:
 - $\mathcal{D}$: Training dataset
-- $\widehat{S}_{\Omega}(P_\text{RX})$: True measurement values
+- $\widehat{S}_{\Omega}(P_{\text{RX}})$: True measurement values
 - $\|\cdot\|_2$: L2 norm
 
 ### 4.2 Loss Function Characteristics
@@ -191,7 +190,7 @@ This discrete model maintains the physical interpretability of electromagnetic w
 
 When voxel dimensions approach zero, the discrete model converges to the continuous radiance field model:
 
-$$\lim_{\Delta t \to 0} S(P_\text{RX}, \omega) = \int_0^L \exp\!\left(-\int_0^s \rho(s')\,ds'\right) \rho(s) S(s, -\omega)\,ds$$
+$\lim_{\Delta t \to 0} S(P_{\text{RX}}, \omega) = \int_0^L \exp\!\left(-\int_0^s \rho(s')\,ds'\right) \rho(s) S(s, -\omega)\,ds$
 
 ## 7. Performance Analysis
 
@@ -212,9 +211,9 @@ $$\lim_{\Delta t \to 0} S(P_\text{RX}, \omega) = \int_0^L \exp\!\left(-\int_0^s 
 
 #### 8.1.1 Discrete Ray Tracing Approximation
 
-For practical implementation, continuous ray tracing integration is approximated by discretization. Specifically, directional rays over the interval $[0, D]$ (where $D$ represents maximum depth) are uniformly divided into $K$ segments, producing $K$ voxels at positions $\{P_\text{v}(t_1), P_\text{v}(t_2), \ldots, P_\text{v}(t_K)\}$. The received signal can be approximated as:
+For practical implementation, continuous ray tracing integration is approximated by discretization. Specifically, directional rays over the interval $[0, D]$ (where $D$ represents maximum depth) are uniformly divided into $K$ segments, producing $K$ voxels at positions $\{P_{\text{v}}(t_1), P_{\text{v}}(t_2), \ldots, P_{\text{v}}(t_K)\}$. The received signal can be approximated as:
 
-$$S\big(P_\text{RX}, \omega\big) \approx \sum_{k=1}^{K} \underbrace{\exp\!\left(-\sum_{j=1}^{k-1} \rho(P_\text{v}(t_j)) \Delta t \right)}_{A_k} \;\underbrace{\big(1 - e^{-\rho(P_\text{v}(t_k)) \Delta t}\big)}_{\alpha_k} \;\underbrace{S(P_\text{v}(t_k), -\omega)}_{S_k}$$
+$S\big(P_{\text{RX}}, \omega\big) \approx \sum_{k=1}^{K} \exp\!\left(-\sum_{j=1}^{k-1} \rho(P_{\text{v}}(t_j)) \Delta t \right) \big(1 - e^{-\rho(P_{\text{v}}(t_k)) \Delta t}\big) S(P_{\text{v}}(t_k), -\omega)$
 
 Where $\Delta t = D/K$.
 
@@ -223,14 +222,14 @@ Where $\Delta t = D/K$.
 Wireless propagation is inherently non-uniform—signals suffer significant attenuation in dense materials (such as concrete walls) but experience negligible loss in open air or sparse vegetation. To leverage this property, we adopt an importance sampling strategy, implementing non-uniform sampling along each ray in the RF domain.
 
 **Coarse sampling stage**:
-- Uniformly sample $K$ positions $\{P_\text{v}(t_k)\}_{k=1}^K$ along each propagation path
-- Estimate attenuation factors $\hat{\rho}(P_\text{v}(t_k))$
-- Use the real part $\beta_k=\Re(\hat{\rho}(P_\text{v}(t_k)))$ to construct sampling distribution
+- Uniformly sample $K$ positions $\{P_{\text{v}}(t_k)\}_{k=1}^K$ along each propagation path
+- Estimate attenuation factors $\hat{\rho}(P_{\text{v}}(t_k))$
+- Use the real part $\beta_k=\Re(\hat{\rho}(P_{\text{v}}(t_k)))$ to construct sampling distribution
 
 **Importance weight calculation**:
 The unnormalized importance weight for the k-th segment is:
 
-$$w_k = \big(1 - e^{-\beta_k \Delta t}\big)\, \exp\!\Big(-\!\!\sum_{j<k}\beta_j\,\Delta t\Big)$$
+$w_k = \big(1 - e^{-\beta_k \Delta t}\big)\, \exp\!\Big(-\!\!\sum_{j<k}\beta_j\,\Delta t\Big)$
 
 Weights $\{w_k\}$ are normalized to form a piecewise constant probability density function (PDF) along the ray.
 
@@ -246,7 +245,7 @@ Weights $\{w_k\}$ are normalized to form a piecewise constant probability densit
 
 Continuous aggregated received signals in all directions are discretized into $L$ sampling directions:
 
-$$S_{\Omega}(P_\text{RX}) \approx \sum_{l=1}^{L} S(P_\text{RX}, \omega_l)$$
+$S_{\Omega}(P_{\text{RX}}) \approx \sum_{l=1}^{L} S(P_{\text{RX}}, \omega_l)$
 
 #### 8.2.2 Pyramid Structure
 
