@@ -8,7 +8,7 @@ This document outlines the training methodology and implementation for the Prism
 
 ### 1.1 Model Components for Training
 
-The Prism model consists of three main neural network components that are trained simultaneously:
+The Prism model consists of four main neural network components that are trained simultaneously:
 
 #### 1.1.1 AttenuationNetwork
 - **Purpose**: Encodes spatial position information into compact 128-dimensional feature representations
@@ -59,7 +59,7 @@ The training system handles complex multi-dimensional data including:
 The training process follows this workflow:
 
 1. **Data Loading**: Load training samples with proper tensor formatting
-2. **Forward Pass**: Process data through all three network components
+2. **Forward Pass**: Process data through all four network components
 3. **Loss Computation**: Calculate frequency-aware loss between predictions and targets
 4. **Backward Pass**: Compute gradients and update model parameters
 5. **Validation**: Periodic validation to monitor training progress

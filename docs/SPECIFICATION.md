@@ -2,7 +2,13 @@
 
 ## Overview
 
-This document provides a high-level theoretical description ofthe Discrete Radiance Field Model in the Prism project. This model achieves efficient electromagnetic wave propagation modeling and ray tracing by discretizing 3D scenes into a finite number of voxels.
+This document provides a high-level theoretical description of the Discrete Radiance Field Model in the Prism project. This model achieves efficient electromagnetic wave propagation modeling and ray tracing by discretizing 3D scenes into a finite number of voxels.
+
+The Prism system consists of four main neural network components:
+1. **AttenuationNetwork**: Encodes spatial position information into compact feature representations
+2. **AttenuationDecoder**: Converts spatial features into attenuation factors for all UE antenna channels
+3. **RadianceNetwork**: Processes UE position, viewing direction, and spatial features for radiation modeling
+4. **AntNetwork**: Generates directional importance indicators for efficient ray tracing sampling
 
 ## 1. Discrete Radiance Field Model Architecture
 
@@ -20,29 +26,49 @@ Each voxel $P_v^i$ represents a localized volume element, serving as a radiation
 
 ### 1.2 Neural Network Modeling
 
-To model these properties, we use two multi-layer perceptrons (MLPs):
+To model these properties, we use four multi-layer perceptrons (MLPs):
 
 #### (1) AttenuationNetwork ($f_\theta$)
 ```math
-f_\theta\!\left(\text{IPE}(P_v^i)\right) \to \big(\rho(P_v^i), \mathcal{F}(P_v^i)\big)
+f_\theta\!\left(\text{IPE}(P_v^i)\right) \to \mathcal{F}(P_v^i)
 ```
 
 where IPE is the Integrated Positional Encoding (IPE). 
 
 **Function**:
 - Input: Position encoding $\text{IPE}(P_v^i)$ of voxel position
-- Output: Attenuation coefficient $\rho(P_v^i)$ and 256-dimensional latent features $\mathcal{F}(P_v^i)$
+- Output: 128-dimensional latent features $\mathcal{F}(P_v^i)$
 
-#### (2) RadiationNetwork ($f_\psi$)
+#### (2) AttenuationDecoder ($f_\delta$)
 ```math
-f_\psi\!\left(\mathcal{F}(P_v^i), \text{PE}(\omega), \text{PE}(P_{\text{TX}})\right) \to S(P_v^i,\omega)
+f_\delta\!\left(\mathcal{F}(P_v^i)\right) \to \rho(P_v^i)
 ```
 
-where $\text{PE}(\cdot)$ is the standard positional encoding. 
+**Function**:
+- Input: 128-dimensional feature vector $\mathcal{F}(P_v^i)$ from AttenuationNetwork
+- Output: Attenuation coefficient $\rho(P_v^i)$ for all UE antenna channels
+
+#### (3) RadianceNetwork ($f_\psi$)
+```math
+f_\psi\!\left(\mathcal{F}(P_v^i), \text{PE}(\omega), \text{PE}(P_{\text{TX}}), C\right) \to S(P_v^i,\omega)
+```
+
+where $\text{PE}(\cdot)$ is the standard positional encoding and $C$ is the antenna embedding. 
 
 **Function**:
-- Input: Voxel features, direction encoding, transmitter position encoding
+- Input: Voxel features, direction encoding, transmitter position encoding, and antenna embedding
 - Output: Direction-dependent voxel radiation intensity $S(P_v^i,\omega)$
+
+#### (4) AntNetwork ($f_\alpha$)
+```math
+f_\alpha\!\left(C\right) \to M_{ij}
+```
+
+where $C$ is the antenna embedding and $M_{ij}$ is the directional importance matrix.
+
+**Function**:
+- Input: 64-dimensional antenna embedding $C$
+- Output: $A \times B$ directional importance matrix for efficient ray tracing sampling
 
 ### 1.3 Positional Encoding
 

@@ -50,7 +50,7 @@ For each antenna of the base station, the system traces RF energy along all $A \
 
 ### 2.3 Advanced Ray Tracing Techniques
 
-The system implements two key optimization strategies (as detailed in the Technical Specification):
+The system implements two key optimization strategies (as detailed in the Specification):
 
 #### 2.3.1 Importance-Based Sampling
 - **Adaptive sampling density**: Concentrates computational resources in high-attenuation regions
@@ -349,5 +349,5 @@ The ray tracing system integrates seamlessly with the discrete radiance field mo
 
 ---
 
-*This document describes the ray tracing system design for the Prism project. For implementation details and technical specifications, refer to the Technical Specification document.*
+*This document describes the ray tracing system design for the Prism project. For implementation details and technical specifications, refer to the Specification document.*
 
