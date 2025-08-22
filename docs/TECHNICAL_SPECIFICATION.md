@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document provides a detailed description of the technical implementation details of the Discrete Radiance Field Model in the Prism project. This model achieves efficient electromagnetic wave propagation modeling and ray tracing by discretizing 3D scenes into a finite number of voxels.
+This document provides a high-level theoretical description ofthe Discrete Radiance Field Model in the Prism project. This model achieves efficient electromagnetic wave propagation modeling and ray tracing by discretizing 3D scenes into a finite number of voxels.
 
 ## 1. Discrete Radiance Field Model Architecture
 
