@@ -16,7 +16,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from prism.ray_tracer_cuda import CUDARayTracer
-from prism.ray_tracer import DiscreteRayTracer
+from prism.ray_tracer_cpu import CPURayTracer
 
 def create_test_scenario(num_ue: int = 100, num_subcarriers: int = 64):
     """Create a test scenario with multiple UEs and subcarriers."""
@@ -88,7 +88,7 @@ def benchmark_ray_tracers(base_station_pos, ue_positions, selected_subcarriers, 
     
     # 2. Test Original CPU Ray Tracer (for comparison)
     print("\n2. Testing Original CPU Ray Tracer...")
-    cpu_tracer = DiscreteRayTracer(
+    cpu_tracer = CPURayTracer(
         azimuth_divisions=azimuth_divisions,
         elevation_divisions=elevation_divisions,
         max_ray_length=max_ray_length,

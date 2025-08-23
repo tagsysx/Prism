@@ -282,7 +282,7 @@ performance:
 performance:
   enable_parallel_processing: true    # Enable parallel processing for ray tracing
   num_workers: 24                     # Number of parallel workers (optimized for 32-core system)
-  use_multiprocessing: false          # Use threading instead of multiprocessing for better compatibility
+
   enable_distributed: false           # Enable distributed processing
 ```
 
@@ -293,7 +293,13 @@ performance:
 ```yaml
 training_interface:
   enabled: true                       # Enable integrated training interface
-  use_ray_tracer: true                # Use integrated ray_tracer for signal computation
+  
+  # Ray tracing mode selection
+  ray_tracing_mode: 'cuda'            # Ray tracing mode: 'cuda', 'cpu', or 'hybrid'
+  # - 'cuda': Pure CUDA acceleration (fastest, no CPU fallback)
+  # - 'cpu': Pure CPU with multiprocessing (stable, reliable)  
+  # - 'hybrid': Neural networks on CUDA, ray tracing on CPU (balanced)
+  
   num_sampling_points: 64             # Number of sampling points per ray
   subcarrier_sampling_ratio: 0.3      # Ratio of subcarriers to select (30%)
   antenna_specific_selection: true    # Enable antenna-specific subcarrier selection
@@ -331,6 +337,81 @@ training_interface:
 ```
 
 **Description**: Progressive training strategy that starts with coarse resolution and gradually increases accuracy.
+
+### Ray Tracing Mode Selection
+
+The training interface now supports three distinct ray tracing modes to balance performance and stability:
+
+#### CUDA Mode (`ray_tracing_mode: 'cuda'`)
+```yaml
+training_interface:
+  ray_tracing_mode: 'cuda'            # Pure CUDA acceleration
+```
+
+**Features**:
+- ✅ **Maximum Performance**: Full GPU acceleration for ray tracing
+- ✅ **No Device Conflicts**: Automatically disables parallel processing to prevent hanging
+- ✅ **Pure GPU Operations**: All computations run on CUDA
+- ⚠️ **Experimental**: May have stability issues on some systems
+
+**Use Cases**:
+- High-performance training on stable CUDA systems
+- When maximum speed is required
+- Development and testing environments
+
+#### CPU Mode (`ray_tracing_mode: 'cpu'`)
+```yaml
+training_interface:
+  ray_tracing_mode: 'cpu'             # Pure CPU with multiprocessing
+```
+
+**Features**:
+- ✅ **Maximum Stability**: No hanging issues, reliable execution
+- ✅ **Parallel Processing**: Full CPU multiprocessing enabled
+- ✅ **Cross-Platform**: Works on all systems
+- ⚠️ **Slower Performance**: CPU-based ray tracing
+
+**Use Cases**:
+- Production training environments
+- When stability is critical
+- Systems without CUDA support
+
+#### Hybrid Mode (`ray_tracing_mode: 'hybrid'`)
+```yaml
+training_interface:
+  ray_tracing_mode: 'hybrid'          # Neural nets on CUDA, ray tracing on CPU
+```
+
+**Features**:
+- ✅ **Balanced Performance**: Neural networks on GPU, ray tracing on CPU
+- ✅ **Automatic Fallback**: Tries CUDA first, falls back to CPU if needed
+- ✅ **Flexible Configuration**: Uses configured parallel processing settings
+- ✅ **Best of Both Worlds**: GPU acceleration where possible, CPU stability where needed
+
+**Use Cases**:
+- Default recommended mode
+- Balanced performance and stability
+- Mixed GPU/CPU workloads
+
+### Automatic Parallel Processing Configuration
+
+The system automatically configures parallel processing based on the selected mode:
+
+| Mode | Parallel Processing | Reason |
+|------|-------------------|---------|
+| **CUDA** | ❌ **Disabled** | Prevents device conflicts and hanging |
+| **CPU** | ✅ **Enabled** | Maximizes CPU performance |
+| **Hybrid** | ⚖️ **Configurable** | Uses configuration file settings |
+
+### Mode Comparison Table
+
+Here's a comprehensive comparison of the three ray tracing modes:
+
+| Mode | Description | Parallel Processing | Performance | Stability |
+|------|-------------|-------------------|-------------|-----------|
+| **cuda** | Pure CUDA acceleration | ❌ Disabled | 🚀 Fastest | ⚠️ Experimental |
+| **cpu** | Pure CPU with multiprocessing | ✅ Enabled | 🐌 Slower | ✅ Stable |
+| **hybrid** | Neural nets on CUDA, ray tracing on CPU | ⚖️ Configurable | 🚀 Balanced | ✅ Reliable |
 
 ### CSI Computation
 ```yaml
@@ -652,6 +733,47 @@ curriculum_learning:
 ✅ **Performance optimization**: Can adjust precision vs speed balance based on hardware capabilities  
 
 ---
+
+## Recent Fixes and Improvements
+
+### Training Interface Stability Fixes
+
+The training interface has been significantly improved to resolve hanging issues and provide better stability:
+
+#### ✅ **Fixed Issues**
+1. **Selection Variables Initialization**: Proper initialization of training state variables
+2. **Device Consistency**: Automatic CUDA/CPU device management
+3. **Timeout Protection**: Added timeout mechanisms to prevent hanging
+4. **Fallback Mechanisms**: Robust fallback when ray tracing fails
+5. **Parallel Processing Conflicts**: Automatic resolution of CUDA vs CPU conflicts
+
+#### 🔧 **Technical Improvements**
+- **Dynamic Selection Variable Sizing**: Automatically adjusts for different batch sizes
+- **Timeout Wrappers**: Prevents infinite loops in ray tracing operations
+- **Error Recovery**: Graceful fallback to simple calculations when needed
+- **Device Management**: Automatic tensor device placement and consistency
+
+#### 📊 **Performance Improvements**
+- **No More Hanging**: Training completes reliably without getting stuck
+- **Faster Initialization**: Proper variable initialization prevents delays
+- **Better Error Handling**: Clear error messages and recovery strategies
+- **Mode-Specific Optimization**: Each ray tracing mode optimized for its use case
+
+### Configuration Migration
+
+**Old Configuration** (deprecated):
+```yaml
+# This approach is no longer recommended
+training_interface:
+  use_simple_ray_tracing: true        # ❌ Confusing boolean flag
+```
+
+**New Configuration** (recommended):
+```yaml
+# Clear mode selection
+training_interface:
+  ray_tracing_mode: 'hybrid'          # ✅ Clear mode selection
+```
 
 ## CUDA Acceleration Guide
 

@@ -9,11 +9,12 @@ __version__ = "2.0.0"
 __author__ = "Prism Project Team"
 __email__ = "contact@prism-project.org"
 
-from .ray_tracer import (
-    DiscreteRayTracer,
+from .ray_tracer_cpu import (
+    CPURayTracer,
+)
+
+from .ray_tracer_base import (
     Ray,
-    BaseStation,
-    UserEquipment
 )
 
 from .ray_tracer_cuda import (
@@ -49,10 +50,8 @@ from .loss_functions import (
 
 __all__ = [
     # Core ray tracing
-    'DiscreteRayTracer',
+    'CPURayTracer',
     'Ray',
-    'BaseStation',
-    'UserEquipment',
     
     # CUDA-accelerated ray tracing
     'CUDARayTracer',

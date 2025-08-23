@@ -23,7 +23,7 @@ sys.path.append(str(Path(__file__).parent.parent / "src"))
 from prism import (
     PrismNetwork, 
     PrismTrainingInterface, 
-    DiscreteRayTracer,
+    CPURayTracer,
     PrismLoss,
     FrequencyAwareLoss,
     CSIVirtualLinkLoss
@@ -60,8 +60,8 @@ class CorrectPrismTrainer:
         ).to(self.device)
         
         # Create RayTracer
-        self.ray_tracer = DiscreteRayTracer(
-            scene_bounds=config['scene_bounds'],
+        self.ray_tracer = CPURayTracer(
+            scene_size=200.0,  # Use scene_size instead of scene_bounds
             azimuth_divisions=config['azimuth_divisions'],
             elevation_divisions=config['elevation_divisions'],
             max_ray_length=config['max_ray_length']

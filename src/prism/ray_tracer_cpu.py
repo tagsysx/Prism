@@ -23,77 +23,16 @@ import logging
 import math
 import time
 from typing import Dict, List, Tuple, Optional, Union
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import multiprocessing as mp
 from functools import partial
+from .ray_tracer_base import RayTracer, Ray
 
 logger = logging.getLogger(__name__)
 
 
 
-class Ray:
-    """Represents a single ray for ray tracing."""
-    
-    def __init__(self, origin: torch.Tensor, direction: torch.Tensor, max_length: float = 100.0, device: str = 'cpu'):
-        """
-        Initialize a ray.
-        
-        Args:
-            origin: Ray origin point [3]
-            direction: Ray direction vector [3]
-            max_length: Maximum ray length
-            device: Device to run computations on ('cuda' or 'cpu')
-        """
-        self.device = device
-        self.origin = origin.clone().detach().to(dtype=torch.float32, device=device)
-        self.direction = self._normalize(direction.clone().detach().to(dtype=torch.float32, device=device))
-        self.max_length = max_length
-    
-    def _normalize(self, vector: torch.Tensor) -> torch.Tensor:
-        """Normalize direction vector."""
-        norm = torch.norm(vector)
-        if norm < 1e-10:
-            return vector
-        return vector / norm
 
-class BaseStation:
-    """Represents a base station with configurable location and antennas."""
-    
-    def __init__(self, position: torch.Tensor = None, num_antennas: int = 1, device: str = 'cpu'):
-        """
-        Initialize base station.
-        
-        Args:
-            position: Base station position [3], defaults to origin (0, 0, 0)
-            num_antennas: Number of antennas at this base station
-            device: Device to run computations on
-        """
-        self.device = device
-        self.position = torch.tensor([0.0, 0.0, 0.0], device=device) if position is None else torch.tensor(position, device=device)
-        self.num_antennas = num_antennas
-        self.antenna_embeddings = torch.randn(num_antennas, 128, device=device)  # 128D antenna embedding
-    
-    def get_antenna_embedding(self, antenna_idx: int = 0) -> torch.Tensor:
-        """Get antenna embedding parameter C for the specified antenna."""
-        return self.antenna_embeddings[antenna_idx]
-
-class UserEquipment:
-    """Represents user equipment at a specific location."""
-    
-    def __init__(self, position: torch.Tensor, device: str = 'cpu'):
-        """
-        Initialize user equipment.
-        
-        Args:
-            position: UE position [3]
-            device: Device to run computations on
-        """
-        self.position = position.clone().detach().to(dtype=torch.float32, device=device)
-
-
-
-class DiscreteRayTracer:
-    """Discrete electromagnetic ray tracer implementing the design document specifications."""
+class CPURayTracer(RayTracer):
+    """CPU-based discrete electromagnetic ray tracer implementing the design document specifications."""
     
     def __init__(self, 
                  azimuth_divisions: int = 36,
@@ -107,9 +46,10 @@ class DiscreteRayTracer:
                  top_k_directions: int = None,
                  enable_parallel_processing: bool = True,
                  max_workers: int = None,
-                 use_multiprocessing: bool = False):
+                 uniform_samples: int = 128,
+                 resampled_points: int = 64):
         """
-        Initialize discrete ray tracer.
+        Initialize CPU ray tracer.
         
         Args:
             azimuth_divisions: Number of azimuth divisions A (0° to 360°)
@@ -123,13 +63,23 @@ class DiscreteRayTracer:
             top_k_directions: Number of top-K directions to select for MLP-based sampling (if None, uses default formula)
             enable_parallel_processing: Enable parallel processing for ray tracing
             max_workers: Maximum number of parallel workers (if None, uses CPU count)
-            use_multiprocessing: Use multiprocessing instead of threading (for CPU-intensive tasks)
+            uniform_samples: Number of uniform samples per ray
+            resampled_points: Number of resampled points per ray
         """
-        self.device = device
-        self.azimuth_divisions = azimuth_divisions
-        self.elevation_divisions = elevation_divisions
-        self.max_ray_length = max_ray_length
-        self.scene_size = scene_size
+        # Log initialization
+        logger.info("🖥️ Initializing CPURayTracer - CPU-based ray tracing implementation")
+        
+        # Call parent constructor
+        super().__init__(
+            azimuth_divisions=azimuth_divisions,
+            elevation_divisions=elevation_divisions,
+            max_ray_length=max_ray_length,
+            scene_size=scene_size,
+            device=device,
+            uniform_samples=uniform_samples,
+            resampled_points=resampled_points
+        )
+        
         self.prism_network = prism_network
         self.signal_threshold = signal_threshold
         self.enable_early_termination = enable_early_termination
@@ -145,32 +95,16 @@ class DiscreteRayTracer:
         
         # Parallel processing configuration
         self.enable_parallel_processing = enable_parallel_processing
-        self.use_multiprocessing = use_multiprocessing
         
         if max_workers is None:
-            self.max_workers = mp.cpu_count() if use_multiprocessing else min(4, mp.cpu_count())
+            import multiprocessing as mp
+            self.max_workers = mp.cpu_count()
         else:
             self.max_workers = max_workers
             
+        logger.info(f"💻 CPU Ray Tracer initialized with {azimuth_divisions}×{elevation_divisions} = {self.total_directions} directions")
         logger.info(f"Parallel processing: {'enabled' if enable_parallel_processing else 'disabled'}")
-        logger.info(f"Max workers: {self.max_workers} ({'multiprocessing' if use_multiprocessing else 'threading'})")
-        
-        # Calculate angular resolutions
-        self.azimuth_resolution = 2 * math.pi / azimuth_divisions
-        self.elevation_resolution = math.pi / elevation_divisions
-        
-        # Total number of directions
-        self.total_directions = azimuth_divisions * elevation_divisions
-        
-        # Scene boundaries
-        self.scene_min = -scene_size / 2.0
-        self.scene_max = scene_size / 2.0
-        
-        # Validate scene configuration
-        self._validate_scene_config()
-        
-        logger.info(f"Initialized ray tracer with {azimuth_divisions}x{elevation_divisions} = {self.total_directions} directions")
-        logger.info(f"Scene size: {scene_size}m, boundaries: [{self.scene_min:.1f}, {self.scene_max:.1f}]³")
+        logger.info(f"Max workers: {self.max_workers} (multiprocessing)")
     
     def _validate_scene_config(self):
         """Validate scene configuration parameters."""
@@ -319,6 +253,47 @@ class DiscreteRayTracer:
                     ray, ue_pos_tensor, subcarrier_idx, antenna_embedding
                 )
                 results[(tuple(ue_pos), subcarrier_idx)] = signal_strength
+        
+        return results
+    
+    def trace_rays(self, 
+                   base_station_pos: torch.Tensor,
+                   directions: torch.Tensor,
+                   ue_positions: List[torch.Tensor],
+                   selected_subcarriers: Union[Dict, torch.Tensor, List[int]],
+                   antenna_embedding: torch.Tensor) -> Dict:
+        """
+        Trace RF signals along multiple ray directions.
+        
+        Args:
+            base_station_pos: Base station position
+            directions: Direction vectors [num_directions, 3]
+            ue_positions: List of UE positions
+            selected_subcarriers: Subcarrier information
+            antenna_embedding: Base station's antenna embedding parameter C
+        
+        Returns:
+            Dictionary mapping (ue_pos, subcarrier, direction_idx) to signal strength
+        """
+        results = {}
+        
+        # Validate and normalize selected_subcarriers input
+        subcarrier_indices = self._normalize_subcarrier_input(selected_subcarriers, ue_positions)
+        
+        for direction_idx, direction_vector in enumerate(directions):
+            # Create ray for this direction
+            ray = Ray(base_station_pos, direction_vector, self.max_ray_length, self.device)
+            
+            for ue_pos in ue_positions:
+                ue_pos_tensor = ue_pos.clone().detach().to(dtype=torch.float32, device=self.device)
+                
+                # Use the normalized subcarrier indices
+                for subcarrier_idx in subcarrier_indices:
+                    # Apply discrete radiance field model for ray tracing
+                    signal_strength = self._discrete_radiance_ray_tracing(
+                        ray, ue_pos_tensor, subcarrier_idx, antenna_embedding
+                    )
+                    results[(tuple(ue_pos), subcarrier_idx, direction_idx)] = signal_strength
         
         return results
     
@@ -742,7 +717,8 @@ class DiscreteRayTracer:
                           base_station_pos: torch.Tensor,
                           ue_positions: List[torch.Tensor],
                           selected_subcarriers: Union[Dict, torch.Tensor, List[int]],
-                          antenna_embedding: torch.Tensor) -> Dict:
+                          antenna_embedding: torch.Tensor,
+                          progress_callback=None) -> Dict:
         """
         Accumulate RF signals using MLP-based direction sampling with antenna embedding C.
         
@@ -825,6 +801,8 @@ class DiscreteRayTracer:
                 if len(directions_list) >= 16 and num_antennas >= 32 and num_spatial_points >= 16:
                     # Full parallelization for large workloads
                     logger.debug(f"Using full parallelization (direction + antenna + spatial) with {self.max_workers} workers")
+                    if progress_callback:
+                        progress_callback(f"🚀 Full parallelization: {len(directions_list)} directions, {num_antennas} antennas")
                     accumulated_signals = self._accumulate_signals_full_parallel(
                         base_station_pos, ue_positions, selected_subcarriers, antenna_embedding, 
                         directions_list, num_antennas, num_spatial_points
@@ -832,6 +810,8 @@ class DiscreteRayTracer:
                 elif len(directions_list) >= 8 and num_antennas >= 16:
                     # Antenna + direction parallelization for medium workloads
                     logger.debug(f"Using antenna + direction parallelization with {self.max_workers} workers")
+                    if progress_callback:
+                        progress_callback(f"⚡ Antenna parallelization: {len(directions_list)} directions, {num_antennas} antennas")
                     accumulated_signals = self._accumulate_signals_antenna_parallel(
                         base_station_pos, ue_positions, selected_subcarriers, antenna_embedding, 
                         directions_list, num_antennas
@@ -1138,15 +1118,9 @@ class DiscreteRayTracer:
                     for direction in directions]
         
         try:
-            if self.use_multiprocessing:
-                # Use multiprocessing for CPU-intensive tasks
-                with mp.Pool(processes=self.max_workers) as pool:
-                    results = pool.map(self._trace_ray_parallel_wrapper, args_list)
-            else:
-                # Use threading for I/O-bound tasks
-                with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                    futures = [executor.submit(self._trace_ray_parallel_wrapper, args) for args in args_list]
-                    results = [future.result() for future in as_completed(futures)]
+            # Use multiprocessing for CPU-intensive tasks
+            with mp.Pool(processes=self.max_workers) as pool:
+                results = pool.map(self._trace_ray_parallel_wrapper, args_list)
             
             # Accumulate results from all workers
             for ray_results in results:
@@ -1204,10 +1178,11 @@ class DiscreteRayTracer:
         Returns:
             Dictionary with parallelization statistics
         """
+        import multiprocessing as mp
         return {
             'parallel_processing_enabled': self.enable_parallel_processing,
             'max_workers': self.max_workers,
-            'processing_mode': 'multiprocessing' if self.use_multiprocessing else 'threading',
+            'processing_mode': 'multiprocessing',
             'cpu_count': mp.cpu_count(),
             'device': self.device,
             'total_directions': self.total_directions,
@@ -1283,18 +1258,16 @@ class DiscreteRayTracer:
             for direction in directions:
                 args_list.append((antenna_idx, direction, base_station_pos, ue_positions, selected_subcarriers, antenna_embedding))
         
-        logger.debug(f"Using antenna-level parallel processing: {num_antennas} antennas × {len(directions)} directions = {len(args_list)} total tasks")
+        total_tasks = len(args_list)
+        logger.info(f"📡 Antenna parallel processing: {num_antennas} antennas × {len(directions)} directions = {total_tasks} total tasks")
+        
+        # Log progress every 10% of tasks
+        progress_interval = max(1, total_tasks // 10)
         
         try:
-            if self.use_multiprocessing:
-                # Use multiprocessing for CPU-intensive antenna processing
-                with mp.Pool(processes=self.max_workers) as pool:
-                    results = pool.map(self._trace_ray_antenna_parallel, args_list)
-            else:
-                # Use threading for antenna processing
-                with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                    futures = [executor.submit(self._trace_ray_antenna_parallel, args) for args in args_list]
-                    results = [future.result() for future in as_completed(futures)]
+            # Use multiprocessing for CPU-intensive antenna processing
+            with mp.Pool(processes=self.max_workers) as pool:
+                results = pool.map(self._trace_ray_antenna_parallel, args_list)
             
             # Accumulate results from all antennas and directions
             for antenna_results in results:
@@ -1530,8 +1503,14 @@ class DiscreteRayTracer:
             )
         
         # Process each direction with spatial sampling parallelization
-        for direction in directions:
+        total_directions = len(directions)
+        for direction_idx, direction in enumerate(directions):
             direction_results = {}
+            
+            # Log progress every 5 directions
+            if direction_idx % 5 == 0:
+                progress = (direction_idx / total_directions) * 100
+                logger.info(f"📡 Processing direction {direction_idx+1}/{total_directions} ({progress:.1f}%)")
             
             # Create ray for this direction
             phi_idx, theta_idx = direction
@@ -1560,15 +1539,9 @@ class DiscreteRayTracer:
                                 for i in range(num_spatial_points)]
                     
                     try:
-                        if self.use_multiprocessing:
-                            # Use multiprocessing for spatial sampling
-                            with mp.Pool(processes=self.max_workers) as pool:
-                                spatial_results = pool.map(self._trace_ray_spatial_parallel, args_list)
-                        else:
-                            # Use threading for spatial sampling
-                            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                                futures = [executor.submit(self._trace_ray_spatial_parallel, args) for args in args_list]
-                                spatial_results = [future.result() for future in as_completed(futures)]
+                        # Use multiprocessing for spatial sampling
+                        with mp.Pool(processes=self.max_workers) as pool:
+                            spatial_results = pool.map(self._trace_ray_spatial_parallel, args_list)
                         
                         # Accumulate spatial sampling results
                         total_signal = sum(spatial_results)
@@ -1650,7 +1623,7 @@ class DiscreteRayTracer:
         return {
             'parallel_processing_enabled': self.enable_parallel_processing,
             'max_workers': self.max_workers,
-            'processing_mode': 'multiprocessing' if self.use_multiprocessing else 'threading',
+            'processing_mode': 'multiprocessing',
             'cpu_count': mp.cpu_count(),
             'device': self.device,
             'total_directions': self.total_directions,
@@ -1743,15 +1716,9 @@ class DiscreteRayTracer:
                         args_list = [(subcarrier_idx, ray, ue_pos_tensor, num_spatial_points, antenna_embedding) 
                                     for subcarrier_idx in subcarrier_indices]
                         
-                        if self.use_multiprocessing:
-                            # Use multiprocessing for subcarrier processing
-                            with mp.Pool(processes=self.max_workers) as pool:
-                                subcarrier_results = pool.map(self._trace_ray_subcarrier_parallel, args_list)
-                        else:
-                            # Use threading for subcarrier processing
-                            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                                futures = [executor.submit(self._trace_ray_subcarrier_parallel, args) for args in args_list]
-                                subcarrier_results = [future.result() for future in as_completed(futures)]
+                        # Use multiprocessing for subcarrier processing
+                        with mp.Pool(processes=self.max_workers) as pool:
+                            subcarrier_results = pool.map(self._trace_ray_subcarrier_parallel, args_list)
                         
                         # Accumulate subcarrier results
                         for subcarrier_idx, signal_strength in zip(subcarrier_indices, subcarrier_results):
@@ -1959,13 +1926,9 @@ class DiscreteRayTracer:
                                 antenna_spatial_tasks.append(task)
                         
                         # Parallel processing of antenna + spatial combinations
-                        if self.use_multiprocessing:
-                            with mp.Pool(processes=self.max_workers) as pool:
-                                results = pool.map(self._trace_ray_antenna_spatial_parallel, antenna_spatial_tasks)
-                        else:
-                            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                                futures = [executor.submit(self._trace_ray_antenna_spatial_parallel, task) for task in antenna_spatial_tasks]
-                                results = [future.result() for future in as_completed(futures)]
+                        # Use multiprocessing for antenna spatial processing
+                        with mp.Pool(processes=self.max_workers) as pool:
+                            results = pool.map(self._trace_ray_antenna_spatial_parallel, antenna_spatial_tasks)
                         
                         # Sum all results for this subcarrier
                         total_signal = sum(results)
@@ -2066,13 +2029,9 @@ class DiscreteRayTracer:
                 
                 try:
                     # Parallel processing of spatial + subcarrier combinations
-                    if self.use_multiprocessing:
-                        with mp.Pool(processes=self.max_workers) as pool:
-                            results = pool.map(self._trace_ray_spatial_subcarrier_parallel, spatial_subcarrier_tasks)
-                    else:
-                        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                            futures = [executor.submit(self._trace_ray_spatial_subcarrier_parallel, task) for task in spatial_subcarrier_tasks]
-                            results = [future.result() for future in as_completed(futures)]
+                    # Use multiprocessing for spatial subcarrier processing
+                    with mp.Pool(processes=self.max_workers) as pool:
+                        results = pool.map(self._trace_ray_spatial_subcarrier_parallel, spatial_subcarrier_tasks)
                     
                     # Group results by subcarrier
                     subcarrier_signals = {}
@@ -2160,13 +2119,9 @@ class DiscreteRayTracer:
         
         try:
             # Parallel processing of direction + subcarrier combinations
-            if self.use_multiprocessing:
-                with mp.Pool(processes=self.max_workers) as pool:
-                    results = pool.map(self._trace_ray_direction_subcarrier_parallel, direction_subcarrier_tasks)
-            else:
-                with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                    futures = [executor.submit(self._trace_ray_direction_subcarrier_parallel, task) for task in direction_subcarrier_tasks]
-                    results = [future.result() for future in as_completed(futures)]
+            # Use multiprocessing for direction subcarrier processing
+            with mp.Pool(processes=self.max_workers) as pool:
+                results = pool.map(self._trace_ray_direction_subcarrier_parallel, direction_subcarrier_tasks)
             
             # Group results by (ue_pos, subcarrier)
             for i, (direction, ue_pos, subcarrier_idx, antenna_embedding) in enumerate(direction_subcarrier_tasks):

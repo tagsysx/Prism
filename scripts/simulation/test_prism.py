@@ -27,7 +27,7 @@ from typing import Dict, List, Tuple, Optional
 sys.path.append(str(Path(__file__).parent.parent.parent / "src"))
 
 from prism.networks.prism_network import PrismNetwork
-from prism.ray_tracer import DiscreteRayTracer
+from prism.ray_tracer_cpu import CPURayTracer
 from prism.training_interface import PrismTrainingInterface
 
 # Configure logging
@@ -85,7 +85,7 @@ class PrismTester:
     def _load_training_interface_checkpoint(self):
         """Load TrainingInterface checkpoint"""
         try:
-            # Create PrismNetwork and DiscreteRayTracer first
+            # Create PrismNetwork and CPURayTracer first
             nn_config = self.config['neural_networks']
             rt_config = self.config['ray_tracing']
             
@@ -105,7 +105,7 @@ class PrismTester:
                 complex_output=True
             )
             
-            self.ray_tracer = DiscreteRayTracer(
+            self.ray_tracer = CPURayTracer(
                 scene_bounds=rt_config.get('scene_bounds', None),
                 angular_divisions=(rt_config['azimuth_divisions'], rt_config['elevation_divisions']),
                 spatial_sampling=rt_config.get('spatial_sampling', 64),

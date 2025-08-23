@@ -12,7 +12,7 @@ from typing import List, Dict
 
 # Import Prism components
 from prism import (
-    DiscreteRayTracer,
+    CPURayTracer,
     BaseStation,
     UserEquipment,
     PrismNetwork
@@ -30,7 +30,7 @@ def main():
     print("\n1. Creating ray tracers with different scene sizes...")
     
     # Small scene (indoor environment)
-    small_scene_tracer = DiscreteRayTracer(
+    small_scene_tracer = CPURayTracer(
         azimuth_divisions=16,
         elevation_divisions=8,
         max_ray_length=50.0,
@@ -39,7 +39,7 @@ def main():
     )
     
     # Medium scene (urban environment)
-    medium_scene_tracer = DiscreteRayTracer(
+    medium_scene_tracer = CPURayTracer(
         azimuth_divisions=32,
         elevation_divisions=16,
         max_ray_length=200.0,
@@ -48,7 +48,7 @@ def main():
     )
     
     # Large scene (rural environment)
-    large_scene_tracer = DiscreteRayTracer(
+    large_scene_tracer = CPURayTracer(
         azimuth_divisions=64,
         elevation_divisions=32,
         max_ray_length=1000.0,
@@ -100,7 +100,7 @@ def main():
     print("\n4. Dynamic scene size adjustment...")
     
     # Start with small scene
-    tracer = DiscreteRayTracer(
+    tracer = CPURayTracer(
         azimuth_divisions=16,
         elevation_divisions=8,
         max_ray_length=50.0,

@@ -9,8 +9,9 @@ including data loading, model initialization, training loop, and checkpointing.
 
 import os
 import sys
-import argparse
+import time
 import logging
+import argparse
 import yaml
 import h5py
 import numpy as np
@@ -20,35 +21,253 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path
-import matplotlib.pyplot as plt
-from datetime import datetime
+import threading
+from tqdm import tqdm
+import psutil
+
+# Optional imports
+try:
+    import GPUtil
+except ImportError:
+    GPUtil = None
+
+try:
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None
+
 import json
-import time
+from datetime import datetime
+import traceback
 
 # Add src to path for imports
-sys.path.append(str(Path(__file__).parent.parent.parent / "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
 from prism.networks.prism_network import PrismNetwork
-from prism.ray_tracer import DiscreteRayTracer
+from prism.ray_tracer_cpu import CPURayTracer
 from prism.ray_tracer_cuda import CUDARayTracer
 from prism.training_interface import PrismTrainingInterface
 
-# Configure logging - will be set after config loading
-logging.basicConfig(
-    level=logging.INFO,  # Default level, will be overridden by config
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('training.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+class TrainingProgressMonitor:
+    """Real-time training progress monitor with GPU utilization tracking"""
+    
+    def __init__(self, total_epochs, total_batches_per_epoch):
+        self.total_epochs = total_epochs
+        self.total_batches_per_epoch = total_batches_per_epoch
+        self.start_time = time.time()
+        self.epoch_start_time = None
+        self.batch_start_time = None
+        
+        # Progress tracking
+        self.current_epoch = 0
+        self.current_batch = 0
+        self.total_batches_completed = 0
+        
+        # Performance metrics
+        self.epoch_times = []
+        self.batch_times = []
+        self.losses = []
+        
+        # GPU monitoring
+        self.gpu_utilization_history = []
+        self.memory_usage_history = []
+        
+    def start_epoch(self, epoch):
+        """Start monitoring a new epoch"""
+        self.current_epoch = epoch
+        self.epoch_start_time = time.time()
+        self.current_batch = 0
+        
+        print(f"\n🔄 Epoch {epoch}/{self.total_epochs}")
+        print(f"{'='*60}")
+        print(f"⏰ Started at: {time.strftime('%H:%M:%S')}")
+        print(f"💡 Training is active - you'll see real-time updates below")
+        print(f"{'='*60}")
+        
+    def start_batch(self, batch_idx):
+        """Start monitoring a new batch"""
+        self.current_batch = batch_idx
+        self.batch_start_time = time.time()
+        
+        # Show simple status indicator for first few batches
+        if batch_idx < 3:
+            print(f"  🚀 Processing batch {batch_idx+1}...")
+        
+    def update_batch_progress(self, batch_idx, loss, total_batches_in_epoch):
+        """Update batch progress with real-time information"""
+        self.current_batch = batch_idx
+        self.total_batches_completed += 1
+        
+        # Calculate progress
+        epoch_progress = (batch_idx + 1) / total_batches_in_epoch * 100
+        overall_progress = (self.total_batches_completed) / (self.total_epochs * self.total_batches_per_epoch) * 100
+        
+        # Calculate timing
+        batch_time = time.time() - self.batch_start_time
+        epoch_time = time.time() - self.epoch_start_time
+        total_time = time.time() - self.start_time
+        
+        # Estimate remaining time
+        if batch_idx > 0:
+            avg_batch_time = epoch_time / (batch_idx + 1)
+            remaining_batches = total_batches_in_epoch - batch_idx - 1
+            remaining_epoch_time = remaining_batches * avg_batch_time
+            remaining_total_time = (self.total_epochs - self.current_epoch - 1) * self.total_batches_per_epoch * avg_batch_time
+        else:
+            remaining_epoch_time = 0
+            remaining_total_time = 0
+        
+        # Get GPU information
+        gpu_info = self._get_gpu_info()
+        memory_info = self._get_memory_info()
+        
+        # Create simple progress bar
+        progress_bar_length = 30
+        filled_length = int(progress_bar_length * epoch_progress / 100)
+        progress_bar = '█' * filled_length + '░' * (progress_bar_length - filled_length)
+        
+        # Clear previous lines and show updated progress
+        print(f"\r", end="", flush=True)
+        print(f"  📊 [{progress_bar}] {epoch_progress:5.1f}% | Batch {batch_idx+1:3d}/{total_batches_in_epoch:3d}")
+        print(f"    🎯 Overall: {overall_progress:5.1f}% | Loss: {loss:.6f}")
+        print(f"    ⏱️  Batch: {batch_time:.2f}s | Epoch: {epoch_time:.1f}s | Total: {total_time:.1f}s")
+        print(f"    🔍 GPU: {gpu_info} | Memory: {memory_info}")
+        print(f"    ⏳ Remaining: Epoch {remaining_epoch_time:.1f}s | Total {remaining_total_time:.1f}s")
+        
+        # Store metrics
+        self.batch_times.append(batch_time)
+        self.losses.append(loss)
+        self.gpu_utilization_history.append(gpu_info)
+        self.memory_usage_history.append(memory_info)
+        
+        # Show heartbeat every 10 batches to prove training is alive
+        if batch_idx % 10 == 0:
+            current_time = time.strftime('%H:%M:%S')
+            print(f"    💓 Heartbeat: {current_time} - Training is alive and running!")
+        
+    def end_epoch(self, avg_loss):
+        """End epoch monitoring and show summary"""
+        epoch_time = time.time() - self.epoch_start_time
+        self.epoch_times.append(epoch_time)
+        
+        print(f"\n  ✅ Epoch {self.current_epoch} completed in {epoch_time:.1f}s")
+        print(f"    📈 Average Loss: {avg_loss:.6f}")
+        print(f"    🚀 Progress: {self.current_epoch}/{self.total_epochs} epochs ({self.current_epoch/self.total_epochs*100:.1f}%)")
+        
+        # Show performance summary
+        if len(self.epoch_times) > 1:
+            avg_epoch_time = np.mean(self.epoch_times[1:])  # Skip first epoch
+            estimated_total_time = avg_epoch_time * (self.total_epochs - self.current_epoch)
+            print(f"    ⏱️  Average epoch time: {avg_epoch_time:.1f}s")
+            print(f"    🎯 Estimated completion: {estimated_total_time:.1f}s ({estimated_total_time/3600:.1f}h)")
+        
+        print(f"{'='*60}")
+        
+    def _get_gpu_info(self):
+        """Get current GPU utilization information"""
+        try:
+            if not torch.cuda.is_available():
+                return "CPU only"
+            
+            gpu_info = []
+            for i in range(torch.cuda.device_count()):
+                # Get GPU utilization using nvidia-smi
+                try:
+                    import subprocess
+                    result = subprocess.run(
+                        ['nvidia-smi', '--query-gpu=utilization.gpu,memory.used,memory.total', 
+                         '--format=csv,noheader,nounits', '-i', str(i)], 
+                        capture_output=True, text=True, timeout=2
+                    )
+                    if result.returncode == 0:
+                        gpu_data = result.stdout.strip().split(', ')
+                        if len(gpu_data) >= 3:
+                            util, mem_used, mem_total = gpu_data[:3]
+                            gpu_info.append(f"GPU{i}: {util}% | {mem_used}/{mem_total}MB")
+                        else:
+                            gpu_info.append(f"GPU{i}: N/A")
+                    else:
+                        gpu_info.append(f"GPU{i}: Error")
+                except:
+                    # Fallback to PyTorch memory info
+                    memory_allocated = torch.cuda.memory_allocated(i) / 1024**2  # MB
+                    memory_reserved = torch.cuda.memory_reserved(i) / 1024**2   # MB
+                    gpu_info.append(f"GPU{i}: {memory_allocated:.0f}/{memory_reserved:.0f}MB")
+            
+            return " | ".join(gpu_info)
+        except Exception as e:
+            return f"Error: {e}"
+    
+    def _get_memory_info(self):
+        """Get current memory usage information"""
+        try:
+            if not torch.cuda.is_available():
+                return "CPU only"
+            
+            # Get main GPU memory info
+            total_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
+            allocated_memory = torch.cuda.memory_allocated() / 1024**3  # GB
+            reserved_memory = torch.cuda.memory_reserved() / 1024**3   # GB
+            
+            return f"{allocated_memory:.1f}GB/{reserved_memory:.1f}GB/{total_memory:.1f}GB (alloc/reserved/total)"
+        except Exception as e:
+            return f"Error: {e}"
+    
+    def get_performance_summary(self):
+        """Get overall training performance summary"""
+        if not self.epoch_times:
+            return "No training data available"
+        
+        total_time = time.time() - self.start_time
+        avg_epoch_time = np.mean(self.epoch_times)
+        avg_batch_time = np.mean(self.batch_times) if self.batch_times else 0
+        avg_loss = np.mean(self.losses) if self.losses else 0
+        
+        return {
+            'total_time': total_time,
+            'avg_epoch_time': avg_epoch_time,
+            'avg_batch_time': avg_batch_time,
+            'avg_loss': avg_loss,
+            'epochs_completed': len(self.epoch_times),
+            'total_batches': self.total_batches_completed
+        }
 
 class PrismTrainer:
     """Main trainer class for Prism network using TrainingInterface"""
     
     def __init__(self, config_path: str, data_path: str, output_dir: str, resume_from: str = None):
         """Initialize trainer with configuration and data paths"""
+        # Configure logging first
+        logging.basicConfig(
+            level=logging.WARNING,  # Changed from INFO to WARNING to show more important messages
+            format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
+            handlers=[
+                logging.FileHandler('training.log'),
+                logging.StreamHandler()
+            ]
+        )
+        self.logger = logging.getLogger(__name__)
+        
+        # Set specific logger levels for more detailed output
+        self.logger.setLevel(logging.INFO)  # Set this logger to INFO level
+        
+        # Also enable warnings from other libraries
+        logging.getLogger('torch').setLevel(logging.WARNING)
+        logging.getLogger('torch.cuda').setLevel(logging.INFO)
+        logging.getLogger('h5py').setLevel(logging.WARNING)
+        logging.getLogger('matplotlib').setLevel(logging.WARNING)
+        
+        # Show warnings immediately
+        import warnings
+        warnings.filterwarnings('always', category=UserWarning)
+        warnings.filterwarnings('always', category=DeprecationWarning)
+        
+        print("🔍 Logging configured: WARNING level enabled for system messages")
+        print("📝 Training logger set to INFO level for detailed training output")
+        
+        # Display current logging configuration
+        self._display_logging_config()
+        
         self.config_path = config_path
         self.data_path = data_path
         self.output_dir = Path(output_dir)
@@ -62,22 +281,22 @@ class PrismTrainer:
         if torch.cuda.is_available():
             self.device = torch.device('cuda')
             self.num_gpus = torch.cuda.device_count()
-            logger.info(f"CUDA available: {self.num_gpus} GPUs detected")
+            self.logger.info(f"CUDA available: {self.num_gpus} GPUs detected")
             
             # Check if multi-GPU is enabled in config
             if self.config.get('performance', {}).get('enable_distributed', False):
                 self.use_multi_gpu = True
-                logger.info(f"Multi-GPU training enabled with {self.num_gpus} GPUs")
+                self.logger.info(f"Multi-GPU training enabled with {self.num_gpus} GPUs")
             else:
                 self.use_multi_gpu = False
-                logger.info(f"Single GPU training on GPU 0")
+                self.logger.info(f"Single GPU training on GPU 0")
         else:
             self.device = torch.device('cpu')
             self.num_gpus = 0
             self.use_multi_gpu = False
-            logger.info("CUDA not available, using CPU")
+            self.logger.info("CUDA not available, using CPU")
         
-        logger.info(f"Using device: {self.device}")
+        self.logger.info(f"Using device: {self.device}")
         
         # Initialize model and training components
         self._setup_model()
@@ -95,6 +314,9 @@ class PrismTrainer:
                 self._resume_from_checkpoint()
             else:
                 print("🆕 Starting fresh training (no checkpoints found)")
+        
+        # Progress monitor will be initialized after dataloader is created in _load_data()
+        self.progress_monitor = None
         
         # Setup tensorboard
         self.writer = SummaryWriter(log_dir=self.output_dir / 'tensorboard')
@@ -129,9 +351,13 @@ class PrismTrainer:
         # Combine losses
         total_loss = real_loss + imag_loss
         
-        # Ensure we return a tensor
+        # Ensure we return a tensor with gradients
         if not isinstance(total_loss, torch.Tensor):
-            total_loss = torch.tensor(total_loss, device=predictions.device, dtype=predictions.dtype)
+            # Create tensor that maintains gradients
+            total_loss = torch.tensor(total_loss, device=predictions.device, dtype=predictions.dtype, requires_grad=True)
+        elif not total_loss.requires_grad:
+            # If tensor exists but doesn't have gradients, ensure it does
+            total_loss.requires_grad_(True)
         
         return total_loss
     
@@ -145,8 +371,8 @@ class PrismTrainer:
         numeric_level = getattr(logging, log_level.upper(), logging.INFO)
         logging.getLogger().setLevel(numeric_level)
         
-        logger.info(f"Loaded configuration from {self.config_path}")
-        logger.info(f"Logging level set to: {log_level}")
+        self.logger.info(f"Loaded configuration from {self.config_path}")
+        self.logger.info(f"Logging level set to: {log_level}")
         return config
     
     def _setup_model(self):
@@ -155,14 +381,14 @@ class PrismTrainer:
         rt_config = self.config['ray_tracing']
         
         # Create PrismNetwork with configuration from YAML
-        logger.info(f"Creating PrismNetwork with:")
-        logger.info(f"  num_subcarriers: {nn_config['attenuation_decoder']['output_dim']}")
-        logger.info(f"  num_ue_antennas: {nn_config['attenuation_decoder']['num_ue_antennas']}")
-        logger.info(f"  num_bs_antennas: {nn_config['antenna_codebook']['num_antennas']}")
-        logger.info(f"  position_dim: {nn_config['attenuation_network']['input_dim']}")
-        logger.info(f"  hidden_dim: {nn_config['attenuation_network']['hidden_dim']}")
-        logger.info(f"  feature_dim: {nn_config['attenuation_network']['feature_dim']}")
-        logger.info(f"  antenna_embedding_dim: {nn_config['antenna_codebook']['embedding_dim']}")
+        self.logger.info(f"Creating PrismNetwork with:")
+        self.logger.info(f"  num_subcarriers: {nn_config['attenuation_decoder']['output_dim']}")
+        self.logger.info(f"  num_ue_antennas: {nn_config['attenuation_decoder']['num_ue_antennas']}")
+        self.logger.info(f"  num_bs_antennas: {nn_config['antenna_codebook']['num_antennas']}")
+        self.logger.info(f"  position_dim: {nn_config['attenuation_network']['input_dim']}")
+        self.logger.info(f"  hidden_dim: {nn_config['attenuation_network']['hidden_dim']}")
+        self.logger.info(f"  feature_dim: {nn_config['attenuation_network']['feature_dim']}")
+        self.logger.info(f"  antenna_embedding_dim: {nn_config['antenna_codebook']['embedding_dim']}")
         
         self.prism_network = PrismNetwork(
             num_subcarriers=nn_config['attenuation_decoder']['output_dim'],
@@ -180,10 +406,10 @@ class PrismTrainer:
             complex_output=True
         )
         
-        logger.info(f"PrismNetwork created successfully")
-        logger.info(f"  num_subcarriers: {self.prism_network.num_subcarriers}")
-        logger.info(f"  num_ue_antennas: {self.prism_network.num_ue_antennas}")
-        logger.info(f"  num_bs_antennas: {self.prism_network.num_bs_antennas}")
+        self.logger.info(f"PrismNetwork created successfully")
+        self.logger.info(f"  num_subcarriers: {self.prism_network.num_subcarriers}")
+        self.logger.info(f"  num_ue_antennas: {self.prism_network.num_ue_antennas}")
+        self.logger.info(f"  num_bs_antennas: {self.prism_network.num_bs_antennas}")
         
         # Create Ray Tracer with PrismNetwork for MLP-based direction selection
         # Read parallel processing configuration from config file
@@ -196,7 +422,24 @@ class PrismTrainer:
         # Parallel processing settings with fallback to config values
         enable_parallel = parallel_config.get('enable_parallel_processing', True)
         max_workers = parallel_config.get('num_workers', 4)
-        use_multiprocessing = parallel_config.get('use_multiprocessing', False)
+        
+        # Get ray tracing mode from training interface configuration
+        training_interface_config = self.config.get('training_interface', {})
+        ray_tracing_mode = training_interface_config.get('ray_tracing_mode', 'hybrid')
+        
+        # Configure parallel processing based on ray tracing mode
+        if ray_tracing_mode == 'cuda':
+            # CUDA mode: disable parallel processing to avoid conflicts
+            enable_parallel = False
+            self.logger.info("🔒 CUDA mode: parallel processing disabled to avoid device conflicts")
+        elif ray_tracing_mode == 'cpu':
+            # CPU mode: enable parallel processing for performance
+            enable_parallel = ray_tracer_config.get('parallel_antenna_processing', True)
+            self.logger.info("🚀 CPU mode: parallel processing enabled for performance")
+        else:  # hybrid mode
+            # Hybrid mode: use configured parallel processing
+            enable_parallel = ray_tracer_config.get('parallel_antenna_processing', True)
+            self.logger.info("⚖️  Hybrid mode: using configured parallel processing")
         
         # Override with ray_tracer_integration settings if available
         if 'parallel_antenna_processing' in ray_tracer_config:
@@ -204,15 +447,15 @@ class PrismTrainer:
         if 'num_workers' in ray_tracer_config:
             max_workers = ray_tracer_config['num_workers']
         
-        logger.info(f"Ray tracer configuration:")
-        logger.info(f"  - Type: {'CUDA' if use_cuda_ray_tracer else 'CPU'}")
-        logger.info(f"  - Parallel processing: {enable_parallel}")
-        logger.info(f"  - Max workers: {max_workers}")
-        logger.info(f"  - Use multiprocessing: {use_multiprocessing}")
+        self.logger.info(f"Ray tracer configuration:")
+        self.logger.info(f"  - Type: {'CUDA' if use_cuda_ray_tracer else 'CPU'}")
+        self.logger.info(f"  - Ray tracing mode: {ray_tracing_mode}")
+        self.logger.info(f"  - Parallel processing: {enable_parallel}")
+        self.logger.info(f"  - Max workers: {max_workers}")
         
         # Create ray tracer based on configuration
         if use_cuda_ray_tracer and torch.cuda.is_available():
-            logger.info("🚀 Using CUDA-accelerated ray tracer for maximum performance")
+            self.logger.info("🚀 Using CUDA-accelerated ray tracer for maximum performance")
             self.ray_tracer = CUDARayTracer(
                 azimuth_divisions=rt_config['azimuth_divisions'],
                 elevation_divisions=rt_config['elevation_divisions'],
@@ -224,15 +467,14 @@ class PrismTrainer:
                 enable_early_termination=rt_config.get('enable_early_termination', True),
                 uniform_samples=rt_config.get('uniform_samples', 128),
                 resampled_points=rt_config.get('resampled_points', 64),
-                enable_parallel_processing=enable_parallel,  # Read from config
-                max_workers=max_workers,  # Read from config
-                use_multiprocessing=use_multiprocessing  # Read from config
+                enable_parallel_processing=enable_parallel,  # Configured based on mode
+                max_workers=max_workers  # Read from config
             )
         else:
             if use_cuda_ray_tracer and not torch.cuda.is_available():
-                logger.warning("⚠️  CUDA ray tracer requested but CUDA not available, falling back to CPU version")
-            logger.info("💻 Using CPU ray tracer")
-            self.ray_tracer = DiscreteRayTracer(
+                self.logger.warning("⚠️  CUDA ray tracer requested but CUDA not available, falling back to CPU version")
+            self.logger.info("💻 Using CPU ray tracer")
+            self.ray_tracer = CPURayTracer(
                 azimuth_divisions=rt_config['azimuth_divisions'],
                 elevation_divisions=rt_config['elevation_divisions'],
                 max_ray_length=rt_config.get('max_ray_length', 100.0),
@@ -242,35 +484,50 @@ class PrismTrainer:
                 signal_threshold=rt_config.get('signal_threshold', 1e-6),
                 enable_early_termination=rt_config.get('enable_early_termination', True),
                 top_k_directions=rt_config.get('top_k_directions', None),  # Use configured K value
-                enable_parallel_processing=enable_parallel,  # Read from config
-                max_workers=max_workers,  # Read from config
-                use_multiprocessing=use_multiprocessing  # Read from config
+                enable_parallel_processing=enable_parallel,  # Configured based on mode
+                max_workers=max_workers  # Read from config
             )
         
-        # Create PrismTrainingInterface
+        # Get ray tracing mode from training interface configuration
+        training_interface_config = self.config.get('training_interface', {})
+        ray_tracing_mode = training_interface_config.get('ray_tracing_mode', 'hybrid')
+        
+        # Create PrismTrainingInterface with ray tracing mode
         self.model = PrismTrainingInterface(
             prism_network=self.prism_network,
             ray_tracer=self.ray_tracer,
             num_sampling_points=rt_config.get('spatial_sampling', 64),
             scene_bounds=rt_config.get('scene_bounds', None),
-            subcarrier_sampling_ratio=rt_config.get('subcarrier_sampling_ratio', 0.3),
-            checkpoint_dir=str(self.output_dir / 'checkpoints')
+            subcarrier_sampling_ratio=training_interface_config.get('subcarrier_sampling_ratio', 0.3),
+            checkpoint_dir=str(self.output_dir / 'checkpoints'),
+            ray_tracing_mode=ray_tracing_mode
         )
+        
+        # Log configuration details
+        subcarrier_ratio = training_interface_config.get('subcarrier_sampling_ratio', 0.3)
+        total_subcarriers = self.prism_network.num_subcarriers
+        selected_subcarriers = int(total_subcarriers * subcarrier_ratio)
+        
+        self.logger.info(f"Training interface created with ray_tracing_mode: {ray_tracing_mode}")
+        self.logger.info(f"Subcarrier sampling: {subcarrier_ratio} ({subcarrier_ratio*100}%) = {selected_subcarriers}/{total_subcarriers} subcarriers")
         
         # Enable multi-GPU training if configured
         if self.use_multi_gpu and self.num_gpus > 1:
-            logger.info(f"🚀 Wrapping model with DataParallel for {self.num_gpus} GPUs")
+            self.logger.info(f"🚀 Wrapping model with DataParallel for {self.num_gpus} GPUs")
+            # Store the original model for attribute access
+            self.original_model = self.model
             self.model = nn.DataParallel(self.model, device_ids=list(range(self.num_gpus)))
-            logger.info(f"Multi-GPU model created successfully")
+            self.logger.info(f"Multi-GPU model created successfully")
         else:
-            logger.info("Single GPU training mode")
+            self.logger.info("Single GPU training mode")
+            self.original_model = self.model
         
         self.model = self.model.to(self.device)
         
         # Print model summary
         total_params = sum(p.numel() for p in self.model.parameters())
         trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        logger.info(f"TrainingInterface created with {total_params:,} total parameters ({trainable_params:,} trainable)")
+        self.logger.info(f"TrainingInterface created with {total_params:,} total parameters ({trainable_params:,} trainable)")
         
     def _setup_training(self):
         """Setup training hyperparameters and optimizers"""
@@ -281,11 +538,15 @@ class PrismTrainer:
         if self.use_multi_gpu and self.num_gpus > 1:
             original_batch_size = self.batch_size
             self.batch_size = self.batch_size * self.num_gpus
-            logger.info(f"Multi-GPU batch size scaling: {original_batch_size} × {self.num_gpus} = {self.batch_size}")
+            self.logger.info(f"Multi-GPU batch size scaling: {original_batch_size} × {self.num_gpus} = {self.batch_size}")
         
         self.learning_rate = 1e-4
         self.num_epochs = self.config['training']['num_epochs']  # Read from config
         self.save_interval = 10
+        
+        # Deadlock detection settings
+        self.batch_timeout = 300  # 5 minutes per batch
+        self.progress_check_interval = 30  # Check progress every 30 seconds
         
         # Loss function for complex-valued outputs - ensure it returns tensors
         self.criterion = self._complex_mse_loss
@@ -306,54 +567,205 @@ class PrismTrainer:
             verbose=True
         )
         
-        logger.info(f"Training setup: batch_size={self.batch_size}, lr={self.learning_rate}")
+        self.logger.info(f"Training setup: batch_size={self.batch_size}, lr={self.learning_rate}")
         
+        # GPU monitoring setup
+        self.gpu_monitoring_active = False
+        self.gpu_monitor_thread = None
+        
+    def _get_gpu_utilization(self) -> str:
+        """Get current GPU utilization and memory usage"""
+        try:
+            if not torch.cuda.is_available():
+                return "CPU only"
+            
+            gpu_info = []
+            for i in range(torch.cuda.device_count()):
+                memory_allocated = torch.cuda.memory_allocated(i) / 1024**3  # GB
+                memory_reserved = torch.cuda.memory_reserved(i) / 1024**3   # GB
+                gpu_info.append(f"GPU{i}: {memory_allocated:.1f}GB/{memory_reserved:.1f}GB")
+            
+            return " | ".join(gpu_info)
+        except Exception as e:
+            return f"Error: {e}"
+    
+    def _get_memory_usage(self) -> str:
+        """Get current memory usage for the model"""
+        try:
+            if not torch.cuda.is_available():
+                return "CPU only"
+            
+            total_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
+            allocated_memory = torch.cuda.memory_allocated() / 1024**3  # GB
+            return f"{allocated_memory:.1f}GB/{total_memory:.1f}GB"
+        except Exception as e:
+            return f"Error: {e}"
+    
+    def _start_gpu_monitoring(self):
+        """Start GPU monitoring thread"""
+        if not torch.cuda.is_available():
+            return
+        
+        self.gpu_monitoring_active = True
+        print(f"🔍 GPU Monitoring Started | Devices: {torch.cuda.device_count()}")
+        
+    def _stop_gpu_monitoring(self):
+        """Stop GPU monitoring"""
+        self.gpu_monitoring_active = False
+        
+    def _check_training_progress(self, start_time: float, batch_idx: int, total_batches: int) -> bool:
+        """Check if training is progressing normally or stuck"""
+        elapsed_time = time.time() - start_time
+        
+        # Check if we're taking too long on a batch
+        if elapsed_time > self.batch_timeout:
+            self.logger.warning(f"⚠️  Batch {batch_idx} taking too long ({elapsed_time:.1f}s > {self.batch_timeout}s)")
+            return False
+        
+        # Check if we're making reasonable progress
+        if batch_idx > 0:
+            avg_time_per_batch = elapsed_time / batch_idx
+            estimated_total_time = avg_time_per_batch * total_batches
+            if estimated_total_time > 3600:  # More than 1 hour
+                self.logger.warning(f"⚠️  Slow training progress: estimated {estimated_total_time/3600:.1f} hours total")
+        
+        return True
+        
+    def _validate_data_integrity(self):
+        """Validate HDF5 data integrity before training"""
+        self.logger.info("Validating data integrity...")
+        print("🔍 Validating data integrity...")
+        
+        try:
+            with h5py.File(self.data_path, 'r') as f:
+                # Check if file is corrupted
+                if f.id.get_access_plist().get_fclose_degree() == h5py.h5f.CLOSE_STRONG:
+                    self.logger.info("HDF5 file uses strong closing, checking for corruption...")
+                
+                # Validate dataset shapes and types
+                ue_positions = f['positions']['ue_positions']
+                csi_data = f['channel_data']['channel_responses']
+                bs_position = f['positions']['bs_position']
+                
+                print(f"   📊 Dataset validation:")
+                print(f"      UE positions: {ue_positions.shape} - {ue_positions.dtype}")
+                print(f"      CSI data: {csi_data.shape} - {csi_data.dtype}")
+                print(f"      BS position: {bs_position.shape} - {bs_position.dtype}")
+                
+                # Check for NaN or infinite values
+                ue_nan_count = np.isnan(ue_positions[:]).sum()
+                csi_nan_count = np.isnan(csi_data[:]).sum()
+                bs_nan_count = np.isnan(bs_position[:]).sum()
+                
+                ue_inf_count = np.isinf(ue_positions[:]).sum()
+                csi_inf_count = np.isinf(csi_data[:]).sum()
+                bs_inf_count = np.isinf(bs_position[:]).sum()
+                
+                print(f"   🔍 Data quality check:")
+                print(f"      NaN values - UE: {ue_nan_count}, CSI: {csi_nan_count}, BS: {bs_nan_count}")
+                print(f"      Inf values - UE: {ue_inf_count}, CSI: {csi_inf_count}, BS: {bs_inf_count}")
+                
+                if ue_nan_count > 0 or csi_nan_count > 0 or bs_nan_count > 0:
+                    self.logger.warning(f"⚠️  Found NaN values in data: UE={ue_nan_count}, CSI={csi_nan_count}, BS={bs_nan_count}")
+                    print(f"   ⚠️  Warning: Found NaN values in data")
+                
+                if ue_inf_count > 0 or csi_inf_count > 0 or bs_inf_count > 0:
+                    self.logger.warning(f"⚠️  Found infinite values in data: UE={ue_inf_count}, CSI={csi_inf_count}, BS={bs_inf_count}")
+                    print(f"   ⚠️  Warning: Found infinite values in data")
+                
+                # Check data ranges
+                ue_min, ue_max = ue_positions[:].min(), ue_positions[:].max()
+                csi_min, csi_max = csi_data[:].min(), csi_data[:].max()
+                bs_min, bs_max = bs_position[:].min(), bs_position[:].max()
+                
+                print(f"   📏 Data ranges:")
+                print(f"      UE positions: [{ue_min:.2f}, {ue_max:.2f}]")
+                print(f"      CSI data: [{csi_min:.2e}, {csi_max:.2e}]")
+                print(f"      BS position: [{bs_min:.2f}, {bs_max:.2f}]")
+                
+                # Validate data consistency
+                if csi_data.shape[0] != ue_positions.shape[0]:
+                    raise ValueError(f"Data mismatch: {csi_data.shape[0]} CSI samples vs {ue_positions.shape[0]} UE positions")
+                
+                print(f"   ✅ Data integrity validation passed")
+                self.logger.info("Data integrity validation passed")
+                
+        except Exception as e:
+            self.logger.error(f"Data integrity validation failed: {e}")
+            print(f"   ❌ Data integrity validation failed: {e}")
+            raise
+    
+    def _adjust_training_parameters(self):
+        """Adjust training parameters if data loading issues are detected"""
+        self.logger.info("Adjusting training parameters for stability...")
+        print("⚙️  Adjusting training parameters for stability...")
+        
+        # Reduce batch size if it's too large
+        original_batch_size = self.batch_size
+        if self.batch_size > 4:
+            self.batch_size = max(1, self.batch_size // 2)
+            self.logger.info(f"Reduced batch size from {original_batch_size} to {self.batch_size}")
+            print(f"   📦 Batch size reduced: {original_batch_size} → {self.batch_size}")
+        
+        # Reduce learning rate if it's too high
+        original_lr = self.learning_rate
+        if self.learning_rate > 1e-3:
+            self.learning_rate = self.learning_rate / 2
+            self.logger.info(f"Reduced learning rate from {original_lr:.2e} to {self.learning_rate:.2e}")
+            print(f"   📚 Learning rate reduced: {original_lr:.2e} → {self.learning_rate:.2e}")
+            
+            # Update optimizer learning rate
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = self.learning_rate
+        
+        print(f"   ✅ Training parameters adjusted for stability")
+    
     def _load_data(self):
         """Load training data from HDF5 file"""
-        logger.info(f"Loading training data from {self.data_path}")
+        self.logger.info(f"Loading training data from {self.data_path}")
         print(f"📂 Loading data from: {self.data_path}")
         
         with h5py.File(self.data_path, 'r') as f:
             # Load UE positions from nested group
             ue_positions = f['positions']['ue_positions'][:]
-            logger.info(f"Loaded {len(ue_positions)} UE positions")
+            self.logger.info(f"Loaded {len(ue_positions)} UE positions")
             print(f"   📍 UE positions: {len(ue_positions)} samples")
             
             # Load channel responses (CSI) from nested group
             csi_data = f['channel_data']['channel_responses'][:]
-            logger.info(f"Loaded CSI data with shape: {csi_data.shape}")
+            self.logger.info(f"Loaded CSI data with shape: {csi_data.shape}")
             print(f"   📡 CSI data: {csi_data.shape}")
             
             # Load BS position from nested group
             bs_position = f['positions']['bs_position'][:]
-            logger.info(f"BS position: {bs_position}")
+            self.logger.info(f"BS position: {bs_position}")
             print(f"   🏢 BS position: {bs_position}")
             
             # Load antenna indices if available
             if 'antenna_indices' in f:
                 antenna_indices = f['antenna_indices'][:]
-                logger.info(f"Loaded antenna indices with shape: {antenna_indices.shape}")
+                self.logger.info(f"Loaded antenna indices with shape: {antenna_indices.shape}")
                 print(f"   📡 Antenna indices: {len(antenna_indices)}")
             else:
                 # Create default antenna indices if not available
                 num_bs_antennas = csi_data.shape[3] if len(csi_data.shape) > 3 else 64  # Shape is (100, 408, 4, 64)
                 antenna_indices = np.arange(num_bs_antennas)
-                logger.info(f"Created default antenna indices: {len(antenna_indices)}")
+                self.logger.info(f"Created default antenna indices: {len(antenna_indices)}")
                 print(f"   📡 Created default antenna indices: {len(antenna_indices)}")
             
             # Load simulation parameters if available
             if 'simulation_config' in f and hasattr(f['simulation_config'], 'attrs'):
                 params = dict(f['simulation_config'].attrs)
-                logger.info(f"Simulation parameters: {params}")
+                self.logger.info(f"Simulation parameters: {params}")
                 print(f"   ⚙️  Simulation parameters loaded")
             else:
-                logger.info("No simulation parameters found")
+                self.logger.info("No simulation parameters found")
                 print(f"   ⚙️  No simulation parameters found")
             
             # Check if this is split data
             if 'split_type' in f.attrs:
                 split_info = dict(f.attrs)
-                logger.info(f"Data split info: {split_info}")
+                self.logger.info(f"Data split info: {split_info}")
                 print(f"   📊 Data split: {split_info.get('split_type', 'unknown')} ({split_info.get('num_samples', 'unknown')} samples)")
         
         # Convert to tensors with proper data types
@@ -363,11 +775,11 @@ class PrismTrainer:
         self.antenna_indices = torch.tensor(antenna_indices, dtype=torch.long)
         
         # Validate data shapes
-        logger.info(f"Data validation:")
-        logger.info(f"  UE positions: {self.ue_positions.shape} - {self.ue_positions.dtype}")
-        logger.info(f"  CSI data: {self.csi_data.shape} - {self.csi_data.dtype}")
-        logger.info(f"  BS position: {self.bs_position.shape} - {self.bs_position.dtype}")
-        logger.info(f"  Antenna indices: {self.antenna_indices.shape} - {self.antenna_indices.dtype}")
+        self.logger.info(f"Data validation:")
+        self.logger.info(f"  UE positions: {self.ue_positions.shape} - {self.ue_positions.dtype}")
+        self.logger.info(f"  CSI data: {self.csi_data.shape} - {self.csi_data.dtype}")
+        self.logger.info(f"  BS position: {self.bs_position.shape} - {self.bs_position.dtype}")
+        self.logger.info(f"  Antenna indices: {self.antenna_indices.shape} - {self.antenna_indices.dtype}")
         
         # Check for data consistency
         if self.csi_data.shape[0] != self.ue_positions.shape[0]:
@@ -385,24 +797,33 @@ class PrismTrainer:
         
         # Validate batch size
         if self.batch_size > len(self.dataset):
-            logger.warning(f"Batch size ({self.batch_size}) is larger than dataset size ({len(self.dataset)}). Adjusting batch size.")
+            self.logger.warning(f"Batch size ({self.batch_size}) is larger than dataset size ({len(self.dataset)}). Adjusting batch size.")
             self.batch_size = len(self.dataset)
-            logger.info(f"Adjusted batch size to: {self.batch_size}")
+            self.logger.info(f"Adjusted batch size to: {self.batch_size}")
         
         self.dataloader = DataLoader(
             self.dataset,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=4,
-            pin_memory=True
+            num_workers=2,  # Reduced from 4 to prevent StopIteration errors
+            pin_memory=True,
+            persistent_workers=True,  # Keep workers alive between epochs
+            drop_last=False  # Don't drop incomplete batches
         )
         
-        logger.info(f"Training data loaded: {len(self.dataset)} samples, batch_size={self.batch_size}")
+        self.logger.info(f"Training data loaded: {len(self.dataset)} samples, batch_size={self.batch_size}")
         print(f"✅ Data loaded successfully!")
         print(f"   📊 Dataset size: {len(self.dataset)} samples")
         print(f"   🔄 Batch size: {self.batch_size}")
         print(f"   📦 Number of batches: {len(self.dataloader)}")
         print(f"   💾 Data types: UE (float32), CSI (complex64), BS (float32), Antenna (long)")
+        
+        # Initialize progress monitor AFTER dataloader is created
+        self.progress_monitor = TrainingProgressMonitor(
+            total_epochs=self.config['training']['num_epochs'],
+            total_batches_per_epoch=len(self.dataloader)
+        )
+        print(f"   📊 Progress monitor initialized for {len(self.dataloader)} batches per epoch")
         
     def _train_epoch(self, epoch: int):
         """Train for one epoch using TrainingInterface"""
@@ -410,93 +831,160 @@ class PrismTrainer:
         total_loss = 0.0
         num_batches = 0
         
-        print(f"\n🔄 Training Epoch {epoch}")
-        print(f"{'='*60}")
+        # Start epoch monitoring if progress monitor is available
+        if hasattr(self, 'progress_monitor') and self.progress_monitor is not None:
+            self.progress_monitor.start_epoch(epoch)
         
-        for batch_idx, (ue_pos, bs_pos, antenna_idx, csi_target) in enumerate(self.dataloader):
-            logger.debug(f"Processing batch {batch_idx}:")
-            logger.debug(f"  ue_pos shape: {ue_pos.shape}, dtype: {ue_pos.dtype}")
-            logger.debug(f"  bs_pos shape: {bs_pos.shape}, dtype: {bs_pos.dtype}")
-            logger.debug(f"  antenna_idx shape: {antenna_idx.shape}, dtype: {antenna_idx.dtype}")
-            logger.debug(f"  csi_target shape: {csi_target.shape}, dtype: {csi_target.dtype}")
-            
-            ue_pos = ue_pos.to(self.device)
-            bs_pos = bs_pos.to(self.device)
-            antenna_idx = antenna_idx.to(self.device)
-            csi_target = csi_target.to(self.device)
-            
-            # Forward pass
-            self.optimizer.zero_grad()
-            
-            try:
-                # Use TrainingInterface forward pass
-                outputs = self.model(
-                    ue_positions=ue_pos,
-                    bs_position=bs_pos,
-                    antenna_indices=antenna_idx
-                )
+        # Start progress monitoring
+        epoch_start_time = time.time()
+        
+        try:
+            for batch_idx, (ue_pos, bs_pos, antenna_idx, csi_target) in enumerate(self.dataloader):
+                # Start batch monitoring if progress monitor is available
+                if hasattr(self, 'progress_monitor') and self.progress_monitor is not None:
+                    self.progress_monitor.start_batch(batch_idx)
                 
-                # Extract CSI predictions
-                csi_pred = outputs['csi_predictions']
+                self.logger.debug(f"Processing batch {batch_idx}:")
+                self.logger.debug(f"  ue_pos shape: {ue_pos.shape}, dtype: {ue_pos.dtype}")
+                self.logger.debug(f"  bs_pos shape: {bs_pos.shape}, dtype: {bs_pos.dtype}")
+                self.logger.debug(f"  antenna_idx shape: {antenna_idx.shape}, dtype: {antenna_idx.dtype}")
+                self.logger.debug(f"  csi_target shape: {csi_target.shape}, dtype: {csi_target.shape}")
                 
-                # Compute loss using TrainingInterface's loss computation
+                # Validate batch data
+                if torch.isnan(ue_pos).any() or torch.isnan(bs_pos).any() or torch.isnan(csi_target).any():
+                    self.logger.warning(f"⚠️  Batch {batch_idx} contains NaN values, skipping...")
+                    continue
+                
+                if torch.isinf(ue_pos).any() or torch.isinf(bs_pos).any() or torch.isinf(csi_target).any():
+                    self.logger.warning(f"⚠️  Batch {batch_idx} contains infinite values, skipping...")
+                    continue
+                
+                ue_pos = ue_pos.to(self.device)
+                bs_pos = bs_pos.to(self.device)
+                antenna_idx = antenna_idx.to(self.device)
+                csi_target = csi_target.to(self.device)
+                
+                # Forward pass
+                self.optimizer.zero_grad()
+                
                 try:
-                    loss = self.model.compute_loss(csi_pred, csi_target, self.criterion)
+                    # Use TrainingInterface forward pass
+                    outputs = self.model(
+                        ue_positions=ue_pos,
+                        bs_position=bs_pos,
+                        antenna_indices=antenna_idx
+                    )
                     
-                    # Validate loss is a tensor
-                    if not isinstance(loss, torch.Tensor):
-                        logger.error(f"Loss computation returned non-tensor: {type(loss)} = {loss}")
-                        raise ValueError(f"Loss must be a torch.Tensor, got {type(loss)}")
+                    # Extract CSI predictions
+                    csi_pred = outputs['csi_predictions']
                     
-                    # Ensure loss has requires_grad for backward pass
-                    if not loss.requires_grad:
-                        logger.warning("Loss tensor does not require gradients, this may cause issues")
+                    # Compute loss using TrainingInterface's loss computation
+                    try:
+                        loss = self.model.compute_loss(csi_pred, csi_target, self.criterion)
+                        
+                        # Validate loss is a tensor
+                        if not isinstance(loss, torch.Tensor):
+                            self.logger.error(f"Loss computation returned non-tensor: {type(loss)} = {loss}")
+                            raise ValueError(f"Loss must be a torch.Tensor, got {type(loss)}")
+                        
+                        # Ensure loss has requires_grad for backward pass
+                        if not loss.requires_grad:
+                            self.logger.warning("Loss tensor does not require gradients, this may cause issues")
+                        
+                        # Check for NaN or infinite values
+                        if torch.isnan(loss) or torch.isinf(loss):
+                            self.logger.error(f"Invalid loss value: {loss}")
+                            raise ValueError(f"Loss contains NaN or infinite values: {loss}")
+                        
+                    except Exception as e:
+                        self.logger.error(f"Loss computation failed: {e}")
+                        self.logger.error(f"Shapes - csi_pred: {csi_pred.shape}, csi_target: {csi_target.shape}")
+                        raise
                     
-                    # Check for NaN or infinite values
-                    if torch.isnan(loss) or torch.isinf(loss):
-                        logger.error(f"Invalid loss value: {loss}")
-                        raise ValueError(f"Loss contains NaN or infinite values: {loss}")
+                    # Backward pass
+                    loss.backward()
                     
-                except Exception as e:
-                    logger.error(f"Loss computation failed: {e}")
-                    logger.error(f"Shapes - csi_pred: {csi_pred.shape}, csi_target: {csi_target.shape}")
-                    raise
-                
-                # Backward pass
-                loss.backward()
-                
-                # Gradient clipping
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                
-                self.optimizer.step()
-                
-                total_loss += loss.item()
-                num_batches += 1
-                
-                # Update training state in TrainingInterface
-                self.model.update_training_state(epoch, batch_idx, loss.item())
-                
-                # Enhanced progress logging
-                if batch_idx % 5 == 0 or batch_idx == len(self.dataloader) - 1:
-                    progress = (batch_idx + 1) / len(self.dataloader) * 100
-                    avg_loss_so_far = total_loss / num_batches
-                    print(f"  📊 Batch {batch_idx+1:3d}/{len(self.dataloader):3d} ({progress:5.1f}%) | "
-                          f"Loss: {loss.item():.6f} | Avg: {avg_loss_so_far:.6f}")
+                    # Gradient clipping
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    
+                    self.optimizer.step()
+                    
+                    total_loss += loss.item()
+                    num_batches += 1
+                    
+                    # Update training state in TrainingInterface
+                    self.model.update_training_state(epoch, batch_idx, loss.item())
+                    
+                    # Update progress monitor with real-time information if available
+                    if hasattr(self, 'progress_monitor') and self.progress_monitor is not None:
+                        self.progress_monitor.update_batch_progress(batch_idx, loss.item(), len(self.dataloader))
+                    else:
+                        # Fallback progress logging
+                        if batch_idx % 5 == 0 or batch_idx == len(self.dataloader) - 1:
+                            progress = (batch_idx + 1) / len(self.dataloader) * 100
+                            avg_loss_so_far = total_loss / num_batches
+                            print(f"  📊 Batch {batch_idx+1:3d}/{len(self.dataloader):3d} ({progress:5.1f}%) | "
+                                  f"Loss: {loss.item():.6f} | Avg: {avg_loss_so_far:.6f}")
+                    
+                    # Check for potential deadlocks or slow progress
+                    if not self._check_training_progress(epoch_start_time, batch_idx, len(self.dataloader)):
+                        print(f"  ⚠️  Training progress check failed - consider restarting if stuck")
                     
                     # Log to tensorboard
                     self.writer.add_scalar(f'Loss/Batch_{epoch}', loss.item(), batch_idx)
                     
-            except Exception as e:
-                logger.error(f"❌ Error in batch {batch_idx}: {e}")
-                logger.error(f"Full traceback:")
-                import traceback
-                logger.error(traceback.format_exc())
-                print(f"  ❌ Batch {batch_idx+1} failed: {e}")
-                print(f"  🔍 Check logs for full traceback")
-                continue
+                except Exception as e:
+                    self.logger.error(f"❌ Error in batch {batch_idx}: {e}")
+                    print(f"  ❌ Batch {batch_idx} failed: {e}")
+                    
+                    # Try to continue with next batch instead of crashing
+                    if batch_idx < len(self.dataloader) - 1:
+                        print(f"  🔄 Continuing with next batch...")
+                        continue
+                    else:
+                        print(f"  🛑 Last batch failed, ending epoch early")
+                        break
+                        
+        except StopIteration as e:
+            self.logger.error(f"❌ StopIteration error in epoch {epoch}: {e}")
+            print(f"  ❌ StopIteration error: {e}")
+            print(f"  🔍 This usually indicates a data loading issue")
+            print(f"  💡 Try reducing batch_size or num_workers")
+            
+            # Try to recover by reinitializing the dataloader
+            try:
+                print(f"  🔄 Attempting to recover by reinitializing dataloader...")
+                self.dataloader = DataLoader(
+                    self.dataset,
+                    batch_size=self.batch_size,
+                    shuffle=True,
+                    num_workers=1,  # Use single worker for recovery
+                    pin_memory=True,
+                    persistent_workers=False,  # Disable persistent workers
+                    drop_last=False
+                )
+                print(f"  ✅ Dataloader reinitialized successfully")
+            except Exception as recovery_error:
+                self.logger.error(f"Failed to recover dataloader: {recovery_error}")
+                print(f"  ❌ Failed to recover: {recovery_error}")
+                raise
+                
+        except Exception as e:
+            self.logger.error(f"❌ Unexpected error in epoch {epoch}: {e}")
+            print(f"  ❌ Unexpected error: {e}")
+            raise
         
-        avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
-        print(f"✅ Epoch {epoch} Training Complete | Avg Loss: {avg_loss:.6f}")
+        if num_batches == 0:
+            self.logger.error(f"No successful batches in epoch {epoch}")
+            raise RuntimeError(f"Epoch {epoch} failed - no successful batches")
+        
+        avg_loss = total_loss / num_batches
+        self.logger.info(f"Epoch {epoch} completed: {num_batches} batches, avg loss: {avg_loss:.6f}")
+        
+        # End epoch monitoring if progress monitor is available
+        if hasattr(self, 'progress_monitor') and self.progress_monitor is not None:
+            self.progress_monitor.end_epoch(avg_loss)
+        
         return avg_loss
     
     def _validate(self, epoch: int):
@@ -533,27 +1021,27 @@ class PrismTrainer:
                         
                         # Validate loss is a tensor
                         if not isinstance(loss, torch.Tensor):
-                            logger.error(f"Validation loss computation returned non-tensor: {type(loss)} = {loss}")
+                            self.logger.error(f"Validation loss computation returned non-tensor: {type(loss)} = {loss}")
                             raise ValueError(f"Validation loss must be a torch.Tensor, got {type(loss)}")
                         
                         # Check for NaN or infinite values
                         if torch.isnan(loss) or torch.isinf(loss):
-                            logger.error(f"Invalid validation loss value: {loss}")
+                            self.logger.error(f"Invalid validation loss value: {loss}")
                             raise ValueError(f"Validation loss contains NaN or infinite values: {loss}")
                         
                     except Exception as e:
-                        logger.error(f"Validation loss computation failed: {e}")
-                        logger.error(f"Shapes - csi_pred: {csi_pred.shape}, csi_target: {csi_target.shape}")
+                        self.logger.error(f"Validation loss computation failed: {e}")
+                        self.logger.error(f"Shapes - csi_pred: {csi_pred.shape}, csi_target: {csi_target.shape}")
                         raise
                     
                     total_loss += loss.item()
                     num_batches += 1
                     
                 except Exception as e:
-                    logger.error(f"❌ Validation error: {e}")
-                    logger.error(f"Full validation traceback:")
+                    self.logger.error(f"❌ Validation error: {e}")
+                    self.logger.error(f"Full validation traceback:")
                     import traceback
-                    logger.error(traceback.format_exc())
+                    self.logger.error(traceback.format_exc())
                     print(f"  ❌ Validation batch failed: {e}")
                     print(f"  🔍 Check logs for full traceback")
                     continue
@@ -585,7 +1073,7 @@ class PrismTrainer:
         
         checkpoint_path = self.output_dir / f'training_state_epoch_{epoch}.pt'
         torch.save(training_state, checkpoint_path)
-        logger.info(f"Training state saved: {checkpoint_path}")
+        self.logger.info(f"Training state saved: {checkpoint_path}")
         
         # Save best model
         if not hasattr(self, 'best_val_loss') or val_loss < self.best_val_loss:
@@ -593,14 +1081,14 @@ class PrismTrainer:
             best_model_path = self.output_dir / 'best_model.pt'
             self.model.save_checkpoint('best_model.pt')
             torch.save(training_state, str(best_model_path).replace('.pt', '_state.pt'))
-            logger.info(f"Best model saved: {best_model_path}")
+            self.logger.info(f"Best model saved: {best_model_path}")
             print(f"🏆 New best model saved! (Val Loss: {val_loss:.6f})")
         
         # Save latest checkpoint for resuming
         latest_checkpoint_path = self.output_dir / 'latest_checkpoint.pt'
         self.model.save_checkpoint('latest_checkpoint.pt')
         torch.save(training_state, str(latest_checkpoint_path).replace('.pt', '_state.pt'))
-        logger.info(f"Latest checkpoint saved: {latest_checkpoint_path}")
+        self.logger.info(f"Latest checkpoint saved: {latest_checkpoint_path}")
         
         # Save emergency checkpoint every epoch for better recovery
         emergency_checkpoint_path = self.output_dir / 'emergency_checkpoint.pt'
@@ -631,7 +1119,7 @@ class PrismTrainer:
             torch.save(emergency_state, emergency_path)
             
         except Exception as e:
-            logger.warning(f"Emergency checkpoint failed: {e}")
+            self.logger.warning(f"Emergency checkpoint failed: {e}")
     
     def _auto_detect_checkpoint(self):
         """Automatically detect the best checkpoint to resume from"""
@@ -672,7 +1160,7 @@ class PrismTrainer:
             checkpoints.sort(key=lambda x: int(x.stem.split('_')[-1]))
             for checkpoint in checkpoints[:-5]:
                 checkpoint.unlink()
-                logger.info(f"Removed old checkpoint: {checkpoint}")
+                self.logger.info(f"Removed old checkpoint: {checkpoint}")
         
         # Clean up training state files
         training_states = list(self.output_dir.glob('training_state_epoch_*.pt'))
@@ -680,20 +1168,20 @@ class PrismTrainer:
             training_states.sort(key=lambda x: int(x.stem.split('_')[-1]))
             for state in training_states[:-5]:
                 state.unlink()
-                logger.info(f"Removed old training state: {state}")
+                self.logger.info(f"Removed old training state: {state}")
     
     def _resume_from_checkpoint(self):
         """Resume training from a checkpoint using TrainingInterface"""
-        logger.info(f"Resuming training from checkpoint: {self.resume_from}")
+        self.logger.info(f"Resuming training from checkpoint: {self.resume_from}")
         
         if not os.path.exists(self.resume_from):
-            logger.error(f"Checkpoint file not found: {self.resume_from}")
+            self.logger.error(f"Checkpoint file not found: {self.resume_from}")
             raise FileNotFoundError(f"Checkpoint file not found: {self.resume_from}")
         
         try:
             # Load TrainingInterface checkpoint
             self.model.load_checkpoint(self.resume_from)
-            logger.info("TrainingInterface checkpoint loaded successfully")
+            self.logger.info("TrainingInterface checkpoint loaded successfully")
             
             # Load training state if available
             training_state_path = self.resume_from.replace('.pt', '_state.pt')
@@ -702,24 +1190,24 @@ class PrismTrainer:
                 
                 # Load optimizer state
                 self.optimizer.load_state_dict(training_state['optimizer_state_dict'])
-                logger.info("Optimizer state loaded successfully")
+                self.logger.info("Optimizer state loaded successfully")
                 
                 # Load scheduler state
                 self.scheduler.load_state_dict(training_state['scheduler_state_dict'])
-                logger.info("Scheduler state loaded successfully")
+                self.logger.info("Scheduler state loaded successfully")
                 
                 # Load training state
                 self.start_epoch = training_state['epoch'] + 1
                 self.best_val_loss = training_state.get('val_loss', float('inf'))
                 
-                logger.info(f"Resuming from epoch {self.start_epoch}")
-                logger.info(f"Best validation loss so far: {self.best_val_loss:.6f}")
+                self.logger.info(f"Resuming from epoch {self.start_epoch}")
+                self.logger.info(f"Best validation loss so far: {self.best_val_loss:.6f}")
                 
                 # Load training history if available
                 if 'train_losses' in training_state:
                     self.train_losses = training_state['train_losses']
                     self.val_losses = training_state['val_losses']
-                    logger.info(f"Loaded training history: {len(self.train_losses)} epochs")
+                    self.logger.info(f"Loaded training history: {len(self.train_losses)} epochs")
                 else:
                     self.train_losses = []
                     self.val_losses = []
@@ -729,10 +1217,10 @@ class PrismTrainer:
                 self.best_val_loss = self.model.best_loss
                 self.train_losses = []
                 self.val_losses = []
-                logger.info(f"Resuming from TrainingInterface state: epoch {self.start_epoch}")
+                self.logger.info(f"Resuming from TrainingInterface state: epoch {self.start_epoch}")
             
         except Exception as e:
-            logger.error(f"Failed to load checkpoint: {e}")
+            self.logger.error(f"Failed to load checkpoint: {e}")
             raise
     
     def _log_metrics(self, epoch: int, train_loss: float, val_loss: float, lr: float):
@@ -756,13 +1244,15 @@ class PrismTrainer:
     
     def train(self):
         """Main training loop using TrainingInterface"""
-        logger.info("Starting training with TrainingInterface...")
+        self.logger.info("Starting training with TrainingInterface...")
         print("\n🚀 Starting Prism Network Training with TrainingInterface")
         print("=" * 80)
         
         # Load data
         print("📂 Loading training data...")
+        self._validate_data_integrity()  # Validate data integrity first
         self._load_data()
+        self._adjust_training_parameters()  # Adjust parameters for stability
         print(f"✅ Data loaded: {len(self.dataset)} samples")
         
         # Initialize training state
@@ -770,13 +1260,13 @@ class PrismTrainer:
             start_epoch = self.start_epoch
             train_losses = self.train_losses
             val_losses = self.val_losses
-            logger.info(f"Resuming training from epoch {start_epoch}")
+            self.logger.info(f"Resuming training from epoch {start_epoch}")
             print(f"🔄 Resuming training from epoch {start_epoch}")
         else:
             start_epoch = 1
             train_losses = []
             val_losses = []
-            logger.info("Starting training from epoch 1")
+            self.logger.info("Starting training from epoch 1")
             print("🆕 Starting training from epoch 1")
         
         print(f"\n📈 Training Configuration:")
@@ -785,6 +1275,16 @@ class PrismTrainer:
         print(f"   • Learning rate: {self.learning_rate:.2e}")
         print(f"   • Device: {self.device}")
         print(f"   • Model parameters: {sum(p.numel() for p in self.model.parameters()):,}")
+        
+        # Display GPU configuration
+        if torch.cuda.is_available():
+            print(f"   • Multi-GPU: {'Enabled' if self.use_multi_gpu else 'Disabled'}")
+            print(f"   • GPU Count: {self.num_gpus}")
+            for i in range(self.num_gpus):
+                gpu_name = torch.cuda.get_device_name(i)
+                gpu_memory = torch.cuda.get_device_properties(i).total_memory / 1024**3
+                print(f"   • GPU {i}: {gpu_name} ({gpu_memory:.1f}GB)")
+        
         print("=" * 80)
         
         start_time = time.time()
@@ -824,7 +1324,7 @@ class PrismTrainer:
             print(f"   • ETA: {eta/3600:.1f}h")
             
             # Log metrics
-            logger.info(f"Epoch {epoch}: Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}, LR: {current_lr:.2e}")
+            self.logger.info(f"Epoch {epoch}: Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}, LR: {current_lr:.2e}")
             self._log_metrics(epoch, train_loss, val_loss, current_lr)
             
             # Save checkpoint
@@ -840,7 +1340,7 @@ class PrismTrainer:
             # Early stopping check
             if current_lr < 1e-7:
                 print(f"⚠️  Learning rate too low ({current_lr:.2e}), stopping training")
-                logger.info("Learning rate too low, stopping training")
+                self.logger.info("Learning rate too low, stopping training")
                 break
             
             print(f"{'='*80}")
@@ -873,8 +1373,55 @@ class PrismTrainer:
         # Plot training curves
         self._plot_training_curves(train_losses, val_losses)
         
-        logger.info("Training completed!")
+        # Display final training summary
+        self._display_training_summary()
+        
+        self.logger.info("Training completed!")
         self.writer.close()
+    
+    def _display_training_summary(self):
+        """Display comprehensive training summary with performance metrics"""
+        print("\n" + "="*80)
+        print("🎯 TRAINING COMPLETED - FINAL SUMMARY")
+        print("="*80)
+        
+        # Get performance summary from progress monitor
+        if hasattr(self, 'progress_monitor') and self.progress_monitor is not None:
+            summary = self.progress_monitor.get_performance_summary()
+            if isinstance(summary, dict):
+                print(f"⏱️  Total Training Time: {summary['total_time']/3600:.2f} hours ({summary['total_time']:.1f}s)")
+                print(f"📊 Epochs Completed: {summary['epochs_completed']}")
+                print(f"🔄 Total Batches: {summary['total_batches']}")
+                print(f"⚡ Average Epoch Time: {summary['avg_epoch_time']:.1f}s")
+                print(f"🚀 Average Batch Time: {summary['avg_batch_time']:.2f}s")
+                print(f"📈 Final Average Loss: {summary['avg_loss']:.6f}")
+            else:
+                print(f"📊 Performance Summary: {summary}")
+        else:
+            print("📊 Performance Summary: Progress monitor not available")
+        
+        # Show final model performance
+        if hasattr(self, 'best_val_loss') and self.best_val_loss != float('inf'):
+            print(f"🏆 Best Validation Loss: {self.best_val_loss:.6f}")
+        
+        # Show GPU utilization summary
+        if torch.cuda.is_available():
+            print(f"\n🔍 GPU Utilization Summary:")
+            for i in range(torch.cuda.device_count()):
+                gpu_name = torch.cuda.get_device_name(i)
+                total_memory = torch.cuda.get_device_properties(i).total_memory / 1024**3
+                print(f"   GPU {i}: {gpu_name} ({total_memory:.1f}GB)")
+        
+        # Show output files
+        print(f"\n📁 Output Files:")
+        print(f"   📊 TensorBoard logs: {self.output_dir}/tensorboard/")
+        print(f"   💾 Checkpoints: {self.output_dir}/checkpoints/")
+        print(f"   📈 Training plots: {self.output_dir}/")
+        print(f"   📝 Training log: training.log")
+        
+        print("="*80)
+        print("🎉 Training completed successfully!")
+        print("="*80)
     
     def _display_ray_tracer_info(self):
         """Display information about the ray tracer configuration and performance."""
@@ -939,7 +1486,7 @@ class PrismTrainer:
         plt.savefig(plot_path, dpi=300, bbox_inches='tight')
         plt.close()
         
-        logger.info(f"Training curves saved: {plot_path}")
+        self.logger.info(f"Training curves saved: {plot_path}")
 
     def _display_checkpoint_info(self):
         """Display information about available checkpoint files."""
@@ -947,9 +1494,9 @@ class PrismTrainer:
         print("=" * 20)
         
         # Display TrainingInterface checkpoints
-        checkpoint_dir = Path(self.model.checkpoint_dir)
+        checkpoint_dir = Path(self.original_model.checkpoint_dir)
         if checkpoint_dir.exists():
-            print(f"TrainingInterface Checkpoints (in {self.model.checkpoint_dir}):")
+            print(f"TrainingInterface Checkpoints (in {self.original_model.checkpoint_dir}):")
             checkpoints = list(checkpoint_dir.glob('checkpoint_epoch_*.pt'))
             if checkpoints:
                 print(f"  - Latest: {checkpoints[-1]}")
@@ -987,6 +1534,15 @@ class PrismTrainer:
             print("  - Not found.")
 
         print("=" * 20)
+
+    def _display_logging_config(self):
+        """Display current logging configuration."""
+        print("\n📝 Current Logging Configuration:")
+        print("=" * 30)
+        print(f"  - Root Logger Level: {logging.getLevelName(logging.getLogger().level)}")
+        print(f"  - File Handler Level: {logging.getLevelName(logging.getLogger('training.log').level)}")
+        print(f"  - Stream Handler Level: {logging.getLevelName(logging.getLogger().handlers[1].level)}")
+        print("=" * 30)
 
 def main():
     """Main function"""

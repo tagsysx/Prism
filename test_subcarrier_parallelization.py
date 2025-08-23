@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
-from prism.ray_tracer import DiscreteRayTracer
+from prism.ray_tracer_cpu import CPURayTracer
 from prism.networks.prism_network import PrismNetwork
 import yaml
 
@@ -67,7 +67,7 @@ def test_subcarrier_only_parallelization(prism_network, base_station_pos, ue_pos
         print(f"\n🔧 Testing: {config['name']}")
         
         # Create ray tracer
-        ray_tracer = DiscreteRayTracer(
+        ray_tracer = CPURayTracer(
             azimuth_divisions=18,
             elevation_divisions=9,
             device='cpu',
@@ -138,7 +138,7 @@ def test_direction_subcarrier_parallelization(prism_network, base_station_pos, u
         print(f"\n🔧 Testing: {config['name']}")
         
         # Create ray tracer
-        ray_tracer = DiscreteRayTracer(
+        ray_tracer = CPURayTracer(
             azimuth_divisions=18,
             elevation_divisions=9,
             device='cpu',
@@ -212,7 +212,7 @@ def test_spatial_subcarrier_parallelization(prism_network, base_station_pos, ue_
         print(f"\n🔧 Testing: {config['name']}")
         
         # Create ray tracer
-        ray_tracer = DiscreteRayTracer(
+        ray_tracer = CPURayTracer(
             azimuth_divisions=18,
             elevation_divisions=9,
             device='cpu',
@@ -295,7 +295,7 @@ def test_enhanced_parallelization(prism_network, base_station_pos, ue_positions,
         print(f"\n🔧 Testing: {config['name']}")
         
         # Create ray tracer
-        ray_tracer = DiscreteRayTracer(
+        ray_tracer = CPURayTracer(
             azimuth_divisions=18,
             elevation_divisions=9,
             device='cpu',

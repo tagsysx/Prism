@@ -3,7 +3,7 @@
 Test suite for the CUDA-accelerated discrete electromagnetic ray tracing system.
 
 This test file verifies the functionality of the CUDA ray tracer after updating it
-to match the new DiscreteRayTracer interface, with support for MLP-based direction
+to match the new CPURayTracer interface, with support for MLP-based direction
 sampling and efficient RF signal strength computation.
 
 The CUDA version should provide the same interface as the CPU version but with

@@ -10,7 +10,8 @@ that implements the two-stage approach:
 
 import torch
 import numpy as np
-from src.prism.ray_tracer import DiscreteRayTracer, Ray, BaseStation, UserEquipment
+from src.prism.ray_tracer_cpu import CPURayTracer
+from src.prism.ray_tracer_base import Ray
 from src.prism.networks import PrismNetwork, PrismNetworkConfig
 
 def main():
@@ -32,13 +33,13 @@ def main():
     print("✓ PrismNetwork created")
     
     # Create ray tracer with importance sampling
-    ray_tracer = DiscreteRayTracer(
+    ray_tracer = CPURayTracer(
         azimuth_divisions=8,
         elevation_divisions=4,
         prism_network=prism_network,
         device=device
     )
-    print("✓ DiscreteRayTracer created with importance sampling")
+    print("✓ CPURayTracer created with importance sampling")
     
     # Create test scenario
     base_station = BaseStation(torch.tensor([0.0, 0.0, 0.0]))

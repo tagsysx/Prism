@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
-from prism.ray_tracer import DiscreteRayTracer
+from prism.ray_tracer_cpu import CPURayTracer
 from prism.networks.prism_network import PrismNetwork
 import yaml
 
@@ -83,7 +83,7 @@ def test_direction_parallelization(prism_network, base_station_pos, ue_positions
         print(f"\n🔧 Testing: {config['name']}")
         
         # Create ray tracer with specific configuration
-        ray_tracer = DiscreteRayTracer(
+        ray_tracer = CPURayTracer(
             azimuth_divisions=18,
             elevation_divisions=9,
             device='cpu',
@@ -152,7 +152,7 @@ def test_antenna_parallelization(prism_network, base_station_pos, ue_positions, 
         print(f"\n🔧 Testing: {config['name']}")
         
         # Create ray tracer
-        ray_tracer = DiscreteRayTracer(
+        ray_tracer = CPURayTracer(
             azimuth_divisions=18,
             elevation_divisions=9,
             device='cpu',
@@ -223,7 +223,7 @@ def test_spatial_parallelization(prism_network, base_station_pos, ue_positions, 
         print(f"\n🔧 Testing: {config['name']}")
         
         # Create ray tracer
-        ray_tracer = DiscreteRayTracer(
+        ray_tracer = CPURayTracer(
             azimuth_divisions=18,
             elevation_divisions=9,
             device='cpu',
@@ -279,7 +279,7 @@ def test_full_parallelization(prism_network, base_station_pos, ue_positions, sel
     print(f"\n🧪 Testing Full Parallelization (All Levels Combined)...")
     
     # Create ray tracer with full parallelization support
-    ray_tracer = DiscreteRayTracer(
+    ray_tracer = CPURayTracer(
         azimuth_divisions=18,
         elevation_divisions=9,
         device='cpu',

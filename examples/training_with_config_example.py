@@ -17,7 +17,7 @@ from unittest.mock import Mock
 
 from prism.config_loader import load_config
 from prism.training_interface import PrismTrainingInterface
-from prism.ray_tracer import DiscreteRayTracer
+from prism.ray_tracer_cpu import CPURayTracer
 from prism.networks.prism_network import PrismNetwork
 
 # Set up logging
@@ -83,7 +83,7 @@ def main():
     rt_kwargs['device'] = device  # Ensure device is set
     print(f"Ray tracer parameters: {rt_kwargs}")
     
-    ray_tracer = DiscreteRayTracer(**rt_kwargs)
+    ray_tracer = CPURayTracer(**rt_kwargs)
     print("✓ Ray tracer created\n")
     
     # 5. Create mock PrismNetwork

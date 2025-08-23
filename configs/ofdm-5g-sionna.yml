@@ -147,8 +147,8 @@ performance:
   cuda_deterministic: false            # Disable deterministic mode for better performance
   
   # Multi-GPU CUDA settings
-  cuda_multi_gpu: true                 # Enable multi-GPU CUDA operations
-  cuda_gpu_ids: [0, 1, 2]             # Specific GPU IDs to use
+  cuda_multi_gpu: false                # Disable multi-GPU CUDA operations
+  cuda_gpu_ids: [0]                    # Use only GPU 0
   cuda_memory_pool: true               # Enable CUDA memory pool for better memory management
   
   # Memory management
@@ -160,8 +160,8 @@ performance:
   # Parallel processing
   enable_parallel_processing: true     # Enable parallel processing for ray tracing
   num_workers: 24                      # Number of parallel workers (optimized for 32-core system)
-  use_multiprocessing: false           # Use threading instead of multiprocessing for better compatibility
-  enable_distributed: false            # Enable distributed processing
+
+  enable_distributed: false            # Disable distributed processing (single GPU training)
   # 代码实现：支持多进程和分布式配置，24个worker可支持天线级并行化
 
 # Training Interface Configuration
@@ -169,8 +169,13 @@ training_interface:
   # Enable integrated training interface
   enabled: true
   
+  # Ray tracing mode selection
+  ray_tracing_mode: 'cuda'             # Ray tracing mode: 'cuda', 'cpu', or 'hybrid'
+  # - 'cuda': Pure CUDA acceleration (fastest, no CPU fallback)
+  # - 'cpu': Pure CPU with multiprocessing (stable, reliable)
+  # - 'hybrid': Neural networks on CUDA, ray tracing on CPU (balanced)
+  
   # Ray tracing integration
-  use_ray_tracer: true                 # Use integrated ray_tracer for signal computation
   num_sampling_points: 64              # Number of sampling points per ray
   
   # Scene configuration
@@ -241,13 +246,13 @@ ray_tracer_integration:
   batch_processing: true               # Enable batch processing for efficiency
   cpu_offload: true                    # Offload ray_tracer computation to CPU
   parallel_antenna_processing: true    # Process antennas in parallel (enabled for performance)
-  num_workers: 24                      # Number of workers for parallel processing (optimized for 32-core system)
+  num_workers: 2                      # Number of workers for parallel processing (optimized for 32-core system)
   
   # Multi-GPU Configuration
-  enable_distributed: true             # Enable distributed training across multiple GPUs
-  num_gpus: 3                          # Number of available GPUs (2x RTX 4090 + 1x RTX 3080 Ti)
+  enable_distributed: false            # Disable distributed training across multiple GPUs
+  num_gpus: 1                          # Use only 1 GPU
   gpu_memory_fraction: 0.8             # GPU memory usage fraction per GPU
-  data_parallel: true                  # Use DataParallel for multi-GPU training
+  data_parallel: false                 # Disable DataParallel for multi-GPU training
 
 # Training Configuration
 training:

@@ -20,7 +20,7 @@ def test_multi_antenna_scenario():
     
     try:
         from prism.networks.prism_network import PrismNetwork
-        from prism.ray_tracer import DiscreteRayTracer  
+        from prism.ray_tracer_cpu import CPURayTracer  
         from prism.training_interface import PrismTrainingInterface
         
         print("✓ Successfully imported all components")
@@ -43,14 +43,14 @@ def test_multi_antenna_scenario():
         )
         print("✓ Created PrismNetwork with 64 antennas")
         
-        ray_tracer = DiscreteRayTracer(
+        ray_tracer = CPURayTracer(
             azimuth_divisions=36,  # Same as real training
             elevation_divisions=18, # Same as real training
             max_ray_length=200.0,
             scene_size=200.0,
             device='cpu'
         )
-        print("✓ Created DiscreteRayTracer")
+        print("✓ Created CPURayTracer")
         
         training_interface = PrismTrainingInterface(
             prism_network=prism_network,

@@ -187,15 +187,28 @@ To manage computational complexity, the system implements intelligent subcarrier
 
 ### 3.3 RF Signal Computation
 
-The ray tracer computes RF signal strength at each UE location from each direction:
+The ray tracer computes RF signal strength using the discrete radiance field model as specified in SPECIFICATION.md. For each ray direction, the signal is computed using the precise formula:
 
 ```math
-S_{\text{ray}}(\phi_i, \theta_j, P_{\text{UE}}, f_k, C)
+S(P_{\text{RX}}, \omega) \approx \sum_{k=1}^{K} \exp\!\left(-\sum_{j=1}^{k-1} \rho(P_{\text{v}}(t_j)) \Delta t_j \right) \big(1 - e^{-\rho(P_{\text{v}}(t_k)) \Delta t_k}\big) S(P_{\text{v}}(t_k), -\omega)
 ```
 
 Where:
-- $S_{\text{ray}}(\phi_i, \theta_j, P_{\text{UE}}, f_k, C)$: Complex RF signal strength received at UE position $P_{\text{UE}}$ from direction $(\phi_i, \theta_j)$ at frequency $f_k$ with base station antenna embedding $C$
-- $C$: Base station's antenna embedding parameter that characterizes the antenna's radiation pattern and properties
+- $P_{\text{RX}}$: Receiver (UE) position
+- $\omega$: Ray direction from receiver toward transmitter
+- $K$: Number of voxels along the ray
+- $\rho(P_{\text{v}}(t_k))$: Complex attenuation coefficient at voxel $k$ (from AttenuationDecoder)
+- $S(P_{\text{v}}(t_k), -\omega)$: Radiance at voxel $k$ in direction $-\omega$ (from RadianceNetwork)
+- $\Delta t_k = t_k - t_{k-1}$: Path length through voxel $k$
+
+#### 3.3.1 Neural Network Integration
+
+The ray tracing system integrates with four neural networks:
+
+1. **AttenuationNetwork**: $f_\theta(\text{IPE}(P_v)) \to \mathcal{F}(P_v)$ (128D features)
+2. **AttenuationDecoder**: $f_\delta(\mathcal{F}(P_v)) \to \rho(P_v)$ (complex attenuation coefficients)
+3. **RadianceNetwork**: $f_\psi(\mathcal{F}(P_v), \text{IPE}(P_{\text{UE}}), \text{IPE}(\omega), C) \to S(P_v, \omega)$ (complex radiance values)
+4. **AntennaNetwork**: $f_\alpha(C) \to M_{ij}$ (directional importance matrix for top-K sampling)
 
 ### 3.4 Virtual Link Computation
 
@@ -218,16 +231,19 @@ Where:
 ### 4.1 Ray Tracing Algorithm
 
 ```python
-def trace_ray(base_station_pos, direction, ue_positions, selected_subcarriers, antenna_embedding):
+def trace_ray(base_station_pos, direction, ue_positions, selected_subcarriers, 
+              antenna_embedding, prism_network, num_samples=64):
     """
-    Trace RF signal along a single ray direction
+    Trace RF signal along a single ray direction using discrete radiance field model
     
     Args:
         base_station_pos: Base station position P_BS
-        direction: Direction vector (phi, theta)
-        ue_positions: List of UE positions
-        selected_subcarriers: Randomly selected subcarrier indices
+        direction: Unit direction vector ω
+        ue_positions: List of UE positions (receivers)
+        selected_subcarriers: Selected subcarrier indices
         antenna_embedding: Base station's antenna embedding parameter C
+        prism_network: PrismNetwork containing neural networks
+        num_samples: Number of voxels to sample along ray
     
     Returns:
         Dictionary mapping (ue_pos, subcarrier) to received RF signal strength
@@ -235,14 +251,89 @@ def trace_ray(base_station_pos, direction, ue_positions, selected_subcarriers, a
     results = {}
     
     for ue_pos in ue_positions:
-        for subcarrier_idx in selected_subcarriers:
-            # Apply importance-based sampling along ray with antenna embedding
-            signal_strength = importance_based_ray_tracing(
-                base_station_pos, direction, ue_pos, subcarrier_idx, antenna_embedding
+        # Sample voxel positions along ray from UE toward BS
+        voxel_positions, delta_t = sample_ray_voxels(ue_pos, direction, num_samples)
+        
+        # Get neural network outputs for all voxels
+        attenuation_coeffs = []
+        radiance_values = []
+        
+        for k, voxel_pos in enumerate(voxel_positions):
+            # AttenuationNetwork: position -> 128D features
+            features = prism_network.attenuation_network(IPE_encode(voxel_pos))
+            
+            # AttenuationDecoder: features -> complex attenuation coefficients
+            rho_k = prism_network.attenuation_decoder(features)
+            attenuation_coeffs.append(rho_k)
+            
+            # RadianceNetwork: features + UE_pos + direction + antenna -> radiance
+            S_k = prism_network.radiance_network(
+                features, 
+                IPE_encode(ue_pos), 
+                IPE_encode(-direction),  # Opposite direction
+                antenna_embedding
             )
-            results[(ue_pos, subcarrier_idx)] = signal_strength
+            radiance_values.append(S_k)
+        
+        # Compute signal for each subcarrier using discrete radiance field formula
+        for subcarrier_idx in selected_subcarriers:
+            signal_strength = compute_discrete_radiance_signal(
+                attenuation_coeffs, radiance_values, delta_t, subcarrier_idx
+            )
+            results[(tuple(ue_pos), subcarrier_idx)] = signal_strength
     
     return results
+
+def compute_discrete_radiance_signal(attenuation_coeffs, radiance_values, delta_t, subcarrier_idx):
+    """
+    Compute signal using discrete radiance field formula:
+    S(P_RX, ω) ≈ Σ[k=1 to K] exp(-Σ[j=1 to k-1] ρ(P_v(t_j))Δt_j) × (1 - e^(-ρ(P_v(t_k))Δt_k)) × S(P_v(t_k), -ω)
+    """
+    total_signal = 0.0
+    K = len(attenuation_coeffs)
+    
+    for k in range(K):
+        # Term 1: Cumulative attenuation from receiver to before voxel k
+        cumulative_attenuation = 0.0
+        for j in range(k):
+            cumulative_attenuation += attenuation_coeffs[j][subcarrier_idx] * delta_t[j]
+        
+        attenuation_factor = torch.exp(-cumulative_attenuation)
+        
+        # Term 2: Local contribution factor (1 - e^(-ρ_k × Δt_k))
+        rho_k = attenuation_coeffs[k][subcarrier_idx]
+        local_contribution = 1.0 - torch.exp(-rho_k * delta_t[k])
+        
+        # Term 3: Radiance at voxel k
+        radiance_k = radiance_values[k][subcarrier_idx]
+        
+        # Combine all terms
+        voxel_contribution = attenuation_factor * local_contribution * radiance_k
+        total_signal += voxel_contribution
+    
+    return total_signal
+
+def sample_ray_voxels(ue_pos, direction, num_samples, max_ray_length=100.0):
+    """
+    Sample voxel positions along ray from UE toward BS direction
+    
+    Returns:
+        voxel_positions: List of 3D positions
+        delta_t: List of path lengths through each voxel
+    """
+    ray_length = min(max_ray_length, torch.norm(direction * max_ray_length))
+    step_size = ray_length / num_samples
+    
+    voxel_positions = []
+    delta_t = []
+    
+    for k in range(num_samples):
+        t_k = (k + 0.5) * step_size  # Sample at voxel center
+        voxel_pos = ue_pos + direction * t_k
+        voxel_positions.append(voxel_pos)
+        delta_t.append(step_size)
+    
+    return voxel_positions, delta_t
 ```
 
 ### 4.2 Subcarrier Selection Strategy

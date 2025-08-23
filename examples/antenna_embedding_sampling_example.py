@@ -12,7 +12,7 @@ from typing import List, Dict
 
 # Import Prism components
 from prism import (
-    DiscreteRayTracer,
+    CPURayTracer,
     BaseStation,
     UserEquipment,
     PrismNetwork,
@@ -39,9 +39,9 @@ def main():
         antenna_embedding_dim=64
     ).to(device)
     
-    # 2. Create DiscreteRayTracer with PrismNetwork
-    print("2. Creating DiscreteRayTracer with integrated PrismNetwork...")
-    ray_tracer = DiscreteRayTracer(
+    # 2. Create CPURayTracer with PrismNetwork
+    print("2. Creating CPURayTracer with integrated PrismNetwork...")
+    ray_tracer = CPURayTracer(
         azimuth_divisions=16,
         elevation_divisions=8,
         max_ray_length=100.0,

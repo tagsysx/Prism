@@ -13,7 +13,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 import torch
 import numpy as np
 
-from prism.ray_tracer import DiscreteRayTracer, BaseStation, UserEquipment
+from prism.ray_tracer_cpu import CPURayTracer
+from prism.ray_tracer_base import Ray
 
 
 def main():
@@ -27,7 +28,7 @@ def main():
     
     # 1. Initialize the ray tracing system
     print("\n1. Initializing ray tracing system...")
-    ray_tracer = DiscreteRayTracer(
+    ray_tracer = CPURayTracer(
         azimuth_divisions=8,
         elevation_divisions=4,
         max_ray_length=50.0,

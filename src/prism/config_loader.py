@@ -101,10 +101,10 @@ class ConfigLoader:
     
     def create_ray_tracer_kwargs(self) -> Dict[str, Any]:
         """
-        Create keyword arguments for DiscreteRayTracer initialization.
+        Create keyword arguments for CPURayTracer initialization.
         
         Returns:
-            Dictionary of keyword arguments for DiscreteRayTracer
+            Dictionary of keyword arguments for CPURayTracer
         """
         rt_config = self.get_ray_tracer_config()
         perf_config = self.get_performance_config()

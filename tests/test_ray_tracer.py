@@ -12,12 +12,8 @@ import numpy as np
 from typing import List, Dict
 
 # Import the updated ray tracer components
-from prism.ray_tracer import (
-    Ray,
-    BaseStation,
-    UserEquipment,
-    DiscreteRayTracer
-)
+from prism.ray_tracer_cpu import CPURayTracer
+from prism.ray_tracer_base import Ray
 
 class TestRay(unittest.TestCase):
     """Test the Ray class functionality."""
@@ -123,8 +119,8 @@ class TestUserEquipment(unittest.TestCase):
         self.assertEqual(ue.position.dtype, torch.float32)
 
 
-class TestDiscreteRayTracer(unittest.TestCase):
-    """Test the DiscreteRayTracer class functionality."""
+class TestCPURayTracer(unittest.TestCase):
+    """Test the CPURayTracer class functionality."""
     
     def setUp(self):
         """Set up test fixtures."""
@@ -135,7 +131,7 @@ class TestDiscreteRayTracer(unittest.TestCase):
         self.scene_size = 100.0
         
         # Create ray tracer
-        self.ray_tracer = DiscreteRayTracer(
+        self.ray_tracer = CPURayTracer(
             azimuth_divisions=self.azimuth_divisions,
             elevation_divisions=self.elevation_divisions,
             max_ray_length=self.max_ray_length,
@@ -157,7 +153,7 @@ class TestDiscreteRayTracer(unittest.TestCase):
         ]
     
     def test_ray_tracer_creation(self):
-        """Test DiscreteRayTracer object creation."""
+        """Test CPURayTracer object creation."""
         self.assertEqual(self.ray_tracer.device, self.device)
         self.assertEqual(self.ray_tracer.azimuth_divisions, self.azimuth_divisions)
         self.assertEqual(self.ray_tracer.elevation_divisions, self.elevation_divisions)
@@ -166,7 +162,7 @@ class TestDiscreteRayTracer(unittest.TestCase):
         self.assertEqual(self.ray_tracer.total_directions, self.azimuth_divisions * self.elevation_divisions)
         
         # Test with custom scene size
-        custom_ray_tracer = DiscreteRayTracer(
+        custom_ray_tracer = CPURayTracer(
             azimuth_divisions=16,
             elevation_divisions=8,
             scene_size=50.0,  # Use scene_size instead of scene_bounds
@@ -180,13 +176,13 @@ class TestDiscreteRayTracer(unittest.TestCase):
     def test_scene_bounds_validation(self):
         """Test scene bounds validation."""
         # Test with valid scene size
-        ray_tracer = DiscreteRayTracer(scene_size=100.0, device=self.device)
+        ray_tracer = CPURayTracer(scene_size=100.0, device=self.device)
         
         self.assertIsNotNone(ray_tracer)
         
         # Test with invalid scene size (negative)
         with self.assertRaises(ValueError):
-            DiscreteRayTracer(scene_size=-100.0, device=self.device)
+            CPURayTracer(scene_size=-100.0, device=self.device)
     
     def test_position_in_scene_validation(self):
         """Test position validation within scene bounds."""

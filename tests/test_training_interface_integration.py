@@ -13,7 +13,7 @@ from unittest.mock import Mock, MagicMock
 
 # Import the components
 from prism.training_interface import PrismTrainingInterface
-from prism.ray_tracer import DiscreteRayTracer
+from prism.ray_tracer_cpu import CPURayTracer
 from prism.networks.prism_network import PrismNetwork
 
 
@@ -49,7 +49,7 @@ class TestTrainingInterfaceIntegration(unittest.TestCase):
         )
         
         # Create ray tracer
-        self.ray_tracer = DiscreteRayTracer(
+        self.ray_tracer = CPURayTracer(
             azimuth_divisions=8,
             elevation_divisions=4,
             max_ray_length=50.0,
