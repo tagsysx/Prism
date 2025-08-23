@@ -146,6 +146,11 @@ performance:
   cuda_benchmark_mode: true            # Enable CUDA benchmark mode for optimal performance
   cuda_deterministic: false            # Disable deterministic mode for better performance
   
+  # Multi-GPU CUDA settings
+  cuda_multi_gpu: true                 # Enable multi-GPU CUDA operations
+  cuda_gpu_ids: [0, 1, 2]             # Specific GPU IDs to use
+  cuda_memory_pool: true               # Enable CUDA memory pool for better memory management
+  
   # Memory management
   gpu_memory_fraction: 0.8             # GPU memory usage fraction
   enable_mixed_precision: true         # Enable mixed precision for efficiency
@@ -237,6 +242,12 @@ ray_tracer_integration:
   cpu_offload: true                    # Offload ray_tracer computation to CPU
   parallel_antenna_processing: true    # Process antennas in parallel (enabled for performance)
   num_workers: 24                      # Number of workers for parallel processing (optimized for 32-core system)
+  
+  # Multi-GPU Configuration
+  enable_distributed: true             # Enable distributed training across multiple GPUs
+  num_gpus: 3                          # Number of available GPUs (2x RTX 4090 + 1x RTX 3080 Ti)
+  gpu_memory_fraction: 0.8             # GPU memory usage fraction per GPU
+  data_parallel: true                  # Use DataParallel for multi-GPU training
 
 # Training Configuration
 training:

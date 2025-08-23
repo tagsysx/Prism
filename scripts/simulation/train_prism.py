@@ -58,8 +58,25 @@ class PrismTrainer:
         # Load configuration
         self.config = self._load_config()
         
-        # Setup device
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # Setup device and multi-GPU configuration
+        if torch.cuda.is_available():
+            self.device = torch.device('cuda')
+            self.num_gpus = torch.cuda.device_count()
+            logger.info(f"CUDA available: {self.num_gpus} GPUs detected")
+            
+            # Check if multi-GPU is enabled in config
+            if self.config.get('performance', {}).get('enable_distributed', False):
+                self.use_multi_gpu = True
+                logger.info(f"Multi-GPU training enabled with {self.num_gpus} GPUs")
+            else:
+                self.use_multi_gpu = False
+                logger.info(f"Single GPU training on GPU 0")
+        else:
+            self.device = torch.device('cpu')
+            self.num_gpus = 0
+            self.use_multi_gpu = False
+            logger.info("CUDA not available, using CPU")
+        
         logger.info(f"Using device: {self.device}")
         
         # Initialize model and training components
@@ -240,6 +257,14 @@ class PrismTrainer:
             checkpoint_dir=str(self.output_dir / 'checkpoints')
         )
         
+        # Enable multi-GPU training if configured
+        if self.use_multi_gpu and self.num_gpus > 1:
+            logger.info(f"🚀 Wrapping model with DataParallel for {self.num_gpus} GPUs")
+            self.model = nn.DataParallel(self.model, device_ids=list(range(self.num_gpus)))
+            logger.info(f"Multi-GPU model created successfully")
+        else:
+            logger.info("Single GPU training mode")
+        
         self.model = self.model.to(self.device)
         
         # Print model summary
@@ -251,8 +276,15 @@ class PrismTrainer:
         """Setup training hyperparameters and optimizers"""
         # Training hyperparameters
         self.batch_size = self.config['performance']['batch_size']
+        
+        # Scale batch size for multi-GPU training
+        if self.use_multi_gpu and self.num_gpus > 1:
+            original_batch_size = self.batch_size
+            self.batch_size = self.batch_size * self.num_gpus
+            logger.info(f"Multi-GPU batch size scaling: {original_batch_size} × {self.num_gpus} = {self.batch_size}")
+        
         self.learning_rate = 1e-4
-        self.num_epochs = 100
+        self.num_epochs = self.config['training']['num_epochs']  # Read from config
         self.save_interval = 10
         
         # Loss function for complex-valued outputs - ensure it returns tensors
