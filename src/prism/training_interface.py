@@ -90,11 +90,30 @@ class PrismTrainingInterface(nn.Module):
         Returns:
             Dictionary containing CSI predictions and network outputs
         """
+        # Ensure selection variables are initialized
+        if not self.ensure_selection_initialized():
+            logger.warning("Selection variables reset, continuing with forward pass")
+        
         batch_size = ue_positions.shape[0]
-        num_ue = ue_positions.shape[1]
+        # Fix: ue_positions shape is [batch_size, coordinates], not [batch_size, num_ue, coordinates]
+        # Each batch item has only one UE position (3 coordinates)
+        num_ue = 1  # Each batch item represents one UE
         num_bs_antennas = antenna_indices.shape[1]
         num_subcarriers = self.prism_network.num_subcarriers
         num_selected = int(num_subcarriers * self.subcarrier_sampling_ratio)
+        
+        logger.debug(f"Forward method parameters:")
+        logger.debug(f"  ue_positions shape: {ue_positions.shape}")
+        logger.debug(f"  antenna_indices shape: {antenna_indices.shape}")
+        logger.debug(f"  batch_size: {batch_size}")
+        logger.debug(f"  num_ue: {num_ue}")
+        logger.debug(f"  num_bs_antennas: {num_bs_antennas}")
+        logger.debug(f"  num_subcarriers: {num_subcarriers}")
+        logger.debug(f"  subcarrier_sampling_ratio: {self.subcarrier_sampling_ratio}")
+        logger.debug(f"  num_selected: {num_selected}")
+        logger.debug(f"  num_subcarriers type: {type(num_subcarriers)}")
+        logger.debug(f"  num_selected type: {type(num_selected)}")
+        logger.debug(f"  subcarrier_sampling_ratio type: {type(self.subcarrier_sampling_ratio)}")
         
         # Step 1: Select subcarriers for each BS antenna
         selection_info = self._select_subcarriers_per_antenna(
@@ -102,6 +121,25 @@ class PrismTrainingInterface(nn.Module):
         )
         self.current_selection = selection_info['selected_indices']
         self.current_selection_mask = selection_info['selection_mask']
+        
+        # Validate selection variables
+        if self.current_selection is None or self.current_selection_mask is None:
+            raise ValueError("Failed to initialize subcarrier selection variables")
+        
+        expected_selection_shape = (batch_size, num_bs_antennas, num_ue, num_selected)
+        if self.current_selection.shape != expected_selection_shape:
+            raise ValueError(f"Selection shape mismatch. Expected: {expected_selection_shape}, Got: {self.current_selection.shape}")
+        
+        expected_mask_shape = (batch_size, num_bs_antennas, num_ue, num_subcarriers)
+        if self.current_selection_mask.shape != expected_mask_shape:
+            raise ValueError(f"Selection mask shape mismatch. Expected: {expected_mask_shape}, Got: {self.current_selection_mask.shape}")
+        
+        logger.debug(f"Subcarrier selection initialized - Shape: {self.current_selection.shape}, Mask: {self.current_selection_mask.shape}")
+        
+        # Additional debugging
+        logger.debug(f"current_selection dtype: {self.current_selection.dtype}")
+        logger.debug(f"current_selection device: {self.current_selection.device}")
+        logger.debug(f"current_selection sample values: {self.current_selection[0, 0, 0, :5] if self.current_selection.numel() > 0 else 'empty'}")
         
         # Step 2: BS-Centric ray tracing from each BS antenna using ray_tracer
         csi_predictions = torch.zeros(
@@ -124,44 +162,111 @@ class PrismTrainingInterface(nn.Module):
             
             for b in range(batch_size):
                 # Convert UE positions to list format for ray_tracer
-                ue_pos_list = [ue_positions[b, u].cpu() for u in range(num_ue)]
+                # Since num_ue = 1, each batch item has one UE position
+                ue_pos_list = [ue_positions[b].cpu()]  # Single UE position for this batch item
+                
+                # Debug logging for UE positions
+                # logger.debug(f"Batch {b} UE positions:")
+                # for u in range(num_ue):
+                #     logger.debug(f"  UE {u}: ue_positions[b, u] = {ue_positions[b, u]} (type: {type(ue_positions[b, u])}, shape: {ue_positions[b, u].shape if hasattr(ue_positions[b, u], 'shape') else 'no shape'})")
+                #     logger.debug(f"  UE {u}: ue_pos_list[u] = {ue_positions[b, u]} (type: {type(ue_pos_list[u])}, shape: {ue_pos_list[u].shape if hasattr(ue_positions[b, u], 'shape') else 'no shape'})")
                 
                 # Create subcarrier dictionary mapping UE positions to selected subcarriers
                 selected_subcarriers = {}
-                for u in range(num_ue):
-                    ue_pos_tuple = tuple(ue_pos_list[u].tolist())
-                    selected_subcarriers[ue_pos_tuple] = self.current_selection[b, bs_antenna_idx, u].tolist()
+                # Since num_ue = 1, we only have one UE per batch item
+                u = 0  # Single UE index
+                ue_pos_tuple = tuple(ue_pos_list[u].tolist())
+                selection_tensor = self.current_selection[b, bs_antenna_idx, u]
+                
+                # Debug logging
+                logger.debug(f"Selection tensor shape: {selection_tensor.shape}, dtype: {selection_tensor.dtype}")
+                # logger.debug(f"Selection tensor values: {selection_tensor}")  # 屏蔽具体值
+                
+                # Ensure we get a proper list of integers
+                if selection_tensor.numel() == 1:
+                    # Single value case
+                    selected_subcarriers[ue_pos_tuple] = [int(selection_tensor.item())]
+                else:
+                    # Multiple values case - ensure it's a proper list
+                    try:
+                        tensor_list = selection_tensor.tolist()
+                        # Validate that we got a list
+                        if isinstance(tensor_list, (list, tuple)):
+                            selected_subcarriers[ue_pos_tuple] = tensor_list
+                        else:
+                            logger.error(f"tensor.tolist() returned non-list: {type(tensor_list)} = {tensor_list}")
+                            selected_subcarriers[ue_pos_tuple] = [0]  # Fallback
+                    except Exception as e:
+                        logger.error(f"Error converting tensor to list: {e}")
+                        selected_subcarriers[ue_pos_tuple] = [0]  # Fallback
+                
+                # Validate the selected subcarriers
+                if not selected_subcarriers[ue_pos_tuple]:
+                    logger.warning(f"Empty subcarrier selection for UE {u}, using fallback")
+                    selected_subcarriers[ue_pos_tuple] = [0]  # Fallback to first subcarrier
+                
+                # Ensure all values are valid integers
+                try:
+                    selected_subcarriers[ue_pos_tuple] = [int(idx) for idx in selected_subcarriers[ue_pos_tuple]]
+                except (ValueError, TypeError) as e:
+                    logger.error(f"Invalid subcarrier indices: {selected_subcarriers[ue_pos_tuple]}, error: {e}")
+                    selected_subcarriers[ue_pos_tuple] = [0]  # Fallback
+                
+                logger.debug(f"Selected subcarriers for UE {u}: {len(selected_subcarriers[ue_pos_tuple])} indices")  # 只显示数量，不显示具体值
                 
                 # Use ray_tracer for signal accumulation with AntennaNetwork-guided directions
-                ray_results = self.ray_tracer.accumulate_signals(
-                    base_station_pos=bs_position[b].cpu(),
-                    ue_positions=ue_pos_list,
-                    selected_subcarriers=selected_subcarriers,
-                    antenna_embedding=antenna_embedding[b].cpu()
-                )
+                logger.debug(f"Calling ray_tracer.accumulate_signals with:")
+                logger.debug(f"  base_station_pos: {bs_position[b].shape}, {bs_position[b].dtype}")
+                logger.debug(f"  ue_positions: {len(ue_pos_list)} positions")
+                logger.debug(f"  selected_subcarriers: {type(selected_subcarriers)}")
+                # logger.debug(f"  selected_subcarriers content: {selected_subcarriers}")  # 屏蔽数据内容
+                logger.debug(f"  antenna_embedding: {antenna_embedding[b].shape}, {antenna_embedding[b].dtype}")
+                
+                # Additional validation before calling ray_tracer
+                # logger.debug(f"Validating selected_subcarriers before ray_tracer call:")
+                # for ue_key, subcarriers in selected_subcarriers.items():
+                #     logger.debug(f"  UE {ue_key}: {type(subcarriers)} = {subcarriers}")
+                #     if not isinstance(subcarriers, (list, tuple)):
+                #         logger.error(f"Invalid subcarriers type for UE {ue_key}: {type(subcarriers)}")
+                #         raise ValueError(f"subcarriers must be list/tuple, got {type(subcarriers)}")
+                
+                try:
+                    ray_results = self.ray_tracer.accumulate_signals(
+                        base_station_pos=bs_position[b].cpu(),
+                        ue_positions=ue_pos_list,
+                        selected_subcarriers=selected_subcarriers,
+                        antenna_embedding=antenna_embedding[b].cpu()
+                    )
+                except Exception as e:
+                    logger.error(f"ray_tracer.accumulate_signals failed: {e}")
+                    logger.error(f"selected_subcarriers: {selected_subcarriers}")
+                    import traceback
+                    logger.error(f"Full traceback: {traceback.format_exc()}")
+                    raise
                 
                 batch_ray_results.append(ray_results)
                 
                 # Convert ray_tracer results to CSI predictions
-                for u in range(num_ue):
-                    ue_pos_tuple = tuple(ue_pos_list[u].tolist())
-                    ue_selected_subcarriers = self.current_selection[b, bs_antenna_idx, u].tolist()
-                    
-                    for k_idx, k in enumerate(ue_selected_subcarriers):
-                        if (ue_pos_tuple, k) in ray_results:
-                            signal_strength = ray_results[(ue_pos_tuple, k)]
-                            
-                            # Convert signal strength to complex CSI
-                            csi_value = self._signal_strength_to_csi(
-                                signal_strength, bs_position[b], ue_positions[b, u], k
-                            )
-                            csi_predictions[b, bs_antenna_idx, u, k_idx] = csi_value
-                        else:
-                            # Fallback for missing results
-                            csi_predictions[b, bs_antenna_idx, u, k_idx] = torch.complex(
-                                torch.tensor(0.0, device=ue_positions.device), 
-                                torch.tensor(0.0, device=ue_positions.device)
-                            )
+                # Since num_ue = 1, we only have one UE per batch item
+                u = 0  # Single UE index
+                ue_pos_tuple = tuple(ue_pos_list[u].tolist())
+                ue_selected_subcarriers = self.current_selection[b, bs_antenna_idx, u].tolist()
+                
+                for k_idx, k in enumerate(ue_selected_subcarriers):
+                    if (ue_pos_tuple, k) in ray_results:
+                        signal_strength = ray_results[(ue_pos_tuple, k)]
+                        
+                        # Convert signal strength to complex CSI
+                        csi_value = self._signal_strength_to_csi(
+                            signal_strength, bs_position[b], ue_positions[b], k  # Fixed: ue_positions[b] not ue_positions[b, u]
+                        )
+                        csi_predictions[b, bs_antenna_idx, u, k_idx] = csi_value
+                    else:
+                        # Fallback for missing results
+                        csi_predictions[b, bs_antenna_idx, u, k_idx] = torch.complex(
+                            torch.tensor(0.0, device=ue_positions.device), 
+                            torch.tensor(0.0, device=ue_positions.device)
+                        )
                 
                 batch_signal_strengths.append(ray_results)
             
@@ -189,15 +294,44 @@ class PrismTrainingInterface(nn.Module):
         num_selected: int
     ) -> Dict[str, torch.Tensor]:
         """Select subcarriers for each BS antenna independently."""
+        # Validate parameters
+        if total_subcarriers <= 0:
+            raise ValueError(f"total_subcarriers must be positive, got {total_subcarriers}")
+        if num_selected <= 0:
+            raise ValueError(f"num_selected must be positive, got {num_selected}")
+        if num_selected > total_subcarriers:
+            raise ValueError(f"num_selected ({num_selected}) cannot be greater than total_subcarriers ({total_subcarriers})")
+        
+        logger.debug(f"_select_subcarriers_per_antenna called with:")
+        logger.debug(f"  batch_size: {batch_size}")
+        logger.debug(f"  num_ue: {num_ue}")
+        logger.debug(f"  num_bs_antennas: {num_bs_antennas}")
+        logger.debug(f"  total_subcarriers: {total_subcarriers}")
+        logger.debug(f"  num_selected: {num_selected}")
+        
         selected_indices = torch.zeros(batch_size, num_bs_antennas, num_ue, num_selected, dtype=torch.long)
         selection_mask = torch.zeros(batch_size, num_bs_antennas, num_ue, total_subcarriers, dtype=torch.bool)
         
         for b in range(batch_size):
             for bs_antenna in range(num_bs_antennas):
                 for u in range(num_ue):
-                    ue_selected = random.sample(range(total_subcarriers), num_selected)
-                    selected_indices[b, bs_antenna, u] = torch.tensor(ue_selected)
-                    selection_mask[b, bs_antenna, u, ue_selected] = True
+                    try:
+                        # logger.debug(f"Processing {b},{bs_antenna},{u}: total_subcarriers={total_subcarriers}, num_selected={num_selected}")
+                        ue_selected = random.sample(range(total_subcarriers), num_selected)
+                        # logger.debug(f"  Sample {b},{bs_antenna},{u}: {ue_selected}")
+                        selected_indices[b, bs_antenna, u] = torch.tensor(ue_selected)
+                        selection_mask[b, bs_antenna, u, ue_selected] = True
+                    except Exception as e:
+                        logger.error(f"Error in random.sample for {b},{bs_antenna},{u}: {e}")
+                        logger.error(f"  total_subcarriers: {total_subcarriers}, num_selected: {num_selected}")
+                        logger.error(f"  total_subcarriers type: {type(total_subcarriers)}")
+                        logger.error(f"  num_selected type: {type(num_selected)}")
+                        import traceback
+                        logger.error(f"Full traceback: {traceback.format_exc()}")
+                        raise
+        
+        logger.debug(f"Selected indices shape: {selected_indices.shape}")
+        logger.debug(f"Selection mask shape: {selection_mask.shape}")
         
         return {
             'selected_indices': selected_indices,
@@ -258,27 +392,61 @@ class PrismTrainingInterface(nn.Module):
         loss_function: nn.Module
     ) -> torch.Tensor:
         """Compute loss for selected subcarriers."""
-        if self.current_selection_mask is None:
+        # Debug logging
+        logger.debug(f"compute_loss called with predictions shape: {predictions.shape}, targets shape: {targets.shape}")
+        logger.debug(f"current_selection: {self.current_selection is not None}, current_selection_mask: {self.current_selection_mask is not None}")
+        
+        if self.current_selection is None or self.current_selection_mask is None:
+            logger.error("No subcarrier selection available. Call forward() first.")
+            logger.error(f"current_selection: {self.current_selection}")
+            logger.error(f"current_selection_mask: {self.current_selection_mask}")
             raise ValueError("No subcarrier selection available. Call forward() first.")
         
+        # Validate shapes
         batch_size, num_bs_antennas, num_ue, total_subcarriers = targets.shape
+        expected_pred_shape = (batch_size, num_bs_antennas, num_ue, self.current_selection.shape[-1])
+        
+        if predictions.shape != expected_pred_shape:
+            logger.error(f"Predictions shape mismatch. Expected: {expected_pred_shape}, Got: {predictions.shape}")
+            raise ValueError(f"Predictions shape mismatch. Expected: {expected_pred_shape}, Got: {predictions.shape}")
+        
+        if self.current_selection.shape[:3] != (batch_size, num_bs_antennas, num_ue):
+            logger.error(f"Selection shape mismatch. Expected: ({batch_size}, {num_bs_antennas}, {num_ue}, ...), Got: {self.current_selection.shape}")
+            raise ValueError(f"Selection shape mismatch. Expected: ({batch_size}, {num_bs_antennas}, {num_ue}, ...), Got: {self.current_selection.shape}")
+        
         num_selected = self.current_selection.shape[-1]
         
+        # Create selected targets tensor
         selected_targets = torch.zeros(
             batch_size, num_bs_antennas, num_ue, num_selected,
             dtype=targets.dtype, device=targets.device
         )
         
-        for b in range(batch_size):
-            for bs_antenna in range(num_bs_antennas):
-                for u in range(num_ue):
-                    selected_indices = self.current_selection[b, bs_antenna, u]
-                    # Ensure indices are within bounds
-                    valid_indices = selected_indices[selected_indices < total_subcarriers]
-                    if len(valid_indices) > 0:
-                        selected_targets[b, bs_antenna, u, :len(valid_indices)] = targets[b, bs_antenna, u, valid_indices]
-        
-        return loss_function(predictions, selected_targets)
+        try:
+            for b in range(batch_size):
+                for bs_antenna in range(num_bs_antennas):
+                    for u in range(num_ue):
+                        selected_indices = self.current_selection[b, bs_antenna, u]
+                        # Ensure indices are within bounds
+                        valid_indices = selected_indices[selected_indices < total_subcarriers]
+                        if len(valid_indices) > 0:
+                            selected_targets[b, bs_antenna, u, :len(valid_indices)] = targets[b, bs_antenna, u, valid_indices]
+            
+            # Compute loss
+            loss = loss_function(predictions, selected_targets)
+            
+            # Validate loss is a tensor
+            if not isinstance(loss, torch.Tensor):
+                logger.error(f"Loss function returned non-tensor: {type(loss)} = {loss}")
+                raise ValueError(f"Loss function must return a torch.Tensor, got {type(loss)}")
+            
+            return loss
+            
+        except Exception as e:
+            logger.error(f"Error in compute_loss: {e}")
+            logger.error(f"Shapes - predictions: {predictions.shape}, targets: {targets.shape}, selected_targets: {selected_targets.shape}")
+            logger.error(f"current_selection shape: {self.current_selection.shape}")
+            raise
     
     def set_training_phase(self, phase: int):
         """Set training phase for curriculum learning."""
@@ -298,6 +466,24 @@ class PrismTrainingInterface(nn.Module):
             raise ValueError(f"Invalid training phase: {phase}")
         
         logger.info(f"Training phase {phase} set: {self.prism_network.azimuth_divisions}×{self.prism_network.elevation_divisions}")
+    
+    def reset_training_state(self):
+        """Reset training state and selection variables."""
+        self.current_epoch = 0
+        self.current_batch = 0
+        self.best_loss = float('inf')
+        self.training_history = []
+        self.current_selection = None
+        self.current_selection_mask = None
+        logger.info("Training state reset")
+    
+    def ensure_selection_initialized(self):
+        """Ensure selection variables are properly initialized."""
+        if self.current_selection is None or self.current_selection_mask is None:
+            logger.warning("Selection variables not initialized, resetting training state")
+            self.reset_training_state()
+            return False
+        return True
     
     # Checkpoint and recovery methods
     def save_checkpoint(self, filename: str = None):

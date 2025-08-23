@@ -34,7 +34,7 @@ from prism.training_interface import PrismTrainingInterface
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # Changed to DEBUG for detailed logging
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('training.log'),
@@ -83,7 +83,37 @@ class PrismTrainer:
         
         # Display checkpoint information
         self._display_checkpoint_info()
+    
+    def _complex_mse_loss(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Custom MSE loss for complex-valued tensors that always returns a tensor."""
+        # Handle complex tensors by separating real and imaginary parts
+        if predictions.is_complex():
+            pred_real = predictions.real
+            pred_imag = predictions.imag
+        else:
+            pred_real = predictions
+            pred_imag = torch.zeros_like(predictions)
         
+        if targets.is_complex():
+            target_real = targets.real
+            target_imag = targets.imag
+        else:
+            target_real = targets
+            target_imag = torch.zeros_like(targets)
+        
+        # Compute MSE for real and imaginary parts
+        real_loss = nn.functional.mse_loss(pred_real, target_real, reduction='mean')
+        imag_loss = nn.functional.mse_loss(pred_imag, target_imag, reduction='mean')
+        
+        # Combine losses
+        total_loss = real_loss + imag_loss
+        
+        # Ensure we return a tensor
+        if not isinstance(total_loss, torch.Tensor):
+            total_loss = torch.tensor(total_loss, device=predictions.device, dtype=predictions.dtype)
+        
+        return total_loss
+    
     def _load_config(self):
         """Load configuration from YAML file"""
         with open(self.config_path, 'r') as f:
@@ -97,9 +127,18 @@ class PrismTrainer:
         rt_config = self.config['ray_tracing']
         
         # Create PrismNetwork with configuration from YAML
+        logger.info(f"Creating PrismNetwork with:")
+        logger.info(f"  num_subcarriers: {nn_config['attenuation_decoder']['output_dim']}")
+        logger.info(f"  num_ue_antennas: {nn_config['attenuation_decoder']['num_ue_antennas']}")
+        logger.info(f"  num_bs_antennas: {nn_config['antenna_codebook']['num_antennas']}")
+        logger.info(f"  position_dim: {nn_config['attenuation_network']['input_dim']}")
+        logger.info(f"  hidden_dim: {nn_config['attenuation_network']['hidden_dim']}")
+        logger.info(f"  feature_dim: {nn_config['attenuation_network']['feature_dim']}")
+        logger.info(f"  antenna_embedding_dim: {nn_config['antenna_codebook']['embedding_dim']}")
+        
         self.prism_network = PrismNetwork(
             num_subcarriers=nn_config['attenuation_decoder']['output_dim'],
-            num_ue_antennas=nn_config['attenuation_decoder']['num_ue'],
+            num_ue_antennas=nn_config['attenuation_decoder']['num_ue_antennas'],
             num_bs_antennas=nn_config['antenna_codebook']['num_antennas'],
             position_dim=nn_config['attenuation_network']['input_dim'],
             hidden_dim=nn_config['attenuation_network']['hidden_dim'],
@@ -113,15 +152,22 @@ class PrismTrainer:
             complex_output=True
         )
         
-        # Create DiscreteRayTracer
+        logger.info(f"PrismNetwork created successfully")
+        logger.info(f"  num_subcarriers: {self.prism_network.num_subcarriers}")
+        logger.info(f"  num_ue_antennas: {self.prism_network.num_ue_antennas}")
+        logger.info(f"  num_bs_antennas: {self.prism_network.num_bs_antennas}")
+        
+        # Create DiscreteRayTracer with PrismNetwork for MLP-based direction selection
         self.ray_tracer = DiscreteRayTracer(
             azimuth_divisions=rt_config['azimuth_divisions'],
             elevation_divisions=rt_config['elevation_divisions'],
             max_ray_length=rt_config.get('max_ray_length', 100.0),
             scene_size=rt_config.get('scene_size', 200.0),
             device=self.device.type,
+            prism_network=self.prism_network,  # Enable MLP-based direction selection
             signal_threshold=rt_config.get('signal_threshold', 1e-6),
-            enable_early_termination=rt_config.get('enable_early_termination', True)
+            enable_early_termination=rt_config.get('enable_early_termination', True),
+            top_k_directions=rt_config.get('top_k_directions', None)  # Use configured K value
         )
         
         # Create PrismTrainingInterface
@@ -149,8 +195,8 @@ class PrismTrainer:
         self.num_epochs = 100
         self.save_interval = 10
         
-        # Loss function for complex-valued outputs
-        self.criterion = nn.MSELoss()
+        # Loss function for complex-valued outputs - ensure it returns tensors
+        self.criterion = self._complex_mse_loss
         
         # Optimizer - now optimizing the TrainingInterface
         self.optimizer = optim.AdamW(
@@ -214,11 +260,24 @@ class PrismTrainer:
                 logger.info(f"Data split info: {split_info}")
                 print(f"   📊 Data split: {split_info.get('split_type', 'unknown')} ({split_info.get('num_samples', 'unknown')} samples)")
         
-        # Convert to tensors
+        # Convert to tensors with proper data types
         self.ue_positions = torch.tensor(ue_positions, dtype=torch.float32)
         self.csi_data = torch.tensor(csi_data, dtype=torch.complex64)
         self.bs_position = torch.tensor(bs_position, dtype=torch.float32)
         self.antenna_indices = torch.tensor(antenna_indices, dtype=torch.long)
+        
+        # Validate data shapes
+        logger.info(f"Data validation:")
+        logger.info(f"  UE positions: {self.ue_positions.shape} - {self.ue_positions.dtype}")
+        logger.info(f"  CSI data: {self.csi_data.shape} - {self.csi_data.dtype}")
+        logger.info(f"  BS position: {self.bs_position.shape} - {self.bs_position.dtype}")
+        logger.info(f"  Antenna indices: {self.antenna_indices.shape} - {self.antenna_indices.dtype}")
+        
+        # Check for data consistency
+        if self.csi_data.shape[0] != self.ue_positions.shape[0]:
+            raise ValueError(f"Data mismatch: {self.csi_data.shape[0]} CSI samples vs {self.ue_positions.shape[0]} UE positions")
+        if self.csi_data.shape[3] != self.antenna_indices.shape[0]:
+            raise ValueError(f"Data mismatch: {self.csi_data.shape[3]} BS antennas vs {self.antenna_indices.shape[0]} antenna indices")
         
         # Create dataset with all required data
         self.dataset = TensorDataset(
@@ -227,6 +286,13 @@ class PrismTrainer:
             self.antenna_indices.expand(len(ue_positions), -1),
             self.csi_data
         )
+        
+        # Validate batch size
+        if self.batch_size > len(self.dataset):
+            logger.warning(f"Batch size ({self.batch_size}) is larger than dataset size ({len(self.dataset)}). Adjusting batch size.")
+            self.batch_size = len(self.dataset)
+            logger.info(f"Adjusted batch size to: {self.batch_size}")
+        
         self.dataloader = DataLoader(
             self.dataset,
             batch_size=self.batch_size,
@@ -252,6 +318,12 @@ class PrismTrainer:
         print(f"{'='*60}")
         
         for batch_idx, (ue_pos, bs_pos, antenna_idx, csi_target) in enumerate(self.dataloader):
+            logger.debug(f"Processing batch {batch_idx}:")
+            logger.debug(f"  ue_pos shape: {ue_pos.shape}, dtype: {ue_pos.dtype}")
+            logger.debug(f"  bs_pos shape: {bs_pos.shape}, dtype: {bs_pos.dtype}")
+            logger.debug(f"  antenna_idx shape: {antenna_idx.shape}, dtype: {antenna_idx.dtype}")
+            logger.debug(f"  csi_target shape: {csi_target.shape}, dtype: {csi_target.dtype}")
+            
             ue_pos = ue_pos.to(self.device)
             bs_pos = bs_pos.to(self.device)
             antenna_idx = antenna_idx.to(self.device)
@@ -272,7 +344,27 @@ class PrismTrainer:
                 csi_pred = outputs['csi_predictions']
                 
                 # Compute loss using TrainingInterface's loss computation
-                loss = self.model.compute_loss(csi_pred, csi_target, self.criterion)
+                try:
+                    loss = self.model.compute_loss(csi_pred, csi_target, self.criterion)
+                    
+                    # Validate loss is a tensor
+                    if not isinstance(loss, torch.Tensor):
+                        logger.error(f"Loss computation returned non-tensor: {type(loss)} = {loss}")
+                        raise ValueError(f"Loss must be a torch.Tensor, got {type(loss)}")
+                    
+                    # Ensure loss has requires_grad for backward pass
+                    if not loss.requires_grad:
+                        logger.warning("Loss tensor does not require gradients, this may cause issues")
+                    
+                    # Check for NaN or infinite values
+                    if torch.isnan(loss) or torch.isinf(loss):
+                        logger.error(f"Invalid loss value: {loss}")
+                        raise ValueError(f"Loss contains NaN or infinite values: {loss}")
+                    
+                except Exception as e:
+                    logger.error(f"Loss computation failed: {e}")
+                    logger.error(f"Shapes - csi_pred: {csi_pred.shape}, csi_target: {csi_target.shape}")
+                    raise
                 
                 # Backward pass
                 loss.backward()
@@ -300,7 +392,11 @@ class PrismTrainer:
                     
             except Exception as e:
                 logger.error(f"❌ Error in batch {batch_idx}: {e}")
+                logger.error(f"Full traceback:")
+                import traceback
+                logger.error(traceback.format_exc())
                 print(f"  ❌ Batch {batch_idx+1} failed: {e}")
+                print(f"  🔍 Check logs for full traceback")
                 continue
         
         avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
@@ -336,14 +432,34 @@ class PrismTrainer:
                     )
                     
                     csi_pred = outputs['csi_predictions']
-                    loss = self.model.compute_loss(csi_pred, csi_target, self.criterion)
+                    try:
+                        loss = self.model.compute_loss(csi_pred, csi_target, self.criterion)
+                        
+                        # Validate loss is a tensor
+                        if not isinstance(loss, torch.Tensor):
+                            logger.error(f"Validation loss computation returned non-tensor: {type(loss)} = {loss}")
+                            raise ValueError(f"Validation loss must be a torch.Tensor, got {type(loss)}")
+                        
+                        # Check for NaN or infinite values
+                        if torch.isnan(loss) or torch.isinf(loss):
+                            logger.error(f"Invalid validation loss value: {loss}")
+                            raise ValueError(f"Validation loss contains NaN or infinite values: {loss}")
+                        
+                    except Exception as e:
+                        logger.error(f"Validation loss computation failed: {e}")
+                        logger.error(f"Shapes - csi_pred: {csi_pred.shape}, csi_target: {csi_target.shape}")
+                        raise
                     
                     total_loss += loss.item()
                     num_batches += 1
                     
                 except Exception as e:
                     logger.error(f"❌ Validation error: {e}")
+                    logger.error(f"Full validation traceback:")
+                    import traceback
+                    logger.error(traceback.format_exc())
                     print(f"  ❌ Validation batch failed: {e}")
+                    print(f"  🔍 Check logs for full traceback")
                     continue
         
         avg_val_loss = total_loss / num_batches if num_batches > 0 else 0.0

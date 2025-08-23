@@ -6,25 +6,25 @@ ray_tracing:
   # Enable ray tracing system
   enabled: true
 
-  # Angular sampling (configurable)
-  azimuth_divisions: 36           # Number of azimuth divisions A (0° to 360°)
-  elevation_divisions: 18         # Number of elevation divisions B (-90° to +90°)
+  # Angular sampling (configurable) - OPTIMIZED for faster training
+  azimuth_divisions: 18           # Number of azimuth divisions A (0° to 360°) - REDUCED from 36
+  elevation_divisions: 9          # Number of elevation divisions B (-90° to +90°) - REDUCED from 18
   # 代码实现与配置一致，见DiscreteRayTracer初始化参数
 
   # Spatial sampling (configurable)
-  uniform_samples: 128            # First stage: uniform sampling points per ray (代码实现为128)
-  resampled_points: 64            # Second stage: importance-based resampled points (代码实现为64)
+  uniform_samples: 64             # First stage: uniform sampling points per ray - REDUCED from 128
+  resampled_points: 32            # Second stage: importance-based resampled points - REDUCED from 64
 
   # Coverage calculations
-  total_directions: 648           # 36 × 18 = 648 angle combinations
-  total_spatial_points: 41472     # 648 × 64 = 41,472 spatial samples (与resampled_points一致)
+  total_directions: 162           # 18 × 9 = 162 angle combinations - REDUCED from 648 (75% faster!)
+  total_spatial_points: 10368     # 162 × 32 = 10,368 spatial samples (与resampled_points一致)
 
   # Resolution settings
   azimuth_resolution: 10          # 10° between azimuth samples (仅注释，实际由azimuth_divisions计算)
-  elevation_resolution: 10        # 10° between elevation samples (仅注释，实际由elevation_divisions计算)
+  elevation_resolution: 10        # 10° between elevation samples (仅注释，实际由azimuth_divisions计算)
 
   # Physical parameters
-  max_ray_length: 300.0           # Maximum ray length in meters
+  max_ray_length: 200.0           # Maximum ray length in meters
   scene_size: 200.0               # Scene size D (cubic environment)
   # 代码实现支持动态调整scene_size和max_ray_length
 
@@ -33,6 +33,10 @@ ray_tracing:
   enable_early_termination: true  # Enable early termination optimization
   signal_threshold: 1e-6          # Signal strength threshold for early termination
   # 代码实现有对应参数
+  
+  # MLP-based direction selection
+  top_k_directions: 32            # Number of top-K directions to select (configurable)
+  # 代码实现：DiscreteRayTracer使用此参数，替代硬编码的K值
 
 # Neural Network Configuration
 neural_networks:
@@ -54,7 +58,7 @@ neural_networks:
     hidden_dim: 256               # Hidden layer dimension
     num_hidden_layers: 3          # Number of hidden layers
     output_dim: 408               # Number of subcarriers K
-    num_ue: 1000                  # Number of UE devices
+    num_ue_antennas: 4            # Number of UE antennas per device (clarified naming)
     activation: 'relu'            # Activation function
     
   # Antenna Codebook
@@ -68,7 +72,7 @@ neural_networks:
     input_dim: 64                 # Antenna embedding dimension
     hidden_dim: 128               # Hidden layer dimension
     num_hidden_layers: 2          # Number of hidden layers
-    output_dim: 648               # A × B directions (36 × 18 = 648)
+    output_dim: 162               # A × B directions (18 × 9 = 162) - OPTIMIZED
     activation: 'relu'            # Activation function
     dropout_rate: 0.1             # Dropout rate for regularization
     
@@ -81,16 +85,14 @@ neural_networks:
     hidden_dim: 256               # Hidden layer dimension
     num_hidden_layers: 4          # Number of hidden layers
     output_dim: 408               # Number of subcarriers K
-    num_ue: 1000                  # Number of UE devices
+    num_ue_antennas: 4            # Number of UE antennas per device (clarified naming)
     activation: 'relu'            # Activation function
-
-
 
 # Base Station Configuration
 base_station:
   # Default configuration
   default_position: [0.0, 0.0, 0.0]  # Base station at origin
-  num_antennas: 64                   # Number of BS antennas
+  num_antennas: 64                   # Number of BS antennas (matches actual data)
   antenna_embedding_dim: 64          # Antenna embedding dimension
   # 代码实现：BaseStation类支持num_antennas和embedding_dim参数，默认位置一致
 
@@ -102,8 +104,9 @@ base_station:
 # User Equipment Configuration
 user_equipment:
   # UE configuration
-  num_ue: 1                       # Number of UE devices
-  antenna_config: '4x4'              # 4 UE antennas per device
+  num_ue_antennas: 4                 # Number of UE antennas per device (clarified naming)
+  antenna_config: '4x64'             # 4 UE antennas per device, 64 BS antennas (matches actual data)
+  # Note: Number of UE positions is determined from actual training data, not from config
   # 代码实现：UserEquipment类支持num_ue，天线配置为注释说明
 
   # Position distribution
@@ -131,7 +134,7 @@ importance_sampling:
 performance:
   # Computational settings
   device: 'cuda'                       # Device for computation ('cuda' or 'cpu')
-  batch_size: 256                      # Batch size for processing
+  batch_size: 32                       # Batch size for processing (adjusted for 80 training samples)
   max_concurrent_rays: 1000            # Maximum concurrent rays
   # 代码实现：DiscreteRayTracer支持device参数，batch_size和max_concurrent_rays用于并行和批处理
 

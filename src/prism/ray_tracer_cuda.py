@@ -27,7 +27,66 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# CUDA kernel for parallel ray tracing
+class Ray:
+    """Represents a single ray for ray tracing."""
+    
+    def __init__(self, origin: torch.Tensor, direction: torch.Tensor, max_length: float = 100.0, device: str = 'cpu'):
+        """
+        Initialize a ray.
+        
+        Args:
+            origin: Ray origin point [3]
+            direction: Ray direction vector [3]
+            max_length: Maximum ray length
+            device: Device to run computations on ('cuda' or 'cpu')
+        """
+        self.device = device
+        self.origin = origin.clone().detach().to(dtype=torch.float32, device=device)
+        self.direction = self._normalize(direction.clone().detach().to(dtype=torch.float32, device=device))
+        self.max_length = max_length
+    
+    def _normalize(self, vector: torch.Tensor) -> torch.Tensor:
+        """Normalize direction vector."""
+        norm = torch.norm(vector)
+        if norm < 1e-10:
+            return vector
+        return vector / norm
+
+class BaseStation:
+    """Represents a base station with configurable location and antennas."""
+    
+    def __init__(self, position: torch.Tensor = None, num_antennas: int = 1, device: str = 'cpu'):
+        """
+        Initialize base station.
+        
+        Args:
+            position: Base station position [3], defaults to origin (0, 0, 0)
+            num_antennas: Number of antennas at this base station
+            device: Device to run computations on
+        """
+        self.device = device
+        self.position = torch.tensor([0.0, 0.0, 0.0], device=device) if position is None else torch.tensor(position, device=device)
+        self.num_antennas = num_antennas
+        self.antenna_embeddings = torch.randn(num_antennas, 128, device=device)  # 128D antenna embedding
+    
+    def get_antenna_embedding(self, antenna_idx: int = 0) -> torch.Tensor:
+        """Get antenna embedding parameter C for the specified antenna."""
+        return self.antenna_embeddings[antenna_idx]
+
+class UserEquipment:
+    """Represents user equipment at a specific location."""
+    
+    def __init__(self, position: torch.Tensor, device: str = 'cpu'):
+        """
+        Initialize user equipment.
+        
+        Args:
+            position: UE position [3]
+            device: Device to run computations on
+        """
+        self.position = position.clone().detach().to(dtype=torch.float32, device=device)
+
+# CUDA kernel for parallel ray tracing with enhanced features
 CUDA_KERNEL = """
 extern "C" __global__ void parallel_ray_tracing(
     const float* base_station_pos,
@@ -42,7 +101,8 @@ extern "C" __global__ void parallel_ray_tracing(
     const float max_ray_length,
     const float scene_size,
     const int uniform_samples,
-    const int resampled_points
+    const int resampled_points,
+    const float signal_threshold
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_directions * num_ue * num_subcarriers) return;
@@ -79,9 +139,16 @@ extern "C" __global__ void parallel_ray_tracing(
         max_ray_length
     );
     
-    // Uniform sampling along ray
+    // Early termination if ray length is too short
+    if (ray_length < 1e-6f) {
+        signal_strengths[idx] = 0.0f;
+        return;
+    }
+    
+    // Uniform sampling along ray with importance sampling
     float signal_strength = 0.0f;
     float step_size = ray_length / uniform_samples;
+    float cumulative_attenuation = 1.0f;
     
     for (int i = 0; i < uniform_samples; i++) {
         float t = i * step_size;
@@ -103,22 +170,30 @@ extern "C" __global__ void parallel_ray_tracing(
                 powf(sample_pos.z - ue_pos.z, 2)
             );
             
-            // Simple attenuation model
-            float attenuation = expf(-distance_to_ue / 50.0f);
+            // Enhanced attenuation model with distance and frequency
+            float distance_attenuation = expf(-distance_to_ue / 50.0f);
+            float frequency_attenuation = 1.0f / (1.0f + 0.1f * subcarrier_idx);
+            float attenuation = distance_attenuation * frequency_attenuation;
             
-            // Apply antenna embedding influence
+            // Apply antenna embedding influence (128D embedding)
             float antenna_factor = 0.0f;
-            for (int j = 0; j < 64; j++) {
-                antenna_factor += antenna_embeddings[subcarrier_idx * 64 + j] * 
-                                antenna_embeddings[subcarrier_idx * 64 + j];
+            for (int j = 0; j < 128; j++) {
+                antenna_factor += antenna_embeddings[subcarrier_idx * 128 + j] * 
+                                antenna_embeddings[subcarrier_idx * 128 + j];
             }
-            antenna_factor = sqrtf(antenna_factor) / 8.0f; // Normalize
+            antenna_factor = sqrtf(antenna_factor) / 11.3137f; // Normalize to [0, 1]
             
-            // Frequency-dependent effects
-            float frequency_factor = 1.0f / (1.0f + 0.1f * subcarrier_idx);
+            // Apply cumulative attenuation and accumulate signal
+            float local_contribution = attenuation * antenna_factor * step_size;
+            signal_strength += cumulative_attenuation * local_contribution;
             
-            // Accumulate signal contribution
-            signal_strength += attenuation * antenna_factor * frequency_factor * step_size;
+            // Update cumulative attenuation for next sample
+            cumulative_attenuation *= expf(-attenuation * step_size);
+            
+            // Early termination if signal strength falls below threshold
+            if (cumulative_attenuation < signal_threshold) {
+                break;
+            }
         }
     }
     
@@ -128,45 +203,83 @@ extern "C" __global__ void parallel_ray_tracing(
 """
 
 class CUDARayTracer:
-    """CUDA-accelerated ray tracer with automatic device detection."""
+    """CUDA-accelerated discrete ray tracer implementing the design document specifications."""
     
     def __init__(self, 
                  azimuth_divisions: int = 36,
                  elevation_divisions: int = 18,
                  max_ray_length: float = 100.0,
                  scene_size: float = 200.0,
+                 device: str = 'cpu',
+                 prism_network=None,
+                 signal_threshold: float = 1e-6,
+                 enable_early_termination: bool = True,
                  uniform_samples: int = 128,
                  resampled_points: int = 64):
         """
-        Initialize CUDA ray tracer.
+        Initialize CUDA discrete ray tracer.
         
         Args:
-            azimuth_divisions: Number of azimuth divisions
-            elevation_divisions: Number of elevation divisions
+            azimuth_divisions: Number of azimuth divisions A (0° to 360°)
+            elevation_divisions: Number of elevation divisions B (-90° to +90°)
             max_ray_length: Maximum ray length in meters
-            scene_size: Scene size in meters
+            scene_size: Scene size D in meters (cubic environment: [-D/2, D/2]³)
+            device: Device to run computations on
+            prism_network: PrismNetwork instance for getting attenuation and radiance properties
+            signal_threshold: Minimum signal strength threshold for early termination
+            enable_early_termination: Enable early termination optimization
             uniform_samples: Number of uniform samples per ray
             resampled_points: Number of resampled points per ray
         """
+        self.device = device
         self.azimuth_divisions = azimuth_divisions
         self.elevation_divisions = elevation_divisions
         self.max_ray_length = max_ray_length
         self.scene_size = scene_size
+        self.prism_network = prism_network
+        self.signal_threshold = signal_threshold
+        self.enable_early_termination = enable_early_termination
         self.uniform_samples = uniform_samples
         self.resampled_points = resampled_points
         
-        # Device detection
+        # Calculate angular resolutions
+        self.azimuth_resolution = 2 * math.pi / azimuth_divisions
+        self.elevation_resolution = math.pi / elevation_divisions
+        
+        # Total number of directions
+        self.total_directions = azimuth_divisions * elevation_divisions
+        
+        # Scene boundaries
+        self.scene_min = -scene_size / 2.0
+        self.scene_max = scene_size / 2.0
+        
+        # Device detection and CUDA setup
         self.device, self.use_cuda = self._detect_device()
         self._setup_cuda()
         
-        # Calculate total directions
-        self.total_directions = azimuth_divisions * elevation_divisions
+        # Validate scene configuration
+        self._validate_scene_config()
         
-        logger.info(f"CUDA Ray Tracer initialized on device: {self.device}")
+        logger.info(f"CUDA Ray Tracer initialized with {azimuth_divisions}x{elevation_divisions} = {self.total_directions} directions")
+        logger.info(f"Scene size: {scene_size}m, boundaries: [{self.scene_min:.1f}, {self.scene_max:.1f}]³")
         if self.use_cuda:
             logger.info("✓ CUDA acceleration enabled - significant performance improvement expected")
         else:
             logger.info("⚠ CUDA not available - using CPU implementation")
+    
+    def _validate_scene_config(self):
+        """Validate scene configuration parameters."""
+        if self.scene_size <= 0:
+            raise ValueError(f"Scene size must be positive, got {self.scene_size}")
+        
+        if self.max_ray_length > self.scene_size:
+            logger.warning(f"Max ray length ({self.max_ray_length}m) exceeds scene size ({self.scene_size}m)")
+            # Adjust max ray length to scene size
+            self.max_ray_length = min(self.max_ray_length, self.scene_size)
+            logger.info(f"Adjusted max ray length to {self.max_ray_length}m")
+        
+        if self.azimuth_divisions <= 0 or self.elevation_divisions <= 0:
+            raise ValueError("Azimuth and elevation divisions must be positive")
     
     def _detect_device(self) -> Tuple[str, bool]:
         """Detect available device and CUDA support."""
@@ -207,14 +320,15 @@ class CUDARayTracer:
             self.device = 'cuda'  # Still use GPU but with PyTorch ops
     
     def generate_direction_vectors(self) -> torch.Tensor:
-        """Generate unit direction vectors for all directions."""
+        """Generate unit direction vectors for all A×B directions."""
         directions = []
         
         for i in range(self.azimuth_divisions):
             for j in range(self.elevation_divisions):
-                phi = i * (2 * math.pi / self.azimuth_divisions)
-                theta = j * (math.pi / self.elevation_divisions)
+                phi = i * self.azimuth_resolution  # Azimuth angle
+                theta = j * self.elevation_resolution  # Elevation angle
                 
+                # Convert to Cartesian coordinates
                 x = math.sin(theta) * math.cos(phi)
                 y = math.sin(theta) * math.sin(phi)
                 z = math.cos(theta)
@@ -287,6 +401,7 @@ class CUDARayTracer:
             self.scene_size,
             self.uniform_samples,
             self.resampled_points,
+            self.signal_threshold,
             grid=(grid_size, 1, 1),
             block=(block_size, 1, 1)
         )
@@ -604,74 +719,406 @@ class CUDARayTracer:
             direction: Direction indices (phi_idx, theta_idx)
             ue_positions: List of UE positions
             selected_subcarriers: Subcarrier information from training interface
+                           - Dict: Mapping UE to subcarrier indices
+                           - torch.Tensor: Tensor of subcarrier indices
+                           - List[int]: List of subcarrier indices
+                           Note: This MUST be provided by the calling code
             antenna_embedding: Base station's antenna embedding parameter C
         
         Returns:
             Dictionary mapping (ue_pos, subcarrier) to received RF signal strength
         """
-        # Convert direction indices to direction vector
-        phi_idx, theta_idx = direction
-        phi = phi_idx * (2 * math.pi / self.azimuth_divisions)
-        theta = theta_idx * (math.pi / self.elevation_divisions)
+        # Validate and normalize selected_subcarriers input
+        subcarrier_indices = self._normalize_subcarrier_input(selected_subcarriers, ue_positions)
         
+        phi_idx, theta_idx = direction
+        
+        # Convert indices to angles
+        phi = phi_idx * self.azimuth_resolution
+        theta = theta_idx * self.elevation_resolution
+        
+        # Create direction vector
         direction_vector = torch.tensor([
             math.sin(theta) * math.cos(phi),
             math.sin(theta) * math.sin(phi),
             math.cos(theta)
         ], dtype=torch.float32, device=self.device)
         
-        # Use existing trace_rays method with single direction
-        # Convert selected_subcarriers to the expected Dict format
-        if isinstance(selected_subcarriers, (list, tuple)):
-            # Convert list to dict format
-            subcarrier_dict = {}
+        # Create ray
+        ray = Ray(base_station_pos, direction_vector, self.max_ray_length, self.device)
+        
+        results = {}
+        
+        for ue_pos in ue_positions:
+            ue_pos_tensor = ue_pos.clone().detach().to(dtype=torch.float32, device=self.device)
+            
+            # Use the normalized subcarrier indices
+            for subcarrier_idx in subcarrier_indices:
+                # Apply discrete radiance field model for ray tracing
+                signal_strength = self._discrete_radiance_ray_tracing(
+                    ray, ue_pos_tensor, subcarrier_idx, antenna_embedding
+                )
+                results[(tuple(ue_pos), subcarrier_idx)] = signal_strength
+        
+        return results
+    
+    def _normalize_subcarrier_input(self, 
+                                  selected_subcarriers: Union[Dict, torch.Tensor, List[int]], 
+                                  ue_positions: List[torch.Tensor]) -> List[int]:
+        """
+        Normalize subcarrier input to a list of indices.
+        
+        Args:
+            selected_subcarriers: Various formats of subcarrier selection
+            ue_positions: List of UE positions for validation
+            
+        Returns:
+            Normalized list of subcarrier indices
+            
+        Raises:
+            ValueError: If subcarrier input is invalid or empty
+        """
+        if selected_subcarriers is None:
+            raise ValueError("selected_subcarriers cannot be None. Must be provided by calling code.")
+        
+        if isinstance(selected_subcarriers, dict):
+            # Dictionary format: extract unique subcarrier indices
+            all_indices = set()
+            
             for ue_pos in ue_positions:
+                # Convert tensor to tuple for comparison
                 ue_key = tuple(ue_pos.tolist())
-                subcarrier_dict[ue_key] = selected_subcarriers
+                
+                if ue_key in selected_subcarriers:
+                    indices = selected_subcarriers[ue_key]
+                    
+                    if isinstance(indices, (list, tuple)):
+                        all_indices.update(indices)
+                    elif isinstance(indices, torch.Tensor):
+                        all_indices.update(indices.tolist())
+                    elif isinstance(indices, (int, float)):
+                        all_indices.add(int(indices))
+                    else:
+                        logger.debug(f"  Unknown type: {type(indices)}, trying to convert")
+                        # Try to convert to int if possible
+                        try:
+                            all_indices.add(int(indices))
+                        except (ValueError, TypeError):
+                            logger.warning(f"Could not convert indices {indices} (type: {type(indices)}) to int")
+                            continue
+                else:
+                    pass
+            
+            if not all_indices:
+                raise ValueError("No valid subcarrier indices found in selected_subcarriers dictionary")
+            
+            return sorted(list(all_indices))
+            
         elif isinstance(selected_subcarriers, torch.Tensor):
-            # Convert tensor to dict format
-            subcarrier_dict = {}
-            for ue_pos in ue_positions:
-                ue_key = tuple(ue_pos.tolist())
-                subcarrier_dict[ue_key] = selected_subcarriers.tolist()
+            # Tensor format: convert to list
+            if selected_subcarriers.numel() == 0:
+                raise ValueError("selected_subcarriers tensor is empty")
+            return selected_subcarriers.flatten().tolist()
+            
+        elif isinstance(selected_subcarriers, (list, tuple)):
+            # List/tuple format: validate and return
+            if not selected_subcarriers:
+                raise ValueError("selected_subcarriers list is empty")
+            return [int(idx) for idx in selected_subcarriers]
+            
         else:
-            subcarrier_dict = selected_subcarriers
+            raise ValueError(f"Unsupported selected_subcarriers type: {type(selected_subcarriers)}")
+    
+    def _discrete_radiance_ray_tracing(self, 
+                                     ray: Ray,
+                                     ue_pos: torch.Tensor,
+                                     subcarrier_idx: int,
+                                     antenna_embedding: torch.Tensor) -> float:
+        """
+        Apply discrete radiance field model for ray tracing using importance-based sampling.
         
-        # Create antenna embeddings tensor with proper shape
-        if antenna_embedding.dim() == 1:
-            # Single embedding, expand to match subcarriers
-            num_subcarriers = len(selected_subcarriers) if isinstance(selected_subcarriers, (list, tuple)) else selected_subcarriers.shape[0]
-            antenna_embeddings = antenna_embedding.unsqueeze(0).expand(num_subcarriers, -1)
+        This method implements the two-stage importance-based sampling:
+        1. Uniform sampling with weight computation
+        2. Importance-based resampling based on computed weights
+        
+        Args:
+            ray: Ray object
+            ue_pos: UE position
+            subcarrier_idx: Subcarrier index
+            antenna_embedding: Antenna embedding parameter
+        
+        Returns:
+            Computed signal strength using discrete radiance field model
+        """
+        if self.prism_network is None:
+            # Fallback to simple distance-based model if no network is provided
+            return self._simple_distance_model(ray, ue_pos, subcarrier_idx, antenna_embedding)
+        
+        # Stage 1: Uniform sampling with weight computation
+        num_uniform_samples = 128  # Higher initial sampling for better weight estimation
+        uniform_positions = self._sample_ray_points(ray, ue_pos, num_uniform_samples)
+        
+        if len(uniform_positions) == 0:
+            return 0.0
+        
+        # Get viewing directions for uniform samples
+        uniform_view_directions = ue_pos.unsqueeze(0).expand(num_uniform_samples, -1) - uniform_positions
+        uniform_view_directions = uniform_view_directions / (torch.norm(uniform_view_directions, dim=1, keepdim=True) + 1e-8)
+        
+        # Create antenna indices
+        antenna_indices = torch.zeros(1, dtype=torch.long, device=self.device)
+        
+        try:
+            # Get network properties for uniform samples
+            with torch.no_grad():
+                uniform_network_outputs = self.prism_network(
+                    sampled_positions=uniform_positions.unsqueeze(0),
+                    ue_positions=ue_pos.unsqueeze(0),
+                    view_directions=uniform_view_directions.mean(dim=0, keepdim=True),
+                    antenna_indices=antenna_indices,
+                    return_intermediates=False
+                )
+            
+            # Extract attenuation factors for weight computation
+            uniform_attenuation = uniform_network_outputs['attenuation_factors'][0, :, 0, subcarrier_idx]  # (num_uniform_samples,)
+            
+            # Stage 2: Importance-based resampling
+            importance_weights = self._compute_importance_weights(uniform_attenuation)
+            resampled_positions = self._importance_based_resampling(
+                uniform_positions, importance_weights, num_samples=64
+            )
+            
+            # Get network properties for resampled points
+            resampled_view_directions = ue_pos.unsqueeze(0).expand(len(resampled_positions), -1) - resampled_positions
+            resampled_view_directions = resampled_view_directions / (torch.norm(resampled_view_directions, dim=1, keepdim=True) + 1e-8)
+            
+            with torch.no_grad():
+                resampled_network_outputs = self.prism_network(
+                    sampled_positions=resampled_positions.unsqueeze(0),
+                    ue_positions=ue_pos.unsqueeze(0),
+                    view_directions=resampled_view_directions.mean(dim=0, keepdim=True),
+                    antenna_indices=antenna_indices,
+                    return_intermediates=False
+                )
+            
+            # Extract final attenuation and radiation factors
+            final_attenuation_factors = resampled_network_outputs['attenuation_factors']
+            final_radiation_factors = resampled_network_outputs['radiation_factors']
+            
+            # Apply discrete radiance field integration with importance sampling
+            signal_strength = self._integrate_along_ray_with_importance(
+                resampled_positions, final_attenuation_factors, final_radiation_factors, 
+                subcarrier_idx, importance_weights
+            )
+            
+            return signal_strength
+            
+        except Exception as e:
+            logger.warning(f"Neural network computation failed: {e}. Using fallback model.")
+            return self._simple_distance_model(ray, ue_pos, subcarrier_idx, antenna_embedding)
+    
+    def _sample_ray_points(self, ray: Ray, ue_pos: torch.Tensor, num_samples: int) -> torch.Tensor:
+        """
+        Sample points along the ray for discrete radiance field computation.
+        
+        Args:
+            ray: Ray object
+            ue_pos: UE position
+            num_samples: Number of sample points
+        
+        Returns:
+            Sampled positions along the ray
+        """
+        # Calculate ray length to UE
+        ray_to_ue = ue_pos - ray.origin
+        ray_length = torch.dot(ray_to_ue, ray.direction)
+        ray_length = torch.clamp(ray_length, 0, self.max_ray_length)
+        
+        # Sample points along the ray
+        t_values = torch.linspace(0, ray_length, num_samples, device=self.device)
+        sampled_positions = ray.origin.unsqueeze(0) + t_values.unsqueeze(1) * ray.direction.unsqueeze(0)
+        
+        # Filter out points outside scene boundaries
+        valid_mask = self.is_position_in_scene(sampled_positions)
+        if not valid_mask:
+            # If no valid positions, return empty tensor
+            return torch.empty(0, 3, device=self.device)
+        
+        # Return only valid positions
+        valid_positions = sampled_positions[valid_mask]
+        
+        # Ensure we have at least some samples
+        if len(valid_positions) < num_samples // 2:
+            logger.warning(f"Only {len(valid_positions)} valid positions out of {num_samples} requested")
+        
+        return valid_positions
+    
+    def _compute_importance_weights(self, attenuation_factors: torch.Tensor) -> torch.Tensor:
+        """
+        Compute importance weights based on attenuation factors.
+        
+        Higher attenuation regions get higher weights for importance sampling.
+        
+        Args:
+            attenuation_factors: Attenuation factors from uniform sampling (num_samples,)
+        
+        Returns:
+            Importance weights for resampling (num_samples,)
+        """
+        # Convert complex attenuation to magnitude
+        attenuation_magnitude = torch.abs(attenuation_factors)
+        
+        # Normalize to [0, 1] range
+        if torch.max(attenuation_magnitude) > 0:
+            normalized_attenuation = attenuation_magnitude / torch.max(attenuation_magnitude)
         else:
-            antenna_embeddings = antenna_embedding
+            normalized_attenuation = torch.ones_like(attenuation_magnitude)
         
-        # Create antenna embeddings tensor with proper shape
-        if antenna_embedding.dim() == 1:
-            # Single embedding, expand to match subcarriers
-            if isinstance(selected_subcarriers, (list, tuple)):
-                num_subcarriers = len(selected_subcarriers)
-            elif isinstance(selected_subcarriers, torch.Tensor):
-                num_subcarriers = selected_subcarriers.shape[0]
-            else:  # dict
-                # Count total subcarriers across all UEs
-                num_subcarriers = sum(len(subcarriers) for subcarriers in selected_subcarriers.values())
-            antenna_embeddings = antenna_embedding.unsqueeze(0).expand(num_subcarriers, -1)
+        # Apply non-linear transformation to emphasize high-attenuation regions
+        # Use power function to increase contrast
+        importance_weights = torch.pow(normalized_attenuation, 2.0)
+        
+        # Add small epsilon to avoid zero weights
+        importance_weights = importance_weights + 1e-6
+        
+        # Normalize weights to sum to 1
+        importance_weights = importance_weights / torch.sum(importance_weights)
+        
+        return importance_weights
+    
+    def _importance_based_resampling(self, 
+                                   uniform_positions: torch.Tensor,
+                                   importance_weights: torch.Tensor,
+                                   num_samples: int) -> torch.Tensor:
+        """
+        Perform importance-based resampling based on computed weights.
+        
+        Args:
+            uniform_positions: Uniformly sampled positions (num_uniform_samples, 3)
+            importance_weights: Importance weights for each position (num_uniform_samples,)
+            num_samples: Number of samples to select
+        
+        Returns:
+            Resampled positions based on importance (num_samples, 3)
+        """
+        num_uniform_samples = uniform_positions.shape[0]
+        
+        if num_samples >= num_uniform_samples:
+            # If we want more samples than available, return all with repetition
+            return uniform_positions
+        
+        # Use importance sampling to select positions
+        # Higher weight positions have higher probability of being selected
+        selected_indices = torch.multinomial(importance_weights, num_samples, replacement=True)
+        
+        # Get resampled positions
+        resampled_positions = uniform_positions[selected_indices]
+        
+        return resampled_positions
+    
+    def _integrate_along_ray_with_importance(self,
+                                           sampled_positions: torch.Tensor,
+                                           attenuation_factors: torch.Tensor,
+                                           radiation_factors: torch.Tensor,
+                                           subcarrier_idx: int,
+                                           importance_weights: torch.Tensor) -> float:
+        """
+        Integrate signal strength along the ray using importance sampling.
+        
+        Args:
+            sampled_positions: Sampled positions along ray (num_samples, 3)
+            attenuation_factors: Attenuation factors from network (1, num_samples, N_UE, K)
+            radiation_factors: Radiation factors from network (1, N_UE, K)
+            subcarrier_idx: Subcarrier index
+            importance_weights: Importance weights for importance sampling
+        
+        Returns:
+            Integrated signal strength with importance sampling correction
+        """
+        num_samples = sampled_positions.shape[0]
+        
+        # Extract attenuation and radiation for the specific subcarrier
+        if subcarrier_idx >= attenuation_factors.shape[-1]:
+            subcarrier_idx = 0  # Fallback to first subcarrier
+        
+        attenuation = attenuation_factors[0, :, 0, subcarrier_idx]  # (num_samples,)
+        radiation = radiation_factors[0, 0, subcarrier_idx]  # scalar
+        
+        # Calculate step size
+        if num_samples > 1:
+            distances = torch.norm(sampled_positions[1:] - sampled_positions[:-1], dim=1)
+            step_size = distances.mean()
         else:
-            antenna_embeddings = antenna_embedding
+            step_size = 1.0
         
-        results = self.trace_rays(
-            base_station_pos, ue_positions, subcarrier_dict, antenna_embeddings
-        )
+        # Apply discrete radiance field integration with importance sampling
+        # S(P_RX, ω) ≈ Σ exp(-Σ ρ(P_v^j) Δt) ρ(P_v^k) S(P_v^k, -ω) Δt / p(P_v^k)
+        cumulative_attenuation = torch.zeros(num_samples, device=self.device)
+        signal_contributions = torch.zeros(num_samples, device=self.device)
         
-        # Convert results to single ray format
-        # The trace_rays method returns results in format (ue_pos, subcarrier, direction_idx)
-        # We need to extract results for the first direction only
-        single_ray_results = {}
-        for (ue_pos, subcarrier, dir_idx), signal_strength in results.items():
-            if dir_idx == 0:  # Only first direction
-                single_ray_results[(ue_pos, subcarrier)] = signal_strength
+        for k in range(num_samples):
+            # Calculate cumulative attenuation up to point k
+            if k > 0:
+                cumulative_attenuation[k] = cumulative_attenuation[k-1] + torch.abs(attenuation[k-1]) * step_size
+            
+            # Calculate signal contribution from point k with importance sampling correction
+            attenuation_factor = torch.exp(-cumulative_attenuation[k])
+            local_contribution = torch.abs(attenuation[k]) * torch.abs(radiation) * step_size
+            
+            # Apply importance sampling correction factor
+            # The correction factor accounts for the probability of selecting this sample
+            if k < len(importance_weights):
+                importance_correction = 1.0 / (importance_weights[k] + 1e-8)
+            else:
+                importance_correction = 1.0
+            
+            signal_contributions[k] = attenuation_factor * local_contribution * importance_correction
+            
+            # Early termination: stop if signal strength falls below threshold
+            if self.enable_early_termination and attenuation_factor < self.signal_threshold:
+                logger.debug(f"Early termination at sample {k}/{num_samples}, signal strength: {attenuation_factor:.2e}")
+                # Zero out remaining contributions
+                signal_contributions[k+1:] = 0.0
+                break
         
-        return single_ray_results
+        # Sum all contributions
+        total_signal = torch.sum(signal_contributions)
+        
+        return total_signal.item()
+    
+    def _simple_distance_model(self, 
+                              ray: Ray,
+                              ue_pos: torch.Tensor,
+                              subcarrier_idx: int,
+                              antenna_embedding: torch.Tensor) -> float:
+        """
+        Simple distance-based model as fallback when neural network is not available.
+        
+        Args:
+            ray: Ray object
+            ue_pos: UE position
+            subcarrier_idx: Subcarrier index
+            antenna_embedding: Antenna embedding parameter
+        
+        Returns:
+            Computed signal strength using simple model
+        """
+        # Calculate distance from base station to UE
+        distance = torch.norm(ue_pos - ray.origin)
+        
+        # Apply distance-based attenuation (exponential decay model)
+        base_attenuation = torch.exp(-distance / 50.0)  # 50m characteristic distance
+        
+        # Apply antenna embedding influence
+        antenna_factor = torch.norm(antenna_embedding) / math.sqrt(128)  # Normalize to [0, 1]
+        
+        # Apply frequency-dependent effects (subcarrier index)
+        frequency_factor = 1.0 / (1.0 + 0.1 * subcarrier_idx)  # Simple frequency dependency
+        
+        # Combine factors
+        signal_strength = base_attenuation * antenna_factor * frequency_factor
+        
+        return signal_strength.item()
     
     def accumulate_signals(self, 
                           base_station_pos: torch.Tensor,
@@ -681,68 +1128,138 @@ class CUDARayTracer:
         """
         Accumulate RF signals using MLP-based direction sampling with antenna embedding C.
         
+        This method implements the design document's MLP-based direction sampling:
+        1. Use AntennaNetwork to compute directional importance based on antenna embedding C
+        2. Select top-K directions based on importance
+        3. Only trace rays for selected directions
+        
         Args:
             base_station_pos: Base station position
             ue_positions: List of UE positions
             selected_subcarriers: Subcarrier information from training interface
+                           - Dict: Mapping UE to subcarrier indices
+                           - torch.Tensor: Tensor of subcarrier indices
+                           - List[int]: List of subcarrier indices
+                           Note: This MUST be provided by the calling code
             antenna_embedding: Base station's antenna embedding parameter C
         
         Returns:
             Accumulated signal strength matrix for all virtual links
         """
-        # Generate all direction vectors
-        direction_vectors = self.generate_direction_vectors()
-        
-        # Use existing trace_rays method for all directions
-        # Convert selected_subcarriers to the expected Dict format
-        if isinstance(selected_subcarriers, (list, tuple)):
-            # Convert list to dict format
-            subcarrier_dict = {}
-            for ue_pos in ue_positions:
-                ue_key = tuple(ue_pos.tolist())
-                subcarrier_dict[ue_key] = selected_subcarriers
-        elif isinstance(selected_subcarriers, torch.Tensor):
-            # Convert tensor to dict format
-            subcarrier_dict = {}
-            for ue_pos in ue_positions:
-                ue_key = tuple(ue_pos.tolist())
-                subcarrier_dict[ue_key] = selected_subcarriers.tolist()
-        else:
-            subcarrier_dict = selected_subcarriers
-        
-        # Create antenna embeddings tensor with proper shape
-        if antenna_embedding.dim() == 1:
-            # Single embedding, expand to match subcarriers
-            num_subcarriers = len(selected_subcarriers) if isinstance(selected_subcarriers, (list, tuple)) else selected_subcarriers.shape[0]
-            antenna_embeddings = antenna_embedding.unsqueeze(0).expand(num_subcarriers, -1)
-        else:
-            antenna_embeddings = antenna_embedding
-        
-        # Create antenna embeddings tensor with proper shape
-        if antenna_embedding.dim() == 1:
-            # Single embedding, expand to match subcarriers
-            if isinstance(selected_subcarriers, (list, tuple)):
-                num_subcarriers = len(selected_subcarriers)
-            elif isinstance(selected_subcarriers, torch.Tensor):
-                num_subcarriers = selected_subcarriers.shape[0]
-            else:  # dict
-                # Count total subcarriers across all UEs
-                num_subcarriers = sum(len(subcarriers) for subcarriers in selected_subcarriers.values())
-            antenna_embeddings = antenna_embedding.unsqueeze(0).expand(num_subcarriers, -1)
-        else:
-            antenna_embeddings = antenna_embedding
-        
-        all_results = self.trace_rays(
-            base_station_pos, ue_positions, subcarrier_dict, antenna_embeddings
-        )
-        
-        # Accumulate signals across all directions
         accumulated_signals = {}
-        for (ue_pos, subcarrier, dir_idx), signal_strength in all_results.items():
-            key = (ue_pos, subcarrier)
-            if key not in accumulated_signals:
-                accumulated_signals[key] = 0.0
-            accumulated_signals[key] += signal_strength
+        
+        # Debug logging
+        logger.debug(f"accumulate_signals called with selected_subcarriers type: {type(selected_subcarriers)}")
+        logger.debug(f"ue_positions: {len(ue_positions)} positions")
+        
+        # Additional debugging for dictionary format
+        if isinstance(selected_subcarriers, dict):
+            logger.debug(f"Dictionary keys count: {len(selected_subcarriers.keys())}")
+        
+        subcarrier_indices = self._normalize_subcarrier_input(selected_subcarriers, ue_positions)
+        
+        if self.prism_network is None:
+            # Fallback: iterate through all directions if no network is available
+            return self._accumulate_signals_fallback(
+                base_station_pos, ue_positions, selected_subcarriers, antenna_embedding
+            )
+        
+        try:
+            # Use AntennaNetwork to get directional importance based on antenna embedding C
+            with torch.no_grad():
+                # Get directional importance matrix from AntennaNetwork
+                directional_importance = self.prism_network.antenna_network(antenna_embedding.unsqueeze(0))
+                
+                # Get top-K directions for efficient sampling
+                top_k_directions, top_k_importance = self.prism_network.antenna_network.get_top_k_directions(
+                    directional_importance, k=min(32, self.azimuth_divisions * self.elevation_divisions // 4)
+                )
+                
+                # Extract direction indices for the first batch element
+                selected_directions = top_k_directions[0]  # Shape: (k, 2)
+                
+            # Only trace rays for MLP-selected directions
+            for i in range(selected_directions.shape[0]):
+                phi_idx = selected_directions[i, 0].item()
+                theta_idx = selected_directions[i, 1].item()
+                direction = (phi_idx, theta_idx)
+                
+                # Trace ray for this selected direction with antenna embedding
+                ray_results = self.trace_ray(
+                    base_station_pos, direction, ue_positions, selected_subcarriers, antenna_embedding
+                )
+                
+                # Accumulate signals for each virtual link
+                for (ue_pos, subcarrier), signal_strength in ray_results.items():
+                    if (ue_pos, subcarrier) not in accumulated_signals:
+                        accumulated_signals[(ue_pos, subcarrier)] = 0.0
+                    accumulated_signals[(ue_pos, subcarrier)] += signal_strength
+            
+            return accumulated_signals
+            
+        except Exception as e:
+            logger.warning(f"MLP-based direction sampling failed: {e}. Using fallback method.")
+            return self._accumulate_signals_fallback(
+                base_station_pos, ue_positions, selected_subcarriers, antenna_embedding
+            )
+    
+    def _accumulate_signals_fallback(self, 
+                                   base_station_pos: torch.Tensor,
+                                   ue_positions: List[torch.Tensor],
+                                   selected_subcarriers: Union[Dict, torch.Tensor, List[int]],
+                                   antenna_embedding: torch.Tensor) -> Dict:
+        """
+        Fallback method: accumulate signals from all directions (traditional approach).
+        
+        Args:
+            base_station_pos: Base station position
+            ue_positions: List of UE positions
+            selected_subcarriers: Subcarrier information from training interface
+                           - Dict: Mapping UE to subcarrier indices
+                           - torch.Tensor: Tensor of subcarrier indices
+                           - List[int]: List of subcarrier indices
+                           Note: This MUST be provided by the calling code
+            antenna_embedding: Base station's antenna embedding parameter C
+        
+        Returns:
+            Accumulated signal strength matrix for all virtual links
+        """
+        accumulated_signals = {}
+        
+        # Debug logging
+        logger.debug(f"_accumulate_signals_fallback called with selected_subcarriers type: {type(selected_subcarriers)}")
+        
+        # Iterate through all A × B directions
+        for phi in range(self.azimuth_divisions):
+            for theta in range(self.elevation_divisions):
+                direction = (phi, theta)
+                
+                # Trace ray for this direction with antenna embedding
+                ray_results = self.trace_ray(
+                    base_station_pos, direction, ue_positions, selected_subcarriers, antenna_embedding
+                )
+                
+                # Debug: print ray results for first few directions
+                if phi == 0 and theta == 0:
+                    logger.debug(f"First direction results: {ray_results}")
+                    logger.debug(f"First direction keys: {list(ray_results.keys())}")
+                
+                # Accumulate signals for each virtual link
+                for (ue_pos, subcarrier), signal_strength in ray_results.items():
+                    # Ensure consistent key format
+                    if isinstance(ue_pos, torch.Tensor):
+                        ue_key = tuple(ue_pos.tolist())
+                    else:
+                        ue_key = ue_pos
+                    
+                    key = (ue_key, subcarrier)
+                    
+                    if key not in accumulated_signals:
+                        accumulated_signals[key] = 0.0
+                    accumulated_signals[key] += signal_strength
+        
+        logger.debug(f"Final accumulated signals: {len(accumulated_signals)} results")
+        logger.debug(f"Final keys: {list(accumulated_signals.keys())}")
         
         return accumulated_signals
     
@@ -755,18 +1272,24 @@ class CUDARayTracer:
         """
         Perform adaptive ray tracing using built-in AntennaNetwork for direction selection.
         
+        This method uses the integrated AntennaNetwork to select important directions
+        based on antenna embedding C, providing better integration with the neural network.
+        
         Args:
             base_station_pos: Base station position
             antenna_embedding: Base station's antenna embedding parameter C
             ue_positions: List of UE positions
             selected_subcarriers: Subcarrier information from training interface
+                           - Dict: Mapping UE to subcarrier indices
+                           - torch.Tensor: Tensor of subcarrier indices
+                           - List[int]: List of subcarrier indices
+                           Note: This MUST be provided by the calling code
             top_k: Number of top directions to select
         
         Returns:
             Accumulated signal strength for selected directions only
         """
-        # For now, use the main accumulate_signals method
-        # In the future, this could implement MLP-based direction selection
+        # Use the main accumulate_signals method which already implements MLP-based sampling
         return self.accumulate_signals(
             base_station_pos, ue_positions, selected_subcarriers, antenna_embedding
         )
@@ -780,10 +1303,19 @@ class CUDARayTracer:
         """
         Perform pyramid ray tracing with hierarchical sampling.
         
+        This method implements the pyramid ray tracing technique from the design document:
+        1. Spatial subdivision into pyramidal regions
+        2. Hierarchical sampling strategy
+        3. Monte Carlo integration within truncated cone regions
+        
         Args:
             base_station_pos: Base station position
             ue_positions: List of UE positions
             selected_subcarriers: Subcarrier information from training interface
+                           - Dict: Mapping UE to subcarrier indices
+                           - torch.Tensor: Tensor of subcarrier indices
+                           - List[int]: List of subcarrier indices
+                           Note: This MUST be provided by the calling code
             antenna_embedding: Base station's antenna embedding parameter C
             pyramid_levels: Number of hierarchical levels
         
@@ -806,10 +1338,10 @@ class CUDARayTracer:
                 for theta_idx in range(0, self.elevation_divisions, level_factor):
                     direction = (phi_idx, theta_idx)
                     
-                    # Trace ray for this direction
-                    ray_results = self.trace_ray(
-                        base_station_pos, direction, ue_positions,
-                        selected_subcarriers, antenna_embedding
+                    # Apply Monte Carlo integration within the pyramidal region
+                    ray_results = self._monte_carlo_pyramid_integration(
+                        base_station_pos, direction, ue_positions, 
+                        selected_subcarriers, antenna_embedding, level_factor
                     )
                     
                     # Accumulate signals with level weighting
@@ -820,6 +1352,62 @@ class CUDARayTracer:
                         accumulated_signals[(ue_pos, subcarrier)] += signal_strength * level_weight
         
         return accumulated_signals
+    
+    def _monte_carlo_pyramid_integration(self,
+                                       base_station_pos: torch.Tensor,
+                                       center_direction: Tuple[int, int],
+                                       ue_positions: List[torch.Tensor],
+                                       selected_subcarriers: Union[Dict, torch.Tensor, List[int]],
+                                       antenna_embedding: torch.Tensor,
+                                       pyramid_size: int,
+                                       num_samples: int = 4) -> Dict:
+        """
+        Perform Monte Carlo integration within a pyramidal region.
+        
+        Args:
+            base_station_pos: Base station position
+            center_direction: Center direction of the pyramid
+            ue_positions: List of UE positions
+            selected_subcarriers: Subcarrier information from training interface
+                           - Dict: Mapping UE to subcarrier indices
+                           - torch.Tensor: Tensor of subcarrier indices
+                           - List[int]: List of subcarrier indices
+                           Note: This MUST be provided by the calling code
+            antenna_embedding: Antenna embedding parameter
+            pyramid_size: Size of the pyramidal region
+            num_samples: Number of Monte Carlo samples
+        
+        Returns:
+            Integrated signal strength for the pyramidal region
+        """
+        phi_center, theta_center = center_direction
+        results = {}
+        
+        # Generate random samples within the pyramidal region
+        for _ in range(num_samples):
+            # Random offset within the pyramid
+            phi_offset = torch.randint(-pyramid_size//2, pyramid_size//2 + 1, (1,)).item()
+            theta_offset = torch.randint(-pyramid_size//2, pyramid_size//2 + 1, (1,)).item()
+            
+            # Clamp to valid ranges
+            phi_sample = max(0, min(self.azimuth_divisions - 1, phi_center + phi_offset))
+            theta_sample = max(0, min(self.elevation_divisions - 1, theta_center + theta_offset))
+            
+            sample_direction = (phi_sample, theta_sample)
+            
+            # Trace ray for this sample direction
+            sample_results = self.trace_ray(
+                base_station_pos, sample_direction, ue_positions,
+                selected_subcarriers, antenna_embedding
+            )
+            
+            # Accumulate Monte Carlo samples
+            for (ue_pos, subcarrier), signal_strength in sample_results.items():
+                if (ue_pos, subcarrier) not in results:
+                    results[(ue_pos, subcarrier)] = 0.0
+                results[(ue_pos, subcarrier)] += signal_strength / num_samples
+        
+        return results
     
     def get_ray_count_analysis(self, num_bs: int, num_ue: int, num_subcarriers: int) -> Dict:
         """
@@ -842,3 +1430,15 @@ class CUDARayTracer:
             'total_rays': total_rays,
             'ray_count_formula': f"N_total = N_BS × A × B × N_UE × K = {num_bs} × {self.total_directions} × {num_ue} × {num_subcarriers}"
         }
+    
+    # NOTE: This ray tracer does NOT select subcarriers internally.
+    # All subcarrier selection must be provided by the calling code (typically PrismTrainingInterface)
+    # to ensure consistency across the training pipeline and proper loss computation.
+    #
+    # The ray tracer expects:
+    # - selected_subcarriers: Dictionary, tensor, or list specifying which subcarriers to process
+    # - No internal subcarrier selection logic
+    # - Full control by the training interface over which subcarriers are used
+    #
+    # This design ensures that the training interface has full control over which subcarriers
+    # are used for loss computation, preventing any mismatch between ray tracing and loss calculation.

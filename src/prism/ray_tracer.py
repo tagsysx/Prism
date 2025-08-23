@@ -99,7 +99,8 @@ class DiscreteRayTracer:
                  device: str = 'cpu',
                  prism_network=None,
                  signal_threshold: float = 1e-6,
-                 enable_early_termination: bool = True):
+                 enable_early_termination: bool = True,
+                 top_k_directions: int = None):
         """
         Initialize discrete ray tracer.
         
@@ -112,6 +113,7 @@ class DiscreteRayTracer:
             prism_network: PrismNetwork instance for getting attenuation and radiance properties
             signal_threshold: Minimum signal strength threshold for early termination
             enable_early_termination: Enable early termination optimization
+            top_k_directions: Number of top-K directions to select for MLP-based sampling (if None, uses default formula)
         """
         self.device = device
         self.azimuth_divisions = azimuth_divisions
@@ -121,6 +123,15 @@ class DiscreteRayTracer:
         self.prism_network = prism_network
         self.signal_threshold = signal_threshold
         self.enable_early_termination = enable_early_termination
+        
+        # Set top-K directions for MLP-based sampling
+        if top_k_directions is not None:
+            self.top_k_directions = top_k_directions
+            logger.info(f"Using configured top-K directions: {self.top_k_directions}")
+        else:
+            # Default formula: min(32, total_directions // 4)
+            self.top_k_directions = min(32, (azimuth_divisions * elevation_divisions) // 4)
+            logger.info(f"Using default top-K formula: min(32, {azimuth_divisions * elevation_divisions} // 4) = {self.top_k_directions}")
         
         # Calculate angular resolutions
         self.azimuth_resolution = 2 * math.pi / azimuth_divisions
@@ -277,7 +288,7 @@ class DiscreteRayTracer:
         results = {}
         
         for ue_pos in ue_positions:
-            ue_pos_tensor = torch.tensor(ue_pos, dtype=torch.float32, device=self.device)
+            ue_pos_tensor = ue_pos.clone().detach().to(dtype=torch.float32, device=self.device)
             
             # Use the normalized subcarrier indices
             for subcarrier_idx in subcarrier_indices:
@@ -311,17 +322,39 @@ class DiscreteRayTracer:
         if isinstance(selected_subcarriers, dict):
             # Dictionary format: extract unique subcarrier indices
             all_indices = set()
+            # logger.debug(f"Processing dictionary with {len(selected_subcarriers)} keys")  # 屏蔽重复输出
+            
             for ue_pos in ue_positions:
                 # Convert tensor to tuple for comparison
                 ue_key = tuple(ue_pos.tolist())
+                # logger.debug(f"Looking for UE key: {ue_key}")  # 屏蔽具体坐标值
+                
                 if ue_key in selected_subcarriers:
                     indices = selected_subcarriers[ue_key]
+                    # logger.debug(f"Found indices: {type(indices)} = {indices}")  # 屏蔽具体索引值
+                    
                     if isinstance(indices, (list, tuple)):
+                        # logger.debug(f"  Processing list/tuple with {len(indices)} elements")  # 屏蔽重复输出
                         all_indices.update(indices)
                     elif isinstance(indices, torch.Tensor):
+                        # logger.debug(f"  Processing tensor with shape {indices.shape}")  # 屏蔽重复输出
                         all_indices.update(indices.tolist())
-                    else:
+                    elif isinstance(indices, (int, float)):
+                        # logger.debug(f"  Processing single value: {indices}")  # 屏蔽重复输出
                         all_indices.add(int(indices))
+                    else:
+                        logger.debug(f"  Unknown type: {type(indices)}, trying to convert")
+                        # Try to convert to int if possible
+                        try:
+                            all_indices.add(int(indices))
+                        except (ValueError, TypeError):
+                            logger.warning(f"Could not convert indices {indices} (type: {type(indices)}) to int")
+                            continue
+                else:
+                    # logger.debug(f"UE key {ue_key} not found in selected_subcarriers")  # 屏蔽具体坐标值
+                    pass
+            
+            # logger.debug(f"Collected {len(all_indices)} unique indices")  # 屏蔽重复输出
             
             if not all_indices:
                 raise ValueError("No valid subcarrier indices found in selected_subcarriers dictionary")
@@ -663,6 +696,23 @@ class DiscreteRayTracer:
         """
         accumulated_signals = {}
         
+        # Debug logging
+        logger.debug(f"accumulate_signals called with selected_subcarriers type: {type(selected_subcarriers)}")
+        # logger.debug(f"selected_subcarriers content: {selected_subcarriers}")  # 屏蔽数据内容
+        logger.debug(f"ue_positions: {len(ue_positions)} positions")
+        
+        # Additional debugging for dictionary format
+        if isinstance(selected_subcarriers, dict):
+            logger.debug(f"Dictionary keys count: {len(selected_subcarriers.keys())}")
+            # for key, value in selected_subcarriers.items():
+            #     logger.debug(f"    Key {key}: {type(value)} = {value}")  # 屏蔽数据内容
+            #     if isinstance(value, (list, tuple)):
+            #         logger.debug(f"    Length: {len(value)}")
+            #     elif isinstance(value, torch.Tensor):
+            #         logger.debug(f"    Shape: {value.shape}, dtype: {value.dtype}")
+        
+        subcarrier_indices = self._normalize_subcarrier_input(selected_subcarriers, ue_positions)
+        
         if self.prism_network is None:
             # Fallback: iterate through all directions if no network is available
             return self._accumulate_signals_fallback(
@@ -677,7 +727,7 @@ class DiscreteRayTracer:
                 
                 # Get top-K directions for efficient sampling
                 top_k_directions, top_k_importance = self.prism_network.antenna_network.get_top_k_directions(
-                    directional_importance, k=min(32, self.azimuth_divisions * self.elevation_divisions // 4)
+                    directional_importance, k=self.top_k_directions
                 )
                 
                 # Extract direction indices for the first batch element
@@ -730,6 +780,10 @@ class DiscreteRayTracer:
             Accumulated signal strength matrix for all virtual links
         """
         accumulated_signals = {}
+        
+        # Debug logging
+        logger.debug(f"_accumulate_signals_fallback called with selected_subcarriers type: {type(selected_subcarriers)}")
+        # logger.debug(f"selected_subcarriers content: {selected_subcarriers}")  # 屏蔽数据内容
         
         # Iterate through all A × B directions
         for phi in range(self.azimuth_divisions):
