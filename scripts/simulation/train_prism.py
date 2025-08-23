@@ -32,9 +32,9 @@ from prism.networks.prism_network import PrismNetwork
 from prism.ray_tracer import DiscreteRayTracer
 from prism.training_interface import PrismTrainingInterface
 
-# Configure logging
+# Configure logging - will be set after config loading
 logging.basicConfig(
-    level=logging.DEBUG,  # Changed to DEBUG for detailed logging
+    level=logging.INFO,  # Default level, will be overridden by config
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('training.log'),
@@ -118,7 +118,14 @@ class PrismTrainer:
         """Load configuration from YAML file"""
         with open(self.config_path, 'r') as f:
             config = yaml.safe_load(f)
+        
+        # Set logging level from config
+        log_level = config.get('logging', {}).get('log_level', 'INFO')
+        numeric_level = getattr(logging, log_level.upper(), logging.INFO)
+        logging.getLogger().setLevel(numeric_level)
+        
         logger.info(f"Loaded configuration from {self.config_path}")
+        logger.info(f"Logging level set to: {log_level}")
         return config
     
     def _setup_model(self):
@@ -158,6 +165,26 @@ class PrismTrainer:
         logger.info(f"  num_bs_antennas: {self.prism_network.num_bs_antennas}")
         
         # Create DiscreteRayTracer with PrismNetwork for MLP-based direction selection
+        # Read parallel processing configuration from config file
+        parallel_config = self.config.get('performance', {})
+        ray_tracer_config = self.config.get('ray_tracer_integration', {})
+        
+        # Parallel processing settings with fallback to config values
+        enable_parallel = parallel_config.get('enable_parallel_processing', True)
+        max_workers = parallel_config.get('num_workers', 4)
+        use_multiprocessing = parallel_config.get('use_multiprocessing', False)
+        
+        # Override with ray_tracer_integration settings if available
+        if 'parallel_antenna_processing' in ray_tracer_config:
+            enable_parallel = ray_tracer_config['parallel_antenna_processing']
+        if 'num_workers' in ray_tracer_config:
+            max_workers = ray_tracer_config['num_workers']
+        
+        logger.info(f"Parallel processing configuration:")
+        logger.info(f"  - Enabled: {enable_parallel}")
+        logger.info(f"  - Max workers: {max_workers}")
+        logger.info(f"  - Use multiprocessing: {use_multiprocessing}")
+        
         self.ray_tracer = DiscreteRayTracer(
             azimuth_divisions=rt_config['azimuth_divisions'],
             elevation_divisions=rt_config['elevation_divisions'],
@@ -167,7 +194,10 @@ class PrismTrainer:
             prism_network=self.prism_network,  # Enable MLP-based direction selection
             signal_threshold=rt_config.get('signal_threshold', 1e-6),
             enable_early_termination=rt_config.get('enable_early_termination', True),
-            top_k_directions=rt_config.get('top_k_directions', None)  # Use configured K value
+            top_k_directions=rt_config.get('top_k_directions', None),  # Use configured K value
+            enable_parallel_processing=enable_parallel,  # Read from config
+            max_workers=max_workers,  # Read from config
+            use_multiprocessing=use_multiprocessing  # Read from config
         )
         
         # Create PrismTrainingInterface
@@ -222,18 +252,18 @@ class PrismTrainer:
         print(f"📂 Loading data from: {self.data_path}")
         
         with h5py.File(self.data_path, 'r') as f:
-            # Load UE positions
-            ue_positions = f['ue_positions'][:]
+            # Load UE positions from nested group
+            ue_positions = f['positions']['ue_positions'][:]
             logger.info(f"Loaded {len(ue_positions)} UE positions")
             print(f"   📍 UE positions: {len(ue_positions)} samples")
             
-            # Load channel responses (CSI)
-            csi_data = f['channel_responses'][:]
+            # Load channel responses (CSI) from nested group
+            csi_data = f['channel_data']['channel_responses'][:]
             logger.info(f"Loaded CSI data with shape: {csi_data.shape}")
             print(f"   📡 CSI data: {csi_data.shape}")
             
-            # Load BS position
-            bs_position = f['bs_position'][:]
+            # Load BS position from nested group
+            bs_position = f['positions']['bs_position'][:]
             logger.info(f"BS position: {bs_position}")
             print(f"   🏢 BS position: {bs_position}")
             
@@ -241,18 +271,22 @@ class PrismTrainer:
             if 'antenna_indices' in f:
                 antenna_indices = f['antenna_indices'][:]
                 logger.info(f"Loaded antenna indices with shape: {antenna_indices.shape}")
-                print(f"   📡 Antenna indices: {antenna_indices.shape}")
+                print(f"   📡 Antenna indices: {len(antenna_indices)}")
             else:
                 # Create default antenna indices if not available
-                num_bs_antennas = csi_data.shape[1] if len(csi_data.shape) > 1 else 1
+                num_bs_antennas = csi_data.shape[3] if len(csi_data.shape) > 3 else 64  # Shape is (100, 408, 4, 64)
                 antenna_indices = np.arange(num_bs_antennas)
-                logger.info(f"Created default antenna indices: {antenna_indices}")
+                logger.info(f"Created default antenna indices: {len(antenna_indices)}")
                 print(f"   📡 Created default antenna indices: {len(antenna_indices)}")
             
-            # Load simulation parameters
-            params = dict(f['simulation_params'].attrs)
-            logger.info(f"Simulation parameters: {params}")
-            print(f"   ⚙️  Simulation parameters loaded")
+            # Load simulation parameters if available
+            if 'simulation_config' in f and hasattr(f['simulation_config'], 'attrs'):
+                params = dict(f['simulation_config'].attrs)
+                logger.info(f"Simulation parameters: {params}")
+                print(f"   ⚙️  Simulation parameters loaded")
+            else:
+                logger.info("No simulation parameters found")
+                print(f"   ⚙️  No simulation parameters found")
             
             # Check if this is split data
             if 'split_type' in f.attrs:

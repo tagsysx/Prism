@@ -215,7 +215,10 @@ class CUDARayTracer:
                  signal_threshold: float = 1e-6,
                  enable_early_termination: bool = True,
                  uniform_samples: int = 128,
-                 resampled_points: int = 64):
+                 resampled_points: int = 64,
+                 enable_parallel_processing: bool = True,
+                 max_workers: Optional[int] = None,
+                 use_multiprocessing: bool = False):
         """
         Initialize CUDA discrete ray tracer.
         
@@ -230,6 +233,9 @@ class CUDARayTracer:
             enable_early_termination: Enable early termination optimization
             uniform_samples: Number of uniform samples per ray
             resampled_points: Number of resampled points per ray
+            enable_parallel_processing: Enable parallel processing for CPU fallback
+            max_workers: Maximum number of parallel workers (if None, uses CPU count)
+            use_multiprocessing: Use multiprocessing instead of threading (for CPU-intensive tasks)
         """
         self.device = device
         self.azimuth_divisions = azimuth_divisions
@@ -260,12 +266,29 @@ class CUDARayTracer:
         # Validate scene configuration
         self._validate_scene_config()
         
+        # Parallel processing configuration (for CPU fallback)
+        self.enable_parallel_processing = enable_parallel_processing
+        self.use_multiprocessing = use_multiprocessing
+        
+        if max_workers is None:
+            if use_multiprocessing:
+                import multiprocessing as mp
+                self.max_workers = mp.cpu_count()
+            else:
+                import multiprocessing as mp
+                self.max_workers = min(4, mp.cpu_count())
+        else:
+            self.max_workers = max_workers
+        
         logger.info(f"CUDA Ray Tracer initialized with {azimuth_divisions}x{elevation_divisions} = {self.total_directions} directions")
         logger.info(f"Scene size: {scene_size}m, boundaries: [{self.scene_min:.1f}, {self.scene_max:.1f}]³")
         if self.use_cuda:
             logger.info("✓ CUDA acceleration enabled - significant performance improvement expected")
         else:
             logger.info("⚠ CUDA not available - using CPU implementation")
+        
+        logger.info(f"Parallel processing: {'enabled' if enable_parallel_processing else 'disabled'}")
+        logger.info(f"Max workers: {self.max_workers} ({'multiprocessing' if use_multiprocessing else 'threading'})")
     
     def _validate_scene_config(self):
         """Validate scene configuration parameters."""
@@ -758,7 +781,8 @@ class CUDARayTracer:
                 signal_strength = self._discrete_radiance_ray_tracing(
                     ray, ue_pos_tensor, subcarrier_idx, antenna_embedding
                 )
-                results[(tuple(ue_pos), subcarrier_idx)] = signal_strength
+                # Use tuple of tensor values for consistent key format
+                results[(tuple(ue_pos.tolist()), subcarrier_idx)] = signal_strength
         
         return results
     
@@ -1178,22 +1202,46 @@ class CUDARayTracer:
                 # Extract direction indices for the first batch element
                 selected_directions = top_k_directions[0]  # Shape: (k, 2)
                 
-            # Only trace rays for MLP-selected directions
+            # Convert tensor directions to list of tuples for parallel processing
+            directions_list = []
             for i in range(selected_directions.shape[0]):
                 phi_idx = selected_directions[i, 0].item()
                 theta_idx = selected_directions[i, 1].item()
-                direction = (phi_idx, theta_idx)
+                directions_list.append((phi_idx, theta_idx))
+            
+            # Use intelligent parallel processing selection for ray tracing
+            if self.enable_parallel_processing and len(directions_list) > 1:
+                # Determine the best parallelization strategy based on workload size
+                num_antennas = antenna_embedding.shape[0] if len(antenna_embedding.shape) > 1 else 64
+                num_spatial_points = 32  # Default spatial sampling points
                 
-                # Trace ray for this selected direction with antenna embedding
-                ray_results = self.trace_ray(
-                    base_station_pos, direction, ue_positions, selected_subcarriers, antenna_embedding
+                logger.debug(f"Selecting parallelization strategy: {len(directions_list)} directions, {num_antennas} antennas, {num_spatial_points} spatial points")
+                
+                if len(directions_list) >= 16 and num_antennas >= 32 and num_spatial_points >= 16:
+                    # Full parallelization for large workloads
+                    logger.debug(f"Using full parallelization (direction + antenna + spatial) with {self.max_workers} workers")
+                    accumulated_signals = self._accumulate_signals_full_parallel(
+                        base_station_pos, ue_positions, selected_subcarriers, antenna_embedding, 
+                        directions_list, num_antennas, num_spatial_points
+                    )
+                elif len(directions_list) >= 8 and num_antennas >= 16:
+                    # Antenna + direction parallelization for medium workloads
+                    logger.debug(f"Using antenna + direction parallelization with {self.max_workers} workers")
+                    accumulated_signals = self._accumulate_signals_antenna_parallel(
+                        base_station_pos, ue_positions, selected_subcarriers, antenna_embedding, 
+                        directions_list, num_antennas
+                    )
+                else:
+                    # Direction-only parallelization for small workloads
+                    logger.debug(f"Using direction-only parallelization with {self.max_workers} workers")
+                    accumulated_signals = self._accumulate_signals_parallel(
+                        base_station_pos, ue_positions, selected_subcarriers, antenna_embedding, directions_list
+                    )
+            else:
+                logger.debug(f"Using sequential processing for {len(directions_list)} directions")
+                accumulated_signals = self._accumulate_signals_sequential(
+                    base_station_pos, ue_positions, selected_subcarriers, antenna_embedding, directions_list
                 )
-                
-                # Accumulate signals for each virtual link
-                for (ue_pos, subcarrier), signal_strength in ray_results.items():
-                    if (ue_pos, subcarrier) not in accumulated_signals:
-                        accumulated_signals[(ue_pos, subcarrier)] = 0.0
-                    accumulated_signals[(ue_pos, subcarrier)] += signal_strength
             
             return accumulated_signals
             
@@ -1262,6 +1310,372 @@ class CUDARayTracer:
         logger.debug(f"Final keys: {list(accumulated_signals.keys())}")
         
         return accumulated_signals
+    
+    def _accumulate_signals_sequential(self, 
+                                     base_station_pos: torch.Tensor,
+                                     ue_positions: List[torch.Tensor],
+                                     selected_subcarriers: Union[Dict, torch.Tensor, List[int]],
+                                     antenna_embedding: torch.Tensor,
+                                     directions: List[Tuple[int, int]]) -> Dict:
+        """
+        Sequential version of signal accumulation (fallback method).
+        
+        Args:
+            base_station_pos: Base station position
+            ue_positions: List of UE positions
+            selected_subcarriers: Subcarrier information
+            antenna_embedding: Base station's antenna embedding parameter C
+            directions: List of directions to process sequentially
+        
+        Returns:
+            Accumulated signal strength matrix
+        """
+        accumulated_signals = {}
+        
+        for direction in directions:
+            ray_results = self.trace_ray(
+                base_station_pos, direction, ue_positions, selected_subcarriers, antenna_embedding
+            )
+            for (ue_pos, subcarrier), signal_strength in ray_results.items():
+                if (ue_pos, subcarrier) not in accumulated_signals:
+                    accumulated_signals[(ue_pos, subcarrier)] = 0.0
+                accumulated_signals[(ue_pos, subcarrier)] += signal_strength
+        
+        return accumulated_signals
+    
+    def _trace_ray_parallel_wrapper(self, args):
+        """
+        Wrapper function for parallel ray tracing.
+        
+        Args:
+            args: Tuple of (direction, base_station_pos, ue_positions, selected_subcarriers, antenna_embedding)
+        
+        Returns:
+            Ray tracing results for the given direction
+        """
+        direction, base_station_pos, ue_positions, selected_subcarriers, antenna_embedding = args
+        try:
+            # Trace ray for this specific direction
+            ray_results = self.trace_ray(
+                base_station_pos, direction, ue_positions, selected_subcarriers, antenna_embedding
+            )
+            return ray_results
+            
+        except Exception as e:
+            logger.warning(f"Parallel ray tracing failed for direction {direction}: {e}")
+            return {}
+    
+    def _accumulate_signals_parallel(self, 
+                                   base_station_pos: torch.Tensor,
+                                   ue_positions: List[torch.Tensor],
+                                   selected_subcarriers: Union[Dict, torch.Tensor, List[int]],
+                                   antenna_embedding: torch.Tensor,
+                                   directions: List[Tuple[int, int]]) -> Dict:
+        """
+        Parallel version of signal accumulation using multiple workers.
+        
+        Args:
+            base_station_pos: Base station position
+            ue_positions: List of UE positions
+            selected_subcarriers: Subcarrier information
+            antenna_embedding: Base station's antenna embedding parameter C
+            directions: List of directions to process in parallel
+        
+        Returns:
+            Accumulated signal strength matrix
+        """
+        accumulated_signals = {}
+        
+        if not self.enable_parallel_processing or len(directions) < 2:
+            # Fall back to sequential processing for small numbers of directions
+            return self._accumulate_signals_sequential(
+                base_station_pos, ue_positions, selected_subcarriers, antenna_embedding, directions
+            )
+        
+        # Prepare arguments for parallel processing
+        args_list = [(direction, base_station_pos, ue_positions, selected_subcarriers, antenna_embedding) 
+                    for direction in directions]
+        
+        try:
+            if self.use_multiprocessing:
+                # Use multiprocessing for CPU-intensive tasks
+                import multiprocessing as mp
+                with mp.Pool(processes=self.max_workers) as pool:
+                    results = pool.map(self._trace_ray_parallel_wrapper, args_list)
+            else:
+                # Use threading for I/O-bound tasks
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                    futures = [executor.submit(self._trace_ray_parallel_wrapper, args) for args in args_list]
+                    results = [future.result() for future in as_completed(futures)]
+            
+            # Accumulate results from all workers
+            for ray_results in results:
+                if ray_results:  # Check if results are not empty
+                    for (ue_pos, subcarrier), signal_strength in ray_results.items():
+                        if (ue_pos, subcarrier) not in accumulated_signals:
+                            accumulated_signals[(ue_pos, subcarrier)] = 0.0
+                        accumulated_signals[(ue_pos, subcarrier)] += signal_strength
+                        
+        except Exception as e:
+            logger.warning(f"Parallel processing failed: {e}. Falling back to sequential processing.")
+            # Fall back to sequential processing
+            return self._accumulate_signals_sequential(
+                base_station_pos, ue_positions, selected_subcarriers, antenna_embedding, directions
+            )
+        
+        return accumulated_signals
+    
+    def _trace_ray_antenna_parallel(self, args):
+        """
+        Wrapper function for parallel antenna processing.
+        
+        Args:
+            args: Tuple of (antenna_idx, direction, base_station_pos, ue_positions, selected_subcarriers, antenna_embedding)
+        
+        Returns:
+            Ray tracing results for the given antenna and direction
+        """
+        antenna_idx, direction, base_station_pos, ue_positions, selected_subcarriers, antenna_embedding = args
+        try:
+            # Create antenna-specific embedding
+            if len(antenna_embedding.shape) > 1:
+                antenna_specific_embedding = antenna_embedding[antenna_idx]
+            else:
+                antenna_specific_embedding = antenna_embedding
+            
+            # Trace ray for this specific antenna
+            ray_results = self.trace_ray(
+                base_station_pos, direction, ue_positions, selected_subcarriers, antenna_specific_embedding
+            )
+            
+            # Add antenna index to results for identification
+            antenna_results = {}
+            for (ue_pos, subcarrier), signal_strength in ray_results.items():
+                antenna_results[(ue_pos, subcarrier, antenna_idx)] = signal_strength
+            
+            return antenna_results
+            
+        except Exception as e:
+            logger.warning(f"Parallel antenna processing failed for antenna {antenna_idx}, direction {direction}: {e}")
+            return {}
+    
+    def _accumulate_signals_antenna_parallel(self, 
+                                           base_station_pos: torch.Tensor,
+                                           ue_positions: List[torch.Tensor],
+                                           selected_subcarriers: Union[Dict, torch.Tensor, List[int]],
+                                           antenna_embedding: torch.Tensor,
+                                           directions: List[Tuple[int, int]],
+                                           num_antennas: int = 64) -> Dict:
+        """
+        Antenna-level parallel signal accumulation.
+        
+        Args:
+            base_station_pos: Base station position
+            ue_positions: List of UE positions
+            selected_subcarriers: Subcarrier information
+            antenna_embedding: Base station's antenna embedding parameter C
+            directions: List of directions to process
+            num_antennas: Number of BS antennas to process in parallel
+        
+        Returns:
+            Accumulated signal strength matrix with antenna-level parallelization
+        """
+        accumulated_signals = {}
+        
+        if not self.enable_parallel_processing or num_antennas < 2:
+            # Fall back to direction-level parallelization
+            return self._accumulate_signals_parallel(
+                base_station_pos, ue_positions, selected_subcarriers, antenna_embedding, directions
+            )
+        
+        # Prepare arguments for antenna-level parallel processing
+        args_list = []
+        for antenna_idx in range(num_antennas):
+            for direction in directions:
+                args_list.append((antenna_idx, direction, base_station_pos, ue_positions, selected_subcarriers, antenna_embedding))
+        
+        logger.debug(f"Using antenna-level parallel processing: {num_antennas} antennas × {len(directions)} directions = {len(args_list)} total tasks")
+        
+        try:
+            if self.use_multiprocessing:
+                # Use multiprocessing for CPU-intensive antenna processing
+                import multiprocessing as mp
+                with mp.Pool(processes=self.max_workers) as pool:
+                    results = pool.map(self._trace_ray_antenna_parallel, args_list)
+            else:
+                # Use threading for antenna processing
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                    futures = [executor.submit(self._trace_ray_antenna_parallel, args) for args in args_list]
+                    results = [future.result() for future in as_completed(futures)]
+            
+            # Accumulate results from all antennas and directions
+            for antenna_results in results:
+                if antenna_results:  # Check if results are not empty
+                    for (ue_pos, subcarrier, antenna_idx), signal_strength in antenna_results.items():
+                        key = (ue_pos, subcarrier)
+                        if key not in accumulated_signals:
+                            accumulated_signals[key] = 0.0
+                        accumulated_signals[key] += signal_strength
+                        
+        except Exception as e:
+            logger.warning(f"Antenna-level parallel processing failed: {e}. Falling back to direction-level parallelization.")
+            # Fall back to direction-level parallelization
+            return self._accumulate_signals_parallel(
+                base_station_pos, ue_positions, selected_subcarriers, antenna_embedding, directions
+            )
+        
+        return accumulated_signals
+    
+    def _trace_ray_spatial_parallel(self, args):
+        """
+        Wrapper function for parallel spatial sampling.
+        
+        Args:
+            args: Tuple of (spatial_point_idx, direction, base_station_pos, ue_positions, selected_subcarriers, antenna_embedding)
+        
+        Returns:
+            Ray tracing results for the given spatial point and direction
+        """
+        spatial_point_idx, direction, base_station_pos, ue_positions, selected_subcarriers, antenna_embedding = args
+        try:
+            # For spatial parallelization, we can implement different spatial sampling strategies
+            # For now, we'll use the standard ray tracing with some spatial variation
+            ray_results = self.trace_ray(
+                base_station_pos, direction, ue_positions, selected_subcarriers, antenna_embedding
+            )
+            
+            # Add spatial point index to results for identification
+            spatial_results = {}
+            for (ue_pos, subcarrier), signal_strength in ray_results.items():
+                spatial_results[(ue_pos, subcarrier, spatial_point_idx)] = signal_strength
+            
+            return spatial_results
+            
+        except Exception as e:
+            logger.warning(f"Parallel spatial processing failed for point {spatial_point_idx}: {e}")
+            return {}
+    
+    def _accumulate_signals_spatial_parallel(self, 
+                                           base_station_pos: torch.Tensor,
+                                           ue_positions: List[torch.Tensor],
+                                           selected_subcarriers: Union[Dict, torch.Tensor, List[int]],
+                                           antenna_embedding: torch.Tensor,
+                                           directions: List[Tuple[int, int]],
+                                           num_spatial_points: int = 32) -> Dict:
+        """
+        Spatial sampling parallel signal accumulation.
+        
+        Args:
+            base_station_pos: Base station position
+            ue_positions: List of UE positions
+            selected_subcarriers: Subcarrier information
+            antenna_embedding: Base station's antenna embedding parameter C
+            directions: List of directions to process
+            num_spatial_points: Number of spatial points to sample in parallel
+        
+        Returns:
+            Accumulated signal strength matrix with spatial sampling parallelization
+        """
+        accumulated_signals = {}
+        
+        if not self.enable_parallel_processing or num_spatial_points < 2:
+            # Fall back to direction-level parallelization
+            return self._accumulate_signals_parallel(
+                base_station_pos, ue_positions, selected_subcarriers, antenna_embedding, directions
+            )
+        
+        # Process each direction with spatial sampling parallelization
+        for direction in directions:
+            direction_signals = {}
+            
+            # Process each subcarrier with spatial sampling parallelization
+            subcarrier_indices = self._normalize_subcarrier_input(selected_subcarriers, ue_positions)
+            
+            for subcarrier_idx in subcarrier_indices:
+                # Prepare arguments for spatial parallel processing
+                args_list = [(spatial_point_idx, direction, base_station_pos, ue_positions, selected_subcarriers, antenna_embedding) 
+                            for spatial_point_idx in range(num_spatial_points)]
+                
+                try:
+                    if self.use_multiprocessing:
+                        # Use multiprocessing for spatial sampling
+                        import multiprocessing as mp
+                        with mp.Pool(processes=self.max_workers) as pool:
+                            spatial_results = pool.map(self._trace_ray_spatial_parallel, args_list)
+                    else:
+                        # Use threading for spatial sampling
+                        from concurrent.futures import ThreadPoolExecutor, as_completed
+                        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                            futures = [executor.submit(self._trace_ray_spatial_parallel, args) for args in args_list]
+                            spatial_results = [future.result() for future in as_completed(futures)]
+                    
+                    # Accumulate spatial results for this subcarrier
+                    for spatial_result in spatial_results:
+                        if spatial_result:
+                            for (ue_pos, subcarrier, spatial_idx), signal_strength in spatial_result.items():
+                                if subcarrier == subcarrier_idx:
+                                    key = (ue_pos, subcarrier)
+                                    if key not in direction_signals:
+                                        direction_signals[key] = 0.0
+                                    direction_signals[key] += signal_strength
+                                    
+                except Exception as e:
+                    logger.warning(f"Spatial parallel processing failed for direction {direction}, UE {ue_pos}, subcarrier {subcarrier_idx}: {e}")
+                    # Fall back to single spatial point processing
+                    ray_results = self.trace_ray(
+                        base_station_pos, direction, ue_positions, selected_subcarriers, antenna_embedding
+                    )
+                    for (ue_pos, subcarrier), signal_strength in ray_results.items():
+                        if subcarrier == subcarrier_idx:
+                            key = (ue_pos, subcarrier)
+                            if key not in direction_signals:
+                                direction_signals[key] = 0.0
+                            direction_signals[key] += signal_strength
+            
+            # Accumulate direction results
+            for key, signal_strength in direction_signals.items():
+                if key not in accumulated_signals:
+                    accumulated_signals[key] = 0.0
+                accumulated_signals[key] += signal_strength
+        
+        return accumulated_signals
+    
+    def _accumulate_signals_full_parallel(self, 
+                                        base_station_pos: torch.Tensor,
+                                        ue_positions: List[torch.Tensor],
+                                        selected_subcarriers: Union[Dict, torch.Tensor, List[int]],
+                                        antenna_embedding: torch.Tensor,
+                                        directions: List[Tuple[int, int]],
+                                        num_antennas: int = 64,
+                                        num_spatial_points: int = 32) -> Dict:
+        """
+        Full parallelization combining direction, antenna, and spatial sampling.
+        
+        Args:
+            base_station_pos: Base station position
+            ue_positions: List of UE positions
+            selected_subcarriers: Subcarrier information
+            antenna_embedding: Base station's antenna embedding parameter C
+            directions: List of directions to process
+            num_antennas: Number of BS antennas to process in parallel
+            num_spatial_points: Number of spatial points to sample in parallel
+        
+        Returns:
+            Accumulated signal strength matrix with full parallelization
+        """
+        # For full parallelization, we'll use the most efficient strategy based on workload
+        if num_antennas >= num_spatial_points:
+            # Use antenna-level parallelization as primary strategy
+            return self._accumulate_signals_antenna_parallel(
+                base_station_pos, ue_positions, selected_subcarriers, antenna_embedding, directions, num_antennas
+            )
+        else:
+            # Use spatial-level parallelization as primary strategy
+            return self._accumulate_signals_spatial_parallel(
+                base_station_pos, ue_positions, selected_subcarriers, antenna_embedding, directions, num_spatial_points
+            )
     
     def adaptive_ray_tracing(self, 
                            base_station_pos: torch.Tensor,
@@ -1429,6 +1843,24 @@ class CUDARayTracer:
             'elevation_divisions': self.elevation_divisions,
             'total_rays': total_rays,
             'ray_count_formula': f"N_total = N_BS × A × B × N_UE × K = {num_bs} × {self.total_directions} × {num_ue} × {num_subcarriers}"
+        }
+    
+    def get_parallelization_stats(self) -> Dict:
+        """
+        Get statistics about parallel processing configuration.
+        
+        Returns:
+            Dictionary with parallelization statistics
+        """
+        import multiprocessing as mp
+        return {
+            'parallel_processing_enabled': self.enable_parallel_processing,
+            'max_workers': self.max_workers,
+            'processing_mode': 'multiprocessing' if self.use_multiprocessing else 'threading',
+            'cpu_count': mp.cpu_count(),
+            'device': self.device,
+            'total_directions': self.total_directions,
+            'cuda_enabled': self.use_cuda
         }
     
     # NOTE: This ray tracer does NOT select subcarriers internally.

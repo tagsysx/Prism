@@ -144,9 +144,11 @@ performance:
   # 代码实现：支持混合精度和显存分配
 
   # Parallel processing
-  num_workers: 4                       # Number of parallel workers
+  enable_parallel_processing: true     # Enable parallel processing for ray tracing
+  num_workers: 24                      # Number of parallel workers (optimized for 32-core system)
+  use_multiprocessing: false           # Use threading instead of multiprocessing for better compatibility
   enable_distributed: false            # Enable distributed processing
-  # 代码实现：支持多进程和分布式配置
+  # 代码实现：支持多进程和分布式配置，24个worker可支持天线级并行化
 
 # Training Interface Configuration
 training_interface:
@@ -219,7 +221,8 @@ ray_tracer_integration:
   # Performance optimization
   batch_processing: true               # Enable batch processing for efficiency
   cpu_offload: true                    # Offload ray_tracer computation to CPU
-  parallel_antenna_processing: false   # Process antennas in parallel (memory intensive)
+  parallel_antenna_processing: true    # Process antennas in parallel (enabled for performance)
+  num_workers: 24                      # Number of workers for parallel processing (optimized for 32-core system)
 
 # Training Configuration
 training:
