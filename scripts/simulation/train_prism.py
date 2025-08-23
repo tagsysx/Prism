@@ -30,6 +30,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent / "src"))
 
 from prism.networks.prism_network import PrismNetwork
 from prism.ray_tracer import DiscreteRayTracer
+from prism.ray_tracer_cuda import CUDARayTracer
 from prism.training_interface import PrismTrainingInterface
 
 # Configure logging - will be set after config loading
@@ -80,6 +81,9 @@ class PrismTrainer:
         
         # Setup tensorboard
         self.writer = SummaryWriter(log_dir=self.output_dir / 'tensorboard')
+        
+        # Display ray tracer information
+        self._display_ray_tracer_info()
         
         # Display checkpoint information
         self._display_checkpoint_info()
@@ -164,10 +168,13 @@ class PrismTrainer:
         logger.info(f"  num_ue_antennas: {self.prism_network.num_ue_antennas}")
         logger.info(f"  num_bs_antennas: {self.prism_network.num_bs_antennas}")
         
-        # Create DiscreteRayTracer with PrismNetwork for MLP-based direction selection
+        # Create Ray Tracer with PrismNetwork for MLP-based direction selection
         # Read parallel processing configuration from config file
         parallel_config = self.config.get('performance', {})
         ray_tracer_config = self.config.get('ray_tracer_integration', {})
+        
+        # Check if CUDA ray tracer should be used
+        use_cuda_ray_tracer = ray_tracer_config.get('use_cuda_ray_tracer', False)
         
         # Parallel processing settings with fallback to config values
         enable_parallel = parallel_config.get('enable_parallel_processing', True)
@@ -180,25 +187,48 @@ class PrismTrainer:
         if 'num_workers' in ray_tracer_config:
             max_workers = ray_tracer_config['num_workers']
         
-        logger.info(f"Parallel processing configuration:")
-        logger.info(f"  - Enabled: {enable_parallel}")
+        logger.info(f"Ray tracer configuration:")
+        logger.info(f"  - Type: {'CUDA' if use_cuda_ray_tracer else 'CPU'}")
+        logger.info(f"  - Parallel processing: {enable_parallel}")
         logger.info(f"  - Max workers: {max_workers}")
         logger.info(f"  - Use multiprocessing: {use_multiprocessing}")
         
-        self.ray_tracer = DiscreteRayTracer(
-            azimuth_divisions=rt_config['azimuth_divisions'],
-            elevation_divisions=rt_config['elevation_divisions'],
-            max_ray_length=rt_config.get('max_ray_length', 100.0),
-            scene_size=rt_config.get('scene_size', 200.0),
-            device=self.device.type,
-            prism_network=self.prism_network,  # Enable MLP-based direction selection
-            signal_threshold=rt_config.get('signal_threshold', 1e-6),
-            enable_early_termination=rt_config.get('enable_early_termination', True),
-            top_k_directions=rt_config.get('top_k_directions', None),  # Use configured K value
-            enable_parallel_processing=enable_parallel,  # Read from config
-            max_workers=max_workers,  # Read from config
-            use_multiprocessing=use_multiprocessing  # Read from config
-        )
+        # Create ray tracer based on configuration
+        if use_cuda_ray_tracer and torch.cuda.is_available():
+            logger.info("🚀 Using CUDA-accelerated ray tracer for maximum performance")
+            self.ray_tracer = CUDARayTracer(
+                azimuth_divisions=rt_config['azimuth_divisions'],
+                elevation_divisions=rt_config['elevation_divisions'],
+                max_ray_length=rt_config.get('max_ray_length', 100.0),
+                scene_size=rt_config.get('scene_size', 200.0),
+                device=self.device.type,
+                prism_network=self.prism_network,  # Enable MLP-based direction selection
+                signal_threshold=rt_config.get('signal_threshold', 1e-6),
+                enable_early_termination=rt_config.get('enable_early_termination', True),
+                uniform_samples=rt_config.get('uniform_samples', 128),
+                resampled_points=rt_config.get('resampled_points', 64),
+                enable_parallel_processing=enable_parallel,  # Read from config
+                max_workers=max_workers,  # Read from config
+                use_multiprocessing=use_multiprocessing  # Read from config
+            )
+        else:
+            if use_cuda_ray_tracer and not torch.cuda.is_available():
+                logger.warning("⚠️  CUDA ray tracer requested but CUDA not available, falling back to CPU version")
+            logger.info("💻 Using CPU ray tracer")
+            self.ray_tracer = DiscreteRayTracer(
+                azimuth_divisions=rt_config['azimuth_divisions'],
+                elevation_divisions=rt_config['elevation_divisions'],
+                max_ray_length=rt_config.get('max_ray_length', 100.0),
+                scene_size=rt_config.get('scene_size', 200.0),
+                device=self.device.type,
+                prism_network=self.prism_network,  # Enable MLP-based direction selection
+                signal_threshold=rt_config.get('signal_threshold', 1e-6),
+                enable_early_termination=rt_config.get('enable_early_termination', True),
+                top_k_directions=rt_config.get('top_k_directions', None),  # Use configured K value
+                enable_parallel_processing=enable_parallel,  # Read from config
+                max_workers=max_workers,  # Read from config
+                use_multiprocessing=use_multiprocessing  # Read from config
+            )
         
         # Create PrismTrainingInterface
         self.model = PrismTrainingInterface(
@@ -813,6 +843,50 @@ class PrismTrainer:
         
         logger.info("Training completed!")
         self.writer.close()
+    
+    def _display_ray_tracer_info(self):
+        """Display information about the ray tracer configuration and performance."""
+        print("\n🔍 Ray Tracer Configuration:")
+        print("=" * 30)
+        
+        # Display ray tracer type and performance info
+        if hasattr(self.ray_tracer, 'get_parallelization_stats'):
+            try:
+                stats = self.ray_tracer.get_parallelization_stats()
+                print(f"  - Type: {'CUDA' if stats.get('cuda_enabled', False) else 'CPU'}")
+                print(f"  - Parallel processing: {stats.get('parallel_processing_enabled', 'N/A')}")
+                print(f"  - Processing mode: {stats.get('processing_mode', 'N/A')}")
+                print(f"  - Max workers: {stats.get('max_workers', 'N/A')}")
+                print(f"  - Total directions: {stats.get('total_directions', 'N/A')}")
+            except Exception as e:
+                print(f"  - Error getting parallelization stats: {e}")
+        
+        # Display CUDA-specific information if available
+        if hasattr(self.ray_tracer, 'get_performance_info'):
+            try:
+                perf_info = self.ray_tracer.get_performance_info()
+                print(f"  - Device: {perf_info.get('device', 'N/A')}")
+                print(f"  - CUDA enabled: {perf_info.get('use_cuda', 'N/A')}")
+                if perf_info.get('use_cuda', False):
+                    print(f"  - CUDA device: {perf_info.get('cuda_device_name', 'N/A')}")
+                    print(f"  - CUDA memory: {perf_info.get('cuda_memory_gb', 'N/A')} GB")
+            except Exception as e:
+                print(f"  - Error getting performance info: {e}")
+        
+        # Display ray count analysis if available
+        if hasattr(self.ray_tracer, 'get_ray_count_analysis'):
+            try:
+                # Use default values for analysis
+                num_bs = 1
+                num_ue = 100
+                num_subcarriers = 64
+                analysis = self.ray_tracer.get_ray_count_analysis(num_bs, num_ue, num_subcarriers)
+                print(f"  - Total rays (1 BS, 100 UE, 64 subcarriers): {analysis.get('total_rays', 'N/A'):,}")
+                print(f"  - Ray count formula: {analysis.get('ray_count_formula', 'N/A')}")
+            except Exception as e:
+                print(f"  - Error getting ray count analysis: {e}")
+        
+        print("=" * 30)
     
     def _plot_training_curves(self, train_losses: list, val_losses: list):
         """Plot training and validation loss curves"""

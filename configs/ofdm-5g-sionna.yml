@@ -1,5 +1,7 @@
 # Configuration for Prism: Neural Network-Based Electromagnetic Ray Tracing System
 # This configuration implements the updated ray tracing design with neural networks
+# 
+# For detailed configuration documentation, see: configs/README.md
 
 # Core Ray Tracing Configuration
 ray_tracing:
@@ -138,9 +140,16 @@ performance:
   max_concurrent_rays: 1000            # Maximum concurrent rays
   # 代码实现：DiscreteRayTracer支持device参数，batch_size和max_concurrent_rays用于并行和批处理
 
+  # CUDA-specific settings
+  cuda_device_id: 0                    # CUDA device ID to use (0 for first GPU)
+  cuda_optimization_level: 'O2'        # CUDA optimization level ('O0', 'O1', 'O2', 'O3')
+  cuda_benchmark_mode: true            # Enable CUDA benchmark mode for optimal performance
+  cuda_deterministic: false            # Disable deterministic mode for better performance
+  
   # Memory management
   gpu_memory_fraction: 0.8             # GPU memory usage fraction
   enable_mixed_precision: true         # Enable mixed precision for efficiency
+  cuda_memory_pool: true               # Enable CUDA memory pool for better memory management
   # 代码实现：支持混合精度和显存分配
 
   # Parallel processing
@@ -202,6 +211,11 @@ ray_tracer_integration:
   # Integration settings
   enabled: true                        # Enable ray_tracer integration
   fallback_mode: 'prism_network'       # Fallback when ray_tracer fails
+  
+  # CUDA Acceleration Configuration
+  use_cuda_ray_tracer: true            # Enable CUDA-accelerated ray tracer for maximum performance
+  cuda_fallback_to_cpu: true           # Fallback to CPU if CUDA not available
+  cuda_memory_fraction: 0.8            # GPU memory usage fraction for CUDA operations
   
   # Ray tracer parameters (override ray_tracing section when integrated)
   azimuth_divisions: 36                 # Initial angular divisions (curriculum learning)
@@ -280,3 +294,5 @@ output:
   enable_progress_bar: true            # Enable progress bars
   log_ray_tracer_stats: true           # Log ray_tracer statistics
   log_training_metrics: true           # Log training metrics
+
+
