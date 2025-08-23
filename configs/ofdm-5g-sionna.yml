@@ -136,7 +136,7 @@ importance_sampling:
 performance:
   # Computational settings
   device: 'cuda'                       # Device for computation ('cuda' or 'cpu')
-  batch_size: 32                       # Batch size for processing (adjusted for 80 training samples)
+  batch_size: 2                        # Batch size for processing (reduced for 50 batches per epoch)
   max_concurrent_rays: 1000            # Maximum concurrent rays
   # 代码实现：DiscreteRayTracer支持device参数，batch_size和max_concurrent_rays用于并行和批处理
 
@@ -174,7 +174,7 @@ training_interface:
     max: [150.0, 150.0, 30.0]           # Scene maximum bounds [x, y, z]
   
   # Subcarrier selection
-  subcarrier_sampling_ratio: 0.3       # Ratio of subcarriers to select (30%)
+  subcarrier_sampling_ratio: 0.1       # Ratio of subcarriers to select (10%)
   antenna_specific_selection: true      # Enable antenna-specific subcarrier selection
   
   # Checkpoint and recovery
@@ -241,9 +241,9 @@ ray_tracer_integration:
 # Training Configuration
 training:
   # Training parameters
-  batch_size: 32                       # Training batch size
+  batch_size: 2                        # Training batch size (reduced for 50 batches per epoch)
   learning_rate: 1e-4                  # Initial learning rate
-  num_epochs: 100                      # Number of training epochs
+  num_epochs: 10                       # Number of training epochs (reduced from 100)
   
   # Loss function
   loss_function: 'mse'                 # Loss function type
