@@ -357,6 +357,29 @@ The discrete radiance field model achieves efficient electromagnetic wave propag
 
 This model provides a powerful technical foundation for electromagnetic wave propagation modeling and ray tracing applications.
 
+## 9. Implementation Architecture
+
+### 9.1 Unified View Direction Calculation
+
+**Design Principle**: All ray tracer implementations use a consistent view direction calculation to ensure physical correctness and code maintainability.
+
+**Mathematical Definition**:
+For each sampling point $P_v$ along a ray and base station antenna position $P_{BS}$, the view direction $\omega$ is computed as:
+
+```math
+\omega = \frac{P_{BS} - P_v}{||P_{BS} - P_v||}
+```
+
+**Physical Interpretation**:
+- **Direction**: From sampling point toward BS antenna
+- **Usage**: RadianceNetwork uses $\omega$ to compute directional radiation $S(P_v, \omega)$
+- **Consistency**: All implementations (CPU, CUDA, Training Interface) use identical calculation
+
+**Benefits**:
+- Ensures consistent physical interpretation across all implementations
+- Provides mathematically rigorous foundation for RadianceNetwork computations
+- Maintains theoretical coherence in electromagnetic wave propagation modeling
+
 ---
 
 *This document is based on the technical implementation of the Prism project. For questions or suggestions, please contact the development team.*

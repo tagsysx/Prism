@@ -392,7 +392,11 @@ class RayTracer(ABC):
         sampled_positions = ray.origin.unsqueeze(0) + t_values.unsqueeze(1) * ray.direction.unsqueeze(0)
         
         # Filter out points outside scene boundaries
-        valid_mask = self.is_position_in_scene(sampled_positions)
+        scene_bounds = self.scene_size / 2.0
+        valid_mask = torch.all(
+            (sampled_positions >= -scene_bounds) & (sampled_positions <= scene_bounds), 
+            dim=1
+        )
         if not valid_mask.any():
             # If no valid positions, return empty tensor
             return torch.empty(0, 3, device=self.device)
@@ -478,6 +482,36 @@ class RayTracer(ABC):
                 break
         
         return float(total_signal)
+    
+    def _compute_view_directions(self, 
+                               sampled_positions: torch.Tensor,
+                               bs_position: torch.Tensor) -> torch.Tensor:
+        """
+        Compute view directions from sampled positions to BS antenna.
+        
+        In wireless communication, the view direction represents the direction from
+        each sampling point to the BS antenna (transmitter). This is used by the
+        RadianceNetwork to compute directional radiation patterns.
+        
+        Args:
+            sampled_positions: Sampled positions along the ray (num_samples, 3)
+            bs_position: BS antenna position (3,) or (1, 3)
+        
+        Returns:
+            View directions from sampled positions to BS (num_samples, 3)
+        """
+        # Ensure bs_position has correct shape
+        if bs_position.dim() == 1:
+            bs_position = bs_position.unsqueeze(0)  # (1, 3)
+        
+        # Compute directions from sampled positions to BS antenna
+        # Direction: sampled_position -> BS_antenna
+        view_directions = bs_position - sampled_positions  # (num_samples, 3)
+        
+        # Normalize directions
+        view_directions = view_directions / (torch.norm(view_directions, dim=1, keepdim=True) + 1e-8)
+        
+        return view_directions
     
     def compute_dynamic_path_lengths(self, sampled_positions: torch.Tensor) -> torch.Tensor:
         """

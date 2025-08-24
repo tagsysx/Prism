@@ -49,7 +49,53 @@ Where:
 - $t$: Distance parameter along the ray
 - $\omega_{ij} = [\cos(\theta_j)\cos(\phi_i), \cos(\theta_j)\sin(\phi_i), \sin(\theta_j)]$ where $\theta_j$ is elevation angle from -90° to +90°
 
-### 2.2 Energy Tracing Process
+### 2.2 BS-Centric Radiation Pattern
+
+**Core Principle**: The ray tracing system adopts a **BS antenna-centric radiation approach**, where electromagnetic waves are traced from the base station antenna as the central radiation source outward into its entire directional space.
+
+**Radiation Geometry**:
+- **Central Source**: BS antenna positioned at $P_{BS}$ serves as the electromagnetic radiation center
+- **Omnidirectional Coverage**: Rays are cast in all $A \times B$ directions covering the complete spherical space around the antenna
+- **Fixed Ray Length**: All rays extend to a maximum distance `max_ray_length`, independent of UE positions
+- **Uniform Angular Sampling**: Directional space is uniformly discretized to ensure comprehensive coverage
+
+**Physical Significance**:
+```
+BS Antenna (Center) → Ray Direction 1 → Sampling Points → Signal Propagation
+                   → Ray Direction 2 → Sampling Points → Signal Propagation  
+                   → Ray Direction 3 → Sampling Points → Signal Propagation
+                   → ...
+                   → Ray Direction A×B → Sampling Points → Signal Propagation
+```
+
+**Key Design Decisions**:
+1. **Ray Origin**: Always starts from BS antenna position $P_{BS}$
+2. **Direction Independence**: Ray directions are predetermined by the $A \times B$ grid, not influenced by UE locations
+3. **Comprehensive Coverage**: Every direction in the antenna's radiation pattern is systematically sampled
+4. **UE Role**: UE positions serve only as radiation targets for the RadianceNetwork, not as ray endpoints
+
+### 2.3 View Direction Calculation
+
+**Unified Implementation**: All ray tracers use a consistent view direction calculation implemented in the base class:
+
+```python
+def _compute_view_directions(self, sampled_positions: torch.Tensor, bs_position: torch.Tensor) -> torch.Tensor:
+    """
+    Compute view directions from sampled positions to BS antenna.
+    Direction: sampled_position -> BS_antenna
+    """
+    view_directions = bs_position - sampled_positions  # (num_samples, 3)
+    view_directions = view_directions / (torch.norm(view_directions, dim=1, keepdim=True) + 1e-8)
+    return view_directions
+```
+
+**Physical Interpretation**:
+- **Direction Definition**: From each sampling point toward the BS antenna (radiation center)
+- **RadianceNetwork Usage**: Determines how electromagnetic energy radiates from sampling points toward the central receiving antenna
+- **Consistency**: All ray tracer implementations (CPU, CUDA) use the same unified calculation
+- **Simplification**: BS antenna position is treated as a point source (actual antenna array geometry is simplified)
+
+### 2.4 Energy Tracing Process
 
 For each antenna of the base station, the system traces RF energy along all $A \times B$ directions:
 
@@ -117,7 +163,7 @@ def uniform_sampling_stage(ray, ue_pos, num_uniform_samples=128):
         network_outputs = prism_network(
             sampled_positions=uniform_positions.unsqueeze(0),
             ue_positions=ue_pos.unsqueeze(0),
-            view_directions=compute_view_directions(uniform_positions, ue_pos),
+            view_directions=self._compute_view_directions(uniform_positions, ray.origin),
             antenna_indices=antenna_indices
         )
     
@@ -217,7 +263,7 @@ def two_stage_ray_tracing(ray, ue_pos, subcarrier_idx, antenna_embedding):
         final_network_outputs = prism_network(
             sampled_positions=resampled_positions.unsqueeze(0),
             ue_positions=ue_pos.unsqueeze(0),
-            view_directions=compute_view_directions(resampled_positions, ue_pos),
+            view_directions=self._compute_view_directions(resampled_positions, ray.origin),
             antenna_indices=antenna_embedding
         )
     
@@ -820,9 +866,50 @@ def batch_process_multiple_rays(directions, ue_positions, selected_subcarriers, 
 - Vectorized: $O(D \times U)$ parallel operations, each processing $K \times N$ elements
 - Speedup: $K \times N$ theoretical acceleration per ray
 
-## 5. Performance Considerations
+## 5. Code Architecture Improvements
 
-### 5.1 Vectorized Ray Tracing and GPU Acceleration
+### 5.1 Unified View Direction Calculation
+
+**Problem Addressed**: Previously, different ray tracer implementations had inconsistent view direction calculations:
+- Some computed directions from UE to sampling points
+- Others computed directions from BS to sampling points  
+- Training interface had a separate implementation with different semantics
+
+**Solution**: Unified implementation in `RayTracer` base class with consistent physical interpretation:
+
+```python
+def _compute_view_directions(self, sampled_positions: torch.Tensor, bs_position: torch.Tensor) -> torch.Tensor:
+    """
+    Compute view directions from sampled positions to BS antenna.
+    
+    Physical meaning: Direction from each sampling point toward the BS antenna,
+    representing how electromagnetic energy radiates toward the receiving antenna.
+    """
+    view_directions = bs_position - sampled_positions
+    return view_directions / (torch.norm(view_directions, dim=1, keepdim=True) + 1e-8)
+```
+
+**Benefits**:
+- **Consistency**: All ray tracers use identical view direction calculation
+- **Maintainability**: Single implementation reduces code duplication
+- **Physical Correctness**: Direction represents radiation toward receiving antenna
+- **Simplified Debugging**: Uniform behavior across all implementations
+
+**Usage Pattern**:
+```python
+# In all ray tracer implementations:
+view_directions = self._compute_view_directions(sampled_positions, ray.origin)
+# where ray.origin is the BS antenna position
+```
+
+**Migration**: All existing implementations have been updated to use this unified method:
+- `CUDARayTracer`: Updated both uniform and resampled view direction calculations
+- `CPURayTracer`: Updated both uniform and resampled view direction calculations
+- `TrainingInterface`: Removed duplicate implementation
+
+## 6. Performance Considerations
+
+### 6.1 Vectorized Ray Tracing and GPU Acceleration
 
 **Vectorization Architecture**: The ray tracing system has been completely redesigned around vectorized tensor operations, achieving massive performance improvements through GPU parallelization.
 
@@ -972,7 +1059,7 @@ DiscreteRayTracer(
 - **Dynamic UE positioning**: Support for mobile user equipment
 - **Frequency domain flexibility**: Adaptable to different wireless standards
 
-## 6. Integration with Discrete Radiance Field Model
+## 7. Integration with Discrete Radiance Field Model
 
 The ray tracing system integrates seamlessly with the discrete radiance field model:
 
@@ -981,9 +1068,9 @@ The ray tracing system integrates seamlessly with the discrete radiance field mo
 3. **Signal propagation**: Exponential decay model for cumulative attenuation
 4. **Radiation calculation**: Direction-dependent voxel radiation properties
 
-## 7. Future Enhancements
+## 8. Future Enhancements
 
-### 7.1 Advanced Optimization Techniques
+### 8.1 Advanced Optimization Techniques
 
 - **Machine learning-based directional sampling**: The system now implements MLP-based direction sampling (Section 2.3.3) that automatically learns optimal direction selection based on antenna embedding $C$.
 - **Dynamic threshold optimization**: Adaptive threshold adjustment for MLP outputs based on performance metrics and computational constraints.

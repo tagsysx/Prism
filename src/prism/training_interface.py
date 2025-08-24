@@ -73,6 +73,7 @@ class PrismTrainingInterface(nn.Module):
         
         # Set ray tracing mode
         self.ray_tracing_mode = ray_tracing_mode
+        self.prism_network = prism_network  # Set prism_network first
         
         # Create appropriate ray tracer based on mode if not provided
         if ray_tracer is None:
@@ -80,8 +81,6 @@ class PrismTrainingInterface(nn.Module):
         else:
             # Use provided ray_tracer but validate it matches the mode
             self.ray_tracer = self._validate_ray_tracer(ray_tracer, ray_tracing_mode)
-        
-        self.prism_network = prism_network
         # Store configuration
         self.num_sampling_points = num_sampling_points
         self.subcarrier_sampling_ratio = subcarrier_sampling_ratio
@@ -132,6 +131,7 @@ class PrismTrainingInterface(nn.Module):
                     max_ray_length=200.0,     # From config
                     scene_size=200.0,         # From config
                     device='cuda',
+                    prism_network=self.prism_network,  # Pass the prism_network for MLP direction selection
                     uniform_samples=64,        # From config
                     enable_parallel_processing=True,
                     max_workers=2             # From config
@@ -144,6 +144,7 @@ class PrismTrainingInterface(nn.Module):
                     elevation_divisions=9,
                     max_ray_length=200.0,
                     scene_size=200.0,
+                    prism_network=self.prism_network,  # Pass the prism_network for MLP direction selection
                     uniform_samples=64
                 )
         
@@ -156,6 +157,7 @@ class PrismTrainingInterface(nn.Module):
                 elevation_divisions=9,
                 max_ray_length=200.0,
                 scene_size=200.0,
+                prism_network=self.prism_network,  # Pass the prism_network for MLP direction selection
                 uniform_samples=64
             )
         
@@ -170,6 +172,7 @@ class PrismTrainingInterface(nn.Module):
                     max_ray_length=200.0,
                     scene_size=200.0,
                     device='cuda',
+                    prism_network=self.prism_network,  # Pass the prism_network for MLP direction selection
                     uniform_samples=64,
                     enable_parallel_processing=True,
                     max_workers=2
@@ -182,6 +185,7 @@ class PrismTrainingInterface(nn.Module):
                     elevation_divisions=9,
                     max_ray_length=200.0,
                     scene_size=200.0,
+                    prism_network=self.prism_network,  # Pass the prism_network for MLP direction selection
                     uniform_samples=64
                 )
     
@@ -492,8 +496,8 @@ class PrismTrainingInterface(nn.Module):
                 if bs_antenna_idx == 0 and hasattr(self.ray_tracer, 'actual_directions_used'):
                     actual_directions = self.ray_tracer.actual_directions_used
                     if actual_directions != num_directions:
-                        logger.info(f"🎯 MLP direction selection active: Using {actual_directions} directions (instead of {num_directions})")
-                        logger.info(f"📊 Performance improvement: {num_directions/actual_directions:.1f}x faster")
+                        logger.debug(f"🎯 MLP direction selection active: Using {actual_directions} directions (instead of {num_directions})")
+                        # logger.info(f"📊 Performance improvement: {num_directions/actual_directions:.1f}x faster")
                 
                 # Convert ray_tracer results to CSI predictions
                 # Since num_ue = 1, we only have one UE device per batch item
@@ -611,15 +615,7 @@ class PrismTrainingInterface(nn.Module):
     
 
     
-    def _compute_view_directions(
-        self, 
-        bs_position: torch.Tensor, 
-        sampled_positions: torch.Tensor
-    ) -> torch.Tensor:
-        """Compute view directions from BS to each sampling point."""
-        view_directions = sampled_positions - bs_position.unsqueeze(1).unsqueeze(2)
-        view_directions = view_directions / (torch.norm(view_directions, dim=-1, keepdim=True) + 1e-8)
-        return view_directions
+
     
 
     

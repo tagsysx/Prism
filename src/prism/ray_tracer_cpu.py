@@ -455,9 +455,9 @@ class CPURayTracer(RayTracer):
         if len(uniform_positions) == 0:
             return 0.0
         
-        # Get viewing directions for uniform samples
-        uniform_view_directions = ue_pos.unsqueeze(0).expand(num_uniform_samples, -1) - uniform_positions
-        uniform_view_directions = uniform_view_directions / (torch.norm(uniform_view_directions, dim=1, keepdim=True) + 1e-8)
+        # Get viewing directions for uniform samples (from sample positions to BS antenna)
+        # Note: In ray tracing, ray.origin is the BS antenna position
+        uniform_view_directions = self._compute_view_directions(uniform_positions, ray.origin)
         
         # Create antenna indices
         antenna_indices = torch.zeros(1, dtype=torch.long, device=self.device)
@@ -486,9 +486,8 @@ class CPURayTracer(RayTracer):
                 uniform_positions, importance_weights, num_samples=64
             )
             
-            # Get network properties for resampled points
-            resampled_view_directions = ue_pos.unsqueeze(0).expand(len(resampled_positions), -1) - resampled_positions
-            resampled_view_directions = resampled_view_directions / (torch.norm(resampled_view_directions, dim=1, keepdim=True) + 1e-8)
+            # Get network properties for resampled points (from sample positions to BS antenna)
+            resampled_view_directions = self._compute_view_directions(resampled_positions, ray.origin)
             
             with torch.no_grad():
                 resampled_network_outputs = self.prism_network(
