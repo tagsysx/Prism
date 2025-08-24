@@ -190,10 +190,12 @@ class CPURayTracer(RayTracer):
                 phi = i * self.azimuth_resolution  # Azimuth angle
                 theta = j * self.elevation_resolution  # Elevation angle
                 
-                # Convert to Cartesian coordinates
-                x = math.sin(theta) * math.cos(phi)
-                y = math.sin(theta) * math.sin(phi)
-                z = math.cos(theta)
+                # Convert to Cartesian coordinates using proper spherical coordinates
+                # Elevation: -90° to +90° (-π/2 to +π/2)
+                elevation = theta - (math.pi / 2)
+                x = math.cos(elevation) * math.cos(phi)
+                y = math.cos(elevation) * math.sin(phi)
+                z = math.sin(elevation)
                 
                 directions.append([x, y, z])
         
@@ -232,13 +234,17 @@ class CPURayTracer(RayTracer):
         theta = theta_idx * self.elevation_resolution
         
         # Create direction vector
+        # Convert to proper spherical coordinates
+        # Elevation: -90° to +90° (-π/2 to +π/2)
+        elevation = (theta_idx * self.elevation_resolution) - (math.pi / 2)
+        
         direction_vector = torch.tensor([
-            math.sin(theta) * math.cos(phi),
-            math.sin(theta) * math.sin(phi),
-            math.cos(theta)
+            math.cos(elevation) * math.cos(phi),
+            math.cos(elevation) * math.sin(phi),
+            math.sin(elevation)
         ], dtype=torch.float32, device=self.device)
         
-        # Create ray
+        # Create ray from BS antenna (configurable position, defaults to (0,0,0))
         ray = Ray(base_station_pos, direction_vector, self.max_ray_length, self.device)
         
         results = {}
@@ -281,7 +287,7 @@ class CPURayTracer(RayTracer):
         subcarrier_indices = self._normalize_subcarrier_input(selected_subcarriers, ue_positions)
         
         for direction_idx, direction_vector in enumerate(directions):
-            # Create ray for this direction
+            # Create ray for this direction from BS antenna (configurable position)
             ray = Ray(base_station_pos, direction_vector, self.max_ray_length, self.device)
             
             for ue_pos in ue_positions:
@@ -1492,12 +1498,17 @@ class CPURayTracer(RayTracer):
             phi = phi_idx * self.azimuth_resolution
             theta = theta_idx * self.elevation_resolution
             
+            # Convert to proper spherical coordinates
+            # Elevation: -90° to +90° (-π/2 to +π/2)
+            elevation = theta - (math.pi / 2)
+            
             direction_vector = torch.tensor([
-                math.sin(theta) * math.cos(phi),
-                math.sin(theta) * math.sin(phi),
-                math.cos(theta)
+                math.cos(elevation) * math.cos(phi),
+                math.cos(elevation) * math.sin(phi),
+                math.sin(elevation)
             ], dtype=torch.float32, device=self.device)
             
+            # Ray tracing from BS antenna (configurable position)
             ray = Ray(base_station_pos, direction_vector, self.max_ray_length, self.device)
             
             # Process each UE position
@@ -1655,12 +1666,17 @@ class CPURayTracer(RayTracer):
             phi = phi_idx * self.azimuth_resolution
             theta = theta_idx * self.elevation_resolution
             
+            # Convert to proper spherical coordinates
+            # Elevation: -90° to +90° (-π/2 to +π/2)
+            elevation = theta - (math.pi / 2)
+            
             direction_vector = torch.tensor([
-                math.sin(theta) * math.cos(phi),
-                math.sin(theta) * math.sin(phi),
-                math.cos(theta)
+                math.cos(elevation) * math.cos(phi),
+                math.cos(elevation) * math.sin(phi),
+                math.sin(elevation)
             ], dtype=torch.float32, device=self.device)
             
+            # Ray tracing from BS antenna (configurable position)
             ray = Ray(base_station_pos, direction_vector, self.max_ray_length, self.device)
             
             # Process each UE position
@@ -1871,12 +1887,17 @@ class CPURayTracer(RayTracer):
             phi = phi_idx * self.azimuth_resolution
             theta = theta_idx * self.elevation_resolution
             
+            # Convert to proper spherical coordinates
+            # Elevation: -90° to +90° (-π/2 to +π/2)
+            elevation = theta - (math.pi / 2)
+            
             direction_vector = torch.tensor([
-                math.sin(theta) * math.cos(phi),
-                math.sin(theta) * math.sin(phi),
-                math.cos(theta)
+                math.cos(elevation) * math.cos(phi),
+                math.cos(elevation) * math.sin(phi),
+                math.sin(elevation)
             ], dtype=torch.float32, device=self.device)
             
+            # Ray tracing from BS antenna (configurable position)
             ray = Ray(base_station_pos, direction_vector, self.max_ray_length, self.device)
             
             # Process each UE position
@@ -1974,12 +1995,17 @@ class CPURayTracer(RayTracer):
             phi = phi_idx * self.azimuth_resolution
             theta = theta_idx * self.elevation_resolution
             
+            # Convert to proper spherical coordinates
+            # Elevation: -90° to +90° (-π/2 to +π/2)
+            elevation = theta - (math.pi / 2)
+            
             direction_vector = torch.tensor([
-                math.sin(theta) * math.cos(phi),
-                math.sin(theta) * math.sin(phi),
-                math.cos(theta)
+                math.cos(elevation) * math.cos(phi),
+                math.cos(elevation) * math.sin(phi),
+                math.sin(elevation)
             ], dtype=torch.float32, device=self.device)
             
+            # Ray tracing from BS antenna (configurable position)
             ray = Ray(base_station_pos, direction_vector, self.max_ray_length, self.device)
             
             # Process each UE position
@@ -2123,10 +2149,14 @@ class CPURayTracer(RayTracer):
             phi = phi_idx * self.azimuth_resolution
             theta = theta_idx * self.elevation_resolution
             
+            # Convert to proper spherical coordinates
+            # Elevation: -90° to +90° (-π/2 to +π/2)
+            elevation = theta - (math.pi / 2)
+            
             direction_vector = torch.tensor([
-                math.sin(theta) * math.cos(phi),
-                math.sin(theta) * math.sin(phi),
-                math.cos(theta)
+                math.cos(elevation) * math.cos(phi),
+                math.cos(elevation) * math.sin(phi),
+                math.sin(elevation)
             ], dtype=torch.float32, device=self.device)
             
             ray = Ray(torch.tensor([0.0, 0.0, 0.0]), direction_vector, self.max_ray_length, self.device)

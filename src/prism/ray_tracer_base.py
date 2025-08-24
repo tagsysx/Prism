@@ -75,8 +75,8 @@ class RayTracer(ABC):
         self.resampled_points = resampled_points
         
         # Calculate derived parameters
-        self.azimuth_resolution = 2 * 3.14159 / azimuth_divisions
-        self.elevation_resolution = 3.14159 / elevation_divisions
+        self.azimuth_resolution = 2 * 3.14159 / azimuth_divisions  # 0° to 360°
+        self.elevation_resolution = 3.14159 / elevation_divisions   # -90° to +90° (π range)
         self.total_directions = azimuth_divisions * elevation_divisions
         
         # Scene boundaries
@@ -256,13 +256,18 @@ class RayTracer(ABC):
         direction_vectors = []
         for phi_idx in range(self.azimuth_divisions):
             for theta_idx in range(self.elevation_divisions):
+                # Azimuth: 0° to 360° (0 to 2π)
                 phi = phi_idx * self.azimuth_resolution
-                theta = theta_idx * self.elevation_resolution
+                # Elevation: -90° to +90° (-π/2 to +π/2)
+                theta = (theta_idx * self.elevation_resolution) - (3.14159 / 2)
                 
-                # Calculate direction vector
-                x = math.sin(theta) * math.cos(phi)
-                y = math.sin(theta) * math.sin(phi)
-                z = math.cos(theta)
+                # Calculate direction vector using spherical coordinates
+                # x = cos(elevation) * cos(azimuth)
+                # y = cos(elevation) * sin(azimuth)  
+                # z = sin(elevation)
+                x = math.cos(theta) * math.cos(phi)
+                y = math.cos(theta) * math.sin(phi)
+                z = math.sin(theta)
                 
                 direction_vectors.append([x, y, z])
         

@@ -60,7 +60,7 @@ extern "C" __global__ void parallel_ray_tracing(
     int ue_idx = (idx % (num_ue * num_subcarriers)) / num_subcarriers;
     int subcarrier_idx = idx % num_subcarriers;
     
-    // Get positions and vectors
+    // Get BS antenna position (configurable, defaults to (0,0,0))
     float3 bs_pos = make_float3(
         base_station_pos[0], base_station_pos[1], base_station_pos[2]
     );
@@ -804,6 +804,7 @@ extern "C" __global__ void optimized_ray_tracing(
     __shared__ float shared_scene_bounds;
     
     // Load shared data once per block
+    // BS antenna position (configurable, defaults to (0,0,0))
     if (threadIdx.x == 0) {
         shared_bs_pos[0] = base_station_pos[0];
         shared_bs_pos[1] = base_station_pos[1];
@@ -1102,10 +1103,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                 phi = i * self.azimuth_resolution  # Azimuth angle
                 theta = j * self.elevation_resolution  # Elevation angle
                 
-                # Convert to Cartesian coordinates
-                x = math.sin(theta) * math.cos(phi)
-                y = math.sin(theta) * math.sin(phi)
-                z = math.cos(theta)
+                # Convert to Cartesian coordinates using proper spherical coordinates
+                # Elevation: -90° to +90° (-π/2 to +π/2)
+                elevation = theta - (math.pi / 2)
+                x = math.cos(elevation) * math.cos(phi)
+                y = math.cos(elevation) * math.sin(phi)
+                z = math.sin(elevation)
                 
                 directions.append([x, y, z])
         
@@ -1768,14 +1771,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         phi = phi_idx * self.azimuth_resolution
         theta = theta_idx * self.elevation_resolution
         
-        # Create direction vector
+        # Create direction vector using proper spherical coordinates
+        # Elevation: -90° to +90° (-π/2 to +π/2)
+        elevation = theta - (math.pi / 2)
+        
         direction_vector = torch.tensor([
-            math.sin(theta) * math.cos(phi),
-            math.sin(theta) * math.sin(phi),
-            math.cos(theta)
+            math.cos(elevation) * math.cos(phi),
+            math.cos(elevation) * math.sin(phi),
+            math.sin(elevation)
         ], dtype=torch.float32, device=self.device)
         
-        # Create ray
+        # Create ray from BS antenna (configurable position, defaults to (0,0,0))
         ray = Ray(base_station_pos, direction_vector, self.max_ray_length, self.device)
         
         results = {}
@@ -2320,10 +2326,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             phi = phi_idx * (2 * math.pi / self.azimuth_divisions)
             theta = theta_idx * (math.pi / self.elevation_divisions)
             
-            # Calculate direction vector
-            x = math.sin(theta) * math.cos(phi)
-            y = math.sin(theta) * math.sin(phi)
-            z = math.cos(theta)
+            # Calculate direction vector using proper spherical coordinates
+            # Elevation: -90° to +90° (-π/2 to +π/2)
+            elevation = theta - (math.pi / 2)
+            x = math.cos(elevation) * math.cos(phi)
+            y = math.cos(elevation) * math.sin(phi)
+            z = math.sin(elevation)
             
             direction_vectors.append([x, y, z])
         
@@ -2391,10 +2399,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             phi = phi_idx * (2 * math.pi / self.azimuth_divisions)
             theta = theta_idx * (math.pi / self.elevation_divisions)
             
-            # Calculate direction vector
-            x = math.sin(theta) * math.cos(phi)
-            y = math.sin(theta) * math.sin(phi)
-            z = math.cos(theta)
+            # Calculate direction vector using proper spherical coordinates
+            # Elevation: -90° to +90° (-π/2 to +π/2)
+            elevation = theta - (math.pi / 2)
+            x = math.cos(elevation) * math.cos(phi)
+            y = math.cos(elevation) * math.sin(phi)
+            z = math.sin(elevation)
             
             direction_vectors.append([x, y, z])
         
@@ -2462,10 +2472,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             phi = phi_idx * (2 * math.pi / self.azimuth_divisions)
             theta = theta_idx * (math.pi / self.elevation_divisions)
             
-            # Calculate direction vector
-            x = math.sin(theta) * math.cos(phi)
-            y = math.sin(theta) * math.sin(phi)
-            z = math.cos(theta)
+            # Calculate direction vector using proper spherical coordinates
+            # Elevation: -90° to +90° (-π/2 to +π/2)
+            elevation = theta - (math.pi / 2)
+            x = math.cos(elevation) * math.cos(phi)
+            y = math.cos(elevation) * math.sin(phi)
+            z = math.sin(elevation)
             
             direction_vectors.append([x, y, z])
         
