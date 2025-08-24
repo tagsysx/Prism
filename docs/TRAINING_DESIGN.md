@@ -64,17 +64,125 @@ The training process follows this workflow:
 
 ## 3. Loss Functions and Optimization
 
-### 3.1 Frequency-Aware Loss Function
+### 3.1 Complex-Valued CSI Loss Functions
 
-The PrismLoss class implements specialized loss functions for multi-subcarrier RF signals:
+The system uses specialized loss functions designed for complex-valued CSI predictions that handle both magnitude and phase components:
 
-- **BS-Centric Ray Tracing**: Ray tracing starts from each BS antenna as the center
-- **AntennaNetwork-Guided Direction Selection**: Rays are traced along directions suggested by the AntennaNetwork
-- **Subcarrier Sampling**: For each antenna, K' subcarriers are randomly selected to reduce computational complexity
-- **CSI Computation**: CSI is calculated for selected subcarriers on each BS antenna
-- **MSE Loss**: Mean squared error between predicted CSI and ground truth CSI from real measurements
+```python
+class PrismCSILoss(nn.Module):
+    """
+    Specialized loss function for complex CSI predictions from Prism networks
+    """
+    def __init__(self, loss_type='mse', magnitude_weight=1.0, phase_weight=0.5,
+                 frequency_weights=None, subcarrier_sampling_weight=1.0):
+        super().__init__()
+        self.loss_type = loss_type
+        self.magnitude_weight = magnitude_weight
+        self.phase_weight = phase_weight
+        self.frequency_weights = frequency_weights
+        self.subcarrier_sampling_weight = subcarrier_sampling_weight
+    
+    def forward(self, predictions, targets, selected_subcarriers=None):
+        """
+        Compute loss between predicted and target CSI values
+        
+        Args:
+            predictions: (batch_size, num_selected, num_ue, num_bs) - complex
+            targets: (batch_size, num_total_subcarriers, num_ue, num_bs) - complex
+            selected_subcarriers: Indices of selected subcarriers
+        
+        Returns:
+            Total loss value
+        """
+        # Extract target values for selected subcarriers
+        if selected_subcarriers is not None:
+            targets_selected = targets[:, selected_subcarriers, :, :]
+        else:
+            targets_selected = targets
+        
+        # Magnitude loss
+        pred_magnitude = torch.abs(predictions)
+        target_magnitude = torch.abs(targets_selected)
+        magnitude_loss = F.mse_loss(pred_magnitude, target_magnitude)
+        
+        # Phase loss
+        pred_phase = torch.angle(predictions)
+        target_phase = torch.angle(targets_selected)
+        # Handle phase wrapping
+        phase_diff = torch.angle(torch.exp(1j * (pred_phase - target_phase)))
+        phase_loss = F.mse_loss(phase_diff, torch.zeros_like(phase_diff))
+        
+        # Frequency weighting
+        if self.frequency_weights is not None:
+            freq_weights = self.frequency_weights[selected_subcarriers].view(1, -1, 1, 1)
+            magnitude_loss = magnitude_loss * freq_weights
+            phase_loss = phase_loss * freq_weights
+        
+        # Subcarrier sampling compensation
+        total_loss = (self.magnitude_weight * magnitude_loss + 
+                     self.phase_weight * phase_loss) * self.subcarrier_sampling_weight
+        
+        return total_loss.mean()
+```
 
-### 3.2 Optimization Strategy
+### 3.2 Training Step Implementation
+
+Complete training step integrating network and ray tracing:
+
+```python
+def training_step(prism_network, ray_tracer, batch_data, loss_fn, optimizer):
+    """
+    Complete training step with integrated network and ray tracing
+    """
+    # Extract batch data
+    bs_positions = batch_data['bs_positions']      # (batch_size, 3)
+    ue_positions = batch_data['ue_positions']      # (batch_size, num_ue, 3)
+    antenna_indices = batch_data['antenna_indices'] # (batch_size, num_bs)
+    target_csi = batch_data['target_csi']          # (batch_size, num_subcarriers, num_ue, num_bs)
+    selected_subcarriers = batch_data['selected_subcarriers']  # (num_selected,)
+    
+    # Forward pass
+    optimizer.zero_grad()
+    
+    # Integrated prediction
+    csi_predictions = integrated_forward_pass(
+        prism_network=prism_network,
+        ray_tracer=ray_tracer,
+        bs_positions=bs_positions,
+        ue_positions=ue_positions,
+        antenna_indices=antenna_indices,
+        selected_subcarriers=selected_subcarriers
+    )
+    
+    # Compute loss
+    loss = loss_fn(
+        predictions=csi_predictions,
+        targets=target_csi,
+        selected_subcarriers=selected_subcarriers
+    )
+    
+    # Backward pass
+    loss.backward()
+    optimizer.step()
+    
+    return loss.item(), csi_predictions
+```
+
+### 3.3 Loss Function Features
+
+**Complex Signal Modeling**:
+- Full complex-valued CSI predictions with magnitude and phase
+- Proper handling of RF signal propagation physics
+- Phase-aware loss functions for accurate wireless channel modeling
+
+**Frequency-Aware Processing**:
+- BS-Centric Ray Tracing: Ray tracing starts from each BS antenna as the center
+- AntennaNetwork-Guided Direction Selection: Rays are traced along directions suggested by the AntennaNetwork
+- Subcarrier Sampling: For each antenna, K' subcarriers are randomly selected to reduce computational complexity
+- CSI Computation: CSI is calculated for selected subcarriers on each BS antenna
+- MSE Loss: Mean squared error between predicted CSI and ground truth CSI from real measurements
+
+### 3.4 Optimization Strategy
 
 - **Adam Optimizer**: Adaptive learning rate optimization with configurable parameters
 - **Learning Rate Scheduling**: Step-based or cosine annealing scheduling

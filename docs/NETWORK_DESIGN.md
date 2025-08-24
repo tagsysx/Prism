@@ -395,101 +395,14 @@ def neural_ray_tracing_step(sampled_positions, ue_positions, view_directions,
 
 ### 6.3 Loss Function Integration
 
-The system uses specialized loss functions designed for complex-valued CSI predictions:
+The system uses specialized loss functions designed for complex-valued CSI predictions. The loss computation handles both magnitude and phase components of complex CSI values, with configurable weighting and frequency-aware processing.
 
-```python
-class PrismCSILoss(nn.Module):
-    """
-    Specialized loss function for complex CSI predictions from Prism networks
-    """
-    def __init__(self, loss_type='mse', magnitude_weight=1.0, phase_weight=0.5,
-                 frequency_weights=None, subcarrier_sampling_weight=1.0):
-        super().__init__()
-        self.loss_type = loss_type
-        self.magnitude_weight = magnitude_weight
-        self.phase_weight = phase_weight
-        self.frequency_weights = frequency_weights
-        self.subcarrier_sampling_weight = subcarrier_sampling_weight
-    
-    def forward(self, predictions, targets, selected_subcarriers=None):
-        """
-        Compute loss between predicted and target CSI values
-        
-        Args:
-            predictions: (batch_size, num_selected, num_ue, num_bs) - complex
-            targets: (batch_size, num_total_subcarriers, num_ue, num_bs) - complex
-            selected_subcarriers: Indices of selected subcarriers
-        
-        Returns:
-            Total loss value
-        """
-        # Extract target values for selected subcarriers
-        if selected_subcarriers is not None:
-            targets_selected = targets[:, selected_subcarriers, :, :]
-        else:
-            targets_selected = targets
-        
-        # Magnitude loss
-        pred_magnitude = torch.abs(predictions)
-        target_magnitude = torch.abs(targets_selected)
-        magnitude_loss = F.mse_loss(pred_magnitude, target_magnitude)
-        
-        # Phase loss
-        pred_phase = torch.angle(predictions)
-        target_phase = torch.angle(targets_selected)
-        # Handle phase wrapping
-        phase_diff = torch.angle(torch.exp(1j * (pred_phase - target_phase)))
-        phase_loss = F.mse_loss(phase_diff, torch.zeros_like(phase_diff))
-        
-        # Frequency weighting
-        if self.frequency_weights is not None:
-            freq_weights = self.frequency_weights[selected_subcarriers].view(1, -1, 1, 1)
-            magnitude_loss = magnitude_loss * freq_weights
-            phase_loss = phase_loss * freq_weights
-        
-        # Subcarrier sampling compensation
-        total_loss = (self.magnitude_weight * magnitude_loss + 
-                     self.phase_weight * phase_loss) * self.subcarrier_sampling_weight
-        
-        return total_loss.mean()
+Key features include:
+- **Complex Signal Loss**: Separate magnitude and phase loss components
+- **Frequency Weighting**: Different weights for different subcarriers
+- **Subcarrier Sampling**: Compensation for computational efficiency sampling
 
-def training_step(prism_network, ray_tracer, batch_data, loss_fn, optimizer):
-    """
-    Complete training step with integrated network and ray tracing
-    """
-    # Extract batch data
-    bs_positions = batch_data['bs_positions']      # (batch_size, 3)
-    ue_positions = batch_data['ue_positions']      # (batch_size, num_ue, 3)
-    antenna_indices = batch_data['antenna_indices'] # (batch_size, num_bs)
-    target_csi = batch_data['target_csi']          # (batch_size, num_subcarriers, num_ue, num_bs)
-    selected_subcarriers = batch_data['selected_subcarriers']  # (num_selected,)
-    
-    # Forward pass
-    optimizer.zero_grad()
-    
-    # Integrated prediction
-    csi_predictions = integrated_forward_pass(
-        prism_network=prism_network,
-        ray_tracer=ray_tracer,
-        bs_positions=bs_positions,
-        ue_positions=ue_positions,
-        antenna_indices=antenna_indices,
-        selected_subcarriers=selected_subcarriers
-    )
-    
-    # Compute loss
-    loss = loss_fn(
-        predictions=csi_predictions,
-        targets=target_csi,
-        selected_subcarriers=selected_subcarriers
-    )
-    
-    # Backward pass
-    loss.backward()
-    optimizer.step()
-    
-    return loss.item(), csi_predictions
-```
+For detailed loss function implementation and training procedures, see `TRAINING_DESIGN.md`.
 
 ### 6.4 Key Integration Benefits
 

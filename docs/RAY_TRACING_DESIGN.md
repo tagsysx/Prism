@@ -19,7 +19,7 @@ The ray tracing system is centered around base stations (BS) with configurable l
 
 **Critical Concept**: Ray tracing is performed from the BS antenna outward in all directions, **not** from UE to BS or based on UE distance:
 
-- **Ray Origin**: Always starts from BS antenna position (typically $(0, 0, 0)$)
+- **Ray Origin**: Always starts from BS antenna position (configurable, defaults to $(0, 0, 0)$)
 - **Ray Direction**: Fixed directional vectors in the $A \times B$ grid
 - **Ray Length**: Fixed maximum length (`max_ray_length`), independent of UE positions
 - **UE Role**: UE positions are **only** used as inputs to the RadianceNetwork to determine how sampling points radiate toward different UEs
@@ -31,7 +31,7 @@ The antenna's directional space is discretized into a structured grid:
 - **Grid dimensions**: $A \times B$ directions
 - **Azimuth divisions**: $A$ divisions covering the horizontal plane
 - **Elevation divisions**: $B$ divisions covering the vertical plane
-- **Angular resolution**: $\Delta \phi = \frac{2\pi}{A}$ (azimuth) and $\Delta \theta = \frac{\pi}{B}$ (elevation)
+- **Angular resolution**: $\Delta \phi = \frac{2\pi}{A}$ (azimuth: 0° to 360°) and $\Delta \theta = \frac{\pi}{B}$ (elevation: -90° to +90°)
 
 ## 2. Ray Tracing Process
 
@@ -47,7 +47,7 @@ Where:
 - $P_{\text{BS}}$: Base station position
 - $\omega_{ij}$: Unit direction vector for direction $(\phi_i, \theta_j)$
 - $t$: Distance parameter along the ray
-- $\omega_{ij} = [\sin(\theta_j)\cos(\phi_i), \sin(\theta_j)\sin(\phi_i), \cos(\theta_j)]$
+- $\omega_{ij} = [\cos(\theta_j)\cos(\phi_i), \cos(\theta_j)\sin(\phi_i), \sin(\theta_j)]$ where $\theta_j$ is elevation angle from -90° to +90°
 
 ### 2.2 Energy Tracing Process
 
@@ -67,6 +67,25 @@ The system implements two key optimization strategies (as detailed in the Specif
 **Two-Stage Sampling Process**:
 
 The system implements a sophisticated two-stage sampling strategy to optimize computational efficiency while maintaining accuracy:
+
+#### Importance Weight Formula
+
+The importance weights are calculated using the physically-based formula from SPECIFICATION.md 8.1.2:
+
+```math
+w_k = \big(1 - e^{-\beta_k \Delta t}\big)\, \exp\!\Big(-\!\!\sum_{j<k}\beta_j\,\Delta t\Big)
+```
+
+Where:
+- $\beta_k = \Re(\rho(P_v(t_k)))$: Real part of the attenuation coefficient at position $k$
+- $\Delta t$: Step size along the ray
+- $(1 - e^{-\beta_k \Delta t})$: Local absorption probability at position $k$
+- $\exp(-\sum_{j<k}\beta_j\,\Delta t)$: Cumulative transmission probability up to position $k$
+
+This formula ensures that:
+1. **Physical accuracy**: Weights reflect the actual electromagnetic absorption and transmission
+2. **Cumulative attenuation**: Earlier high-attenuation regions reduce the importance of later regions
+3. **Energy conservation**: The total probability is properly normalized
 
 **Stage 1: Uniform Sampling for Weight Computation**
 ```python
@@ -105,8 +124,9 @@ def uniform_sampling_stage(ray, ue_pos, num_uniform_samples=128):
     # Extract attenuation factors for importance weight computation
     attenuation_factors = network_outputs['attenuation_factors'][0, :, 0, subcarrier_idx]
     
-    # Compute importance weights based on attenuation magnitude
-    importance_weights = torch.abs(attenuation_factors)
+    # Compute importance weights using the correct formula from SPECIFICATION.md 8.1.2
+    delta_t = ray_length / num_uniform_samples
+    importance_weights = compute_importance_weights(attenuation_factors, delta_t)
     importance_weights = importance_weights / (importance_weights.sum() + 1e-8)  # Normalize
     
     return uniform_positions, importance_weights
@@ -142,26 +162,35 @@ def importance_based_resampling(uniform_positions, importance_weights, num_final
     
     return resampled_positions
 
-def compute_importance_weights(attenuation_factors):
+def compute_importance_weights(attenuation_factors, delta_t):
     """
-    Compute importance weights based on attenuation factors
+    Compute importance weights using the formula from SPECIFICATION.md 8.1.2:
+    w_k = (1 - e^(-β_k * Δt)) * exp(-Σ_{j<k} β_j * Δt)
     
     Args:
         attenuation_factors: Complex attenuation factors from neural network
+        delta_t: Step size along the ray
     
     Returns:
         importance_weights: Normalized importance weights
     """
-    # Use magnitude of complex attenuation as importance indicator
-    importance = torch.abs(attenuation_factors)
+    # Extract real part β_k = Re(ρ(P_v(t_k))) for importance weight calculation
+    beta_k = torch.real(attenuation_factors)  # (num_samples,)
+    beta_k = torch.clamp(beta_k, min=0.0)  # Ensure non-negative for physical validity
     
-    # Add small epsilon to avoid division by zero
-    importance = importance + 1e-8
+    # Term 1: (1 - e^(-β_k * Δt)) - local absorption probability
+    local_absorption = 1.0 - torch.exp(-beta_k * delta_t)
     
-    # Normalize to create probability distribution
-    importance_weights = importance / importance.sum()
+    # Term 2: exp(-Σ_{j<k} β_j * Δt) - cumulative transmission up to point k
+    cumulative_beta = torch.cumsum(beta_k, dim=0)
+    cumulative_beta_prev = torch.cat([torch.zeros(1, device=beta_k.device), cumulative_beta[:-1]])
+    cumulative_transmission = torch.exp(-cumulative_beta_prev * delta_t)
     
-    return importance_weights
+    # Combine terms: w_k = local_absorption * cumulative_transmission
+    importance_weights = local_absorption * cumulative_transmission + 1e-8
+    
+    # Normalize to probability distribution
+    return importance_weights / torch.sum(importance_weights)
 ```
 
 **Complete Two-Stage Integration**
@@ -744,7 +773,7 @@ def batch_process_multiple_rays(directions, ue_positions, selected_subcarriers, 
     # Batch process all directions simultaneously
     # Shape transformations: (D, U, K, N) where D=directions, U=UEs, K=voxels, N=subcarriers
     all_voxel_positions = torch.stack([
-        sample_ray_voxels(ue_pos, direction, num_samples=64) 
+        sample_ray_voxels(bs_position, direction, num_samples=64) 
         for direction in directions for ue_pos in ue_positions
     ]).reshape(num_directions, num_ues, 64, 3)
     
