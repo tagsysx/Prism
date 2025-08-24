@@ -75,17 +75,9 @@ extern "C" __global__ void parallel_ray_tracing(
         ue_positions[ue_idx * 3 + 2]
     );
     
-    // Calculate ray length to UE
-    float3 ray_to_ue = make_float3(
-        ue_pos.x - bs_pos.x,
-        ue_pos.y - bs_pos.y,
-        ue_pos.z - bs_pos.z
-    );
-    
-    float ray_length = fminf(
-        fmaxf(ray_to_ue.x * direction.x + ray_to_ue.y * direction.y + ray_to_ue.z * direction.z, 0.0f),
-        max_ray_length
-    );
+    // Ray tracing from BS antenna in the given direction up to max_ray_length
+    // UE position is only used for RadianceNetwork input, not for ray length
+    float ray_length = max_ray_length;
     
     // Early termination if ray length is too short
     if (ray_length < 1e-6f) {
@@ -1960,21 +1952,22 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     def _sample_ray_points(self, ray: Ray, ue_pos: torch.Tensor, num_samples: int) -> torch.Tensor:
         """
         Sample points along the ray for discrete radiance field computation.
+        Ray tracing is from BS antenna (ray.origin) in the given direction.
+        UE position is only used as input to RadianceNetwork, not for ray length calculation.
         
         Args:
-            ray: Ray object
-            ue_pos: UE position
+            ray: Ray object (from BS antenna)
+            ue_pos: UE position (used only for RadianceNetwork input)
             num_samples: Number of sample points
         
         Returns:
             Sampled positions along the ray
         """
-        # Calculate ray length to UE
-        ray_to_ue = ue_pos - ray.origin
-        ray_length = torch.dot(ray_to_ue, ray.direction)
-        ray_length = torch.clamp(ray_length, 0, self.max_ray_length)
+        # Sample points along the ray from BS antenna up to max_ray_length
+        # No need to consider UE position for ray length calculation
+        ray_length = self.max_ray_length
         
-        # Sample points along the ray
+        # Sample points along the ray from BS antenna
         t_values = torch.linspace(0, ray_length, num_samples, device=self.device)
         sampled_positions = ray.origin.unsqueeze(0) + t_values.unsqueeze(1) * ray.direction.unsqueeze(0)
         

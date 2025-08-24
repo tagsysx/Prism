@@ -15,7 +15,17 @@ The ray tracing system is centered around base stations (BS) with configurable l
 - **Customizable positioning**: Base station location $P_{\text{BS}}$ can be configured for different deployment scenarios
 - **Multi-antenna support**: Each base station can have multiple antennas for MIMO operations
 
-### 1.2 Directional Space Division
+### 1.2 Ray Tracing Principle
+
+**Critical Concept**: Ray tracing is performed from the BS antenna outward in all directions, **not** from UE to BS or based on UE distance:
+
+- **Ray Origin**: Always starts from BS antenna position (typically $(0, 0, 0)$)
+- **Ray Direction**: Fixed directional vectors in the $A \times B$ grid
+- **Ray Length**: Fixed maximum length (`max_ray_length`), independent of UE positions
+- **UE Role**: UE positions are **only** used as inputs to the RadianceNetwork to determine how sampling points radiate toward different UEs
+- **Sampling Independence**: Ray sampling points are determined solely by the ray direction and maximum length, not by UE locations
+
+### 1.3 Directional Space Division
 
 The antenna's directional space is discretized into a structured grid:
 - **Grid dimensions**: $A \times B$ directions
@@ -63,21 +73,23 @@ The system implements a sophisticated two-stage sampling strategy to optimize co
 def uniform_sampling_stage(ray, ue_pos, num_uniform_samples=128):
     """
     Stage 1: Uniform sampling along ray to compute importance weights
+    Ray tracing is from BS antenna (ray.origin) in the given direction.
+    UE position is only used as input to RadianceNetwork.
     
     Args:
-        ray: Ray object with origin and direction
-        ue_pos: User equipment position
+        ray: Ray object with origin (BS antenna) and direction
+        ue_pos: User equipment position (for RadianceNetwork input only)
         num_uniform_samples: Number of uniform samples (typically 128)
     
     Returns:
         uniform_positions: Uniformly sampled positions along ray
         importance_weights: Computed importance weights for each position
     """
-    # Calculate ray length to UE
-    ray_to_ue = ue_pos - ray.origin
-    ray_length = torch.clamp(torch.dot(ray_to_ue, ray.direction), 0, max_ray_length)
+    # Ray tracing from BS antenna up to max_ray_length
+    # UE position is not used for ray length calculation
+    ray_length = max_ray_length
     
-    # Uniform sampling along ray
+    # Uniform sampling along ray from BS antenna
     t_values = torch.linspace(0, ray_length, num_uniform_samples, device=device)
     uniform_positions = ray.origin.unsqueeze(0) + t_values.unsqueeze(1) * ray.direction.unsqueeze(0)
     
@@ -676,8 +688,8 @@ def vectorized_accumulate_signals(base_station_pos, ue_positions, selected_subca
     
     # Process all directions with vectorized operations
     for direction_idx, direction in enumerate(all_directions):
-        # Sample voxel positions along ray
-        voxel_positions = sample_ray_voxels(ue_positions, direction, num_samples=64)
+        # Sample voxel positions along ray from BS antenna
+        voxel_positions = sample_ray_voxels(bs_position, direction, num_samples=64)
         
         # Get neural network outputs for all voxels (batch processing)
         with torch.no_grad():
