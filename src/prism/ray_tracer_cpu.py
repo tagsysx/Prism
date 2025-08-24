@@ -558,7 +558,8 @@ class CPURayTracer(RayTracer):
         Returns:
             Importance weights for resampling (num_samples,)
         """
-        # Convert complex attenuation to magnitude
+        # For importance sampling, use magnitude of complex attenuation
+        # but preserve complex values for actual computation
         attenuation_magnitude = torch.abs(attenuation_factors)
         
         # Normalize to [0, 1] range
@@ -634,50 +635,187 @@ class CPURayTracer(RayTracer):
         if subcarrier_idx >= attenuation_factors.shape[-1]:
             subcarrier_idx = 0  # Fallback to first subcarrier
         
-        attenuation = attenuation_factors[0, :, 0, subcarrier_idx]  # (num_samples,)
-        radiation = radiation_factors[0, 0, subcarrier_idx]  # scalar
+        # Extract complex attenuation and radiation for the specific subcarrier
+        attenuation = attenuation_factors[0, :, 0, subcarrier_idx]  # (num_samples,) - complex
+        radiation = radiation_factors[0, 0, subcarrier_idx]  # scalar - complex
         
-        # Calculate step size
+        # Calculate dynamic step sizes (Δt_k = t_k - t_{k-1}) for each voxel
         if num_samples > 1:
-            distances = torch.norm(sampled_positions[1:] - sampled_positions[:-1], dim=1)
-            step_size = distances.mean()
+            delta_t = torch.norm(sampled_positions[1:] - sampled_positions[:-1], dim=1)
+            # For the first voxel, use the distance from origin to first sample
+            first_delta_t = torch.norm(sampled_positions[0] - sampled_positions[0], dim=0).unsqueeze(0)  # This will be 0
+            if len(sampled_positions) > 1:
+                first_delta_t = torch.norm(sampled_positions[1] - sampled_positions[0], dim=0).unsqueeze(0)
+            delta_t = torch.cat([first_delta_t, delta_t], dim=0)
         else:
-            step_size = 1.0
+            delta_t = torch.tensor([1.0], device=self.device)
         
-        # Apply discrete radiance field integration with importance sampling
-        # S(P_RX, ω) ≈ Σ exp(-Σ ρ(P_v^j) Δt) ρ(P_v^k) S(P_v^k, -ω) Δt / p(P_v^k)
-        cumulative_attenuation = torch.zeros(num_samples, device=self.device)
-        signal_contributions = torch.zeros(num_samples, device=self.device)
+        # 🚀 VECTORIZED discrete radiance field integration according to SPECIFICATION.md
+        # S(P_RX, ω) ≈ Σ[k=1 to K] exp(-Σ[j=1 to k-1] ρ(P_v^j) Δt_j) × (1 - e^(-ρ(P_v^k) Δt_k)) × S(P_v^k, -ω)
         
-        for k in range(num_samples):
-            # Calculate cumulative attenuation up to point k
-            if k > 0:
-                cumulative_attenuation[k] = cumulative_attenuation[k-1] + torch.abs(attenuation[k-1]) * step_size
-            
-            # Calculate signal contribution from point k with importance sampling correction
-            attenuation_factor = torch.exp(-cumulative_attenuation[k])
-            local_contribution = torch.abs(attenuation[k]) * torch.abs(radiation) * step_size
-            
-            # Apply importance sampling correction factor
-            # The correction factor accounts for the probability of selecting this sample
-            if k < len(importance_weights):
-                importance_correction = 1.0 / (importance_weights[k] + 1e-8)
+        # Vectorized computation - all operations on full tensors
+        # Shape: (num_samples,) for all tensors
+        
+        # Term 1: Vectorized cumulative attenuation calculation
+        # cumsum([0, ρ₀Δt₀, ρ₁Δt₁, ...]) = [0, ρ₀Δt₀, ρ₀Δt₀+ρ₁Δt₁, ...]
+        attenuation_deltas = attenuation * delta_t  # Element-wise multiplication (complex)
+        
+        # Pad with zero at the beginning and remove last element for cumulative sum
+        padded_deltas = torch.cat([torch.zeros(1, dtype=attenuation_deltas.dtype, device=self.device), 
+                                   attenuation_deltas[:-1]], dim=0)
+        cumulative_attenuation = torch.cumsum(padded_deltas, dim=0)  # Vectorized cumulative sum
+        
+        # Term 2: Vectorized attenuation factors
+        attenuation_factors = torch.exp(-cumulative_attenuation)  # (num_samples,) complex
+        
+        # Term 3: Vectorized local absorption factors
+        local_absorption = 1.0 - torch.exp(-attenuation * delta_t)  # (num_samples,) complex
+        
+        # Term 4: Vectorized radiance (broadcast single value to all voxels)
+        # Note: In future, this should be per-voxel radiance values
+        radiance_vector = radiation.expand(num_samples)  # Broadcast to (num_samples,)
+        
+        # Term 5: Vectorized importance sampling correction
+        if len(importance_weights) > 0:
+            # Pad importance weights if needed
+            if len(importance_weights) < num_samples:
+                importance_correction = torch.cat([
+                    1.0 / (importance_weights + 1e-8),
+                    torch.ones(num_samples - len(importance_weights), device=self.device)
+                ], dim=0)
             else:
-                importance_correction = 1.0
-            
-            signal_contributions[k] = attenuation_factor * local_contribution * importance_correction
-            
-            # Early termination: stop if signal strength falls below threshold
-            if self.enable_early_termination and attenuation_factor < self.signal_threshold:
-                logger.debug(f"Early termination at sample {k}/{num_samples}, signal strength: {attenuation_factor:.2e}")
-                # Zero out remaining contributions
-                signal_contributions[k+1:] = 0.0
-                break
+                importance_correction = 1.0 / (importance_weights[:num_samples] + 1e-8)
+        else:
+            importance_correction = torch.ones(num_samples, device=self.device)
         
-        # Sum all contributions
-        total_signal = torch.sum(signal_contributions)
+        # 🎯 VECTORIZED FINAL COMPUTATION - Single tensor operation!
+        # All terms computed in parallel across all voxels
+        signal_contributions = (attenuation_factors * 
+                              local_absorption * 
+                              radiance_vector * 
+                              importance_correction)  # (num_samples,) complex
+        
+        # Early termination using vectorized operations
+        if self.enable_early_termination:
+            # Find first index where attenuation factor falls below threshold
+            valid_mask = torch.abs(attenuation_factors) >= self.signal_threshold
+            if not torch.all(valid_mask):
+                first_invalid = torch.argmax((~valid_mask).int())
+                signal_contributions[first_invalid:] = 0.0
+                logger.debug(f"Vectorized early termination at sample {first_invalid}/{num_samples}")
+        
+        # Final sum - single reduction operation
+        total_signal_complex = torch.sum(signal_contributions)
+        
+        # Handle complex result
+        if torch.is_complex(total_signal_complex):
+            total_signal = torch.abs(total_signal_complex)
+        else:
+            total_signal = total_signal_complex
         
         return total_signal.item()
+    
+    def _integrate_along_ray_batch_vectorized(self,
+                                            sampled_positions: torch.Tensor,
+                                            attenuation_factors: torch.Tensor,
+                                            radiation_factors: torch.Tensor,
+                                            subcarrier_indices: torch.Tensor,
+                                            importance_weights: torch.Tensor) -> torch.Tensor:
+        """
+        🚀 ULTRA-FAST batch vectorized ray integration for multiple subcarriers simultaneously.
+        
+        This function processes ALL subcarriers in parallel using pure tensor operations,
+        achieving maximum GPU utilization and memory bandwidth efficiency.
+        
+        Args:
+            sampled_positions: (num_samples, 3) - Voxel positions along ray
+            attenuation_factors: (batch_size, num_samples, num_ue, num_subcarriers) - Complex attenuation
+            radiation_factors: (batch_size, num_ue, num_subcarriers) - Complex radiance
+            subcarrier_indices: (num_selected_subcarriers,) - Selected subcarrier indices
+            importance_weights: (num_samples,) - Importance sampling weights
+            
+        Returns:
+            signal_strengths: (num_selected_subcarriers,) - Signal strength for each subcarrier
+        """
+        num_samples = sampled_positions.shape[0]
+        num_subcarriers = len(subcarrier_indices)
+        
+        # Extract data for selected subcarriers - shape: (num_samples, num_subcarriers)
+        attenuation_batch = attenuation_factors[0, :, 0, subcarrier_indices].T  # (num_subcarriers, num_samples)
+        radiation_batch = radiation_factors[0, 0, subcarrier_indices]  # (num_subcarriers,)
+        
+        # Calculate dynamic step sizes once for all subcarriers
+        if num_samples > 1:
+            delta_t = torch.norm(sampled_positions[1:] - sampled_positions[:-1], dim=1)
+            first_delta_t = torch.norm(sampled_positions[1] - sampled_positions[0], dim=0).unsqueeze(0)
+            delta_t = torch.cat([first_delta_t, delta_t], dim=0)
+        else:
+            delta_t = torch.tensor([1.0], device=self.device)
+        
+        # Broadcast delta_t to all subcarriers: (num_subcarriers, num_samples)
+        delta_t_batch = delta_t.unsqueeze(0).expand(num_subcarriers, -1)
+        
+        # 🎯 BATCH VECTORIZED COMPUTATION - Process ALL subcarriers simultaneously!
+        
+        # Term 1: Batch cumulative attenuation - shape: (num_subcarriers, num_samples)
+        attenuation_deltas_batch = attenuation_batch * delta_t_batch  # Element-wise (complex)
+        
+        # Pad and compute cumulative sum for all subcarriers in parallel
+        zero_pad = torch.zeros(num_subcarriers, 1, dtype=attenuation_deltas_batch.dtype, device=self.device)
+        padded_deltas_batch = torch.cat([zero_pad, attenuation_deltas_batch[:, :-1]], dim=1)
+        cumulative_attenuation_batch = torch.cumsum(padded_deltas_batch, dim=1)  # (num_subcarriers, num_samples)
+        
+        # Term 2: Batch attenuation factors - shape: (num_subcarriers, num_samples)
+        attenuation_factors_batch = torch.exp(-cumulative_attenuation_batch)
+        
+        # Term 3: Batch local absorption - shape: (num_subcarriers, num_samples)
+        local_absorption_batch = 1.0 - torch.exp(-attenuation_batch * delta_t_batch)
+        
+        # Term 4: Broadcast radiance to all samples - shape: (num_subcarriers, num_samples)
+        radiance_batch_expanded = radiation_batch.unsqueeze(1).expand(-1, num_samples)
+        
+        # Term 5: Broadcast importance correction - shape: (num_subcarriers, num_samples)
+        if len(importance_weights) > 0:
+            if len(importance_weights) < num_samples:
+                importance_correction = torch.cat([
+                    1.0 / (importance_weights + 1e-8),
+                    torch.ones(num_samples - len(importance_weights), device=self.device)
+                ], dim=0)
+            else:
+                importance_correction = 1.0 / (importance_weights[:num_samples] + 1e-8)
+        else:
+            importance_correction = torch.ones(num_samples, device=self.device)
+        
+        importance_correction_batch = importance_correction.unsqueeze(0).expand(num_subcarriers, -1)
+        
+        # 🚀 ULTIMATE VECTORIZED COMPUTATION - Single massive tensor operation!
+        # Process ALL subcarriers and ALL samples simultaneously
+        signal_contributions_batch = (attenuation_factors_batch * 
+                                    local_absorption_batch * 
+                                    radiance_batch_expanded * 
+                                    importance_correction_batch)  # (num_subcarriers, num_samples)
+        
+        # Early termination using batch operations
+        if self.enable_early_termination:
+            valid_mask_batch = torch.abs(attenuation_factors_batch) >= self.signal_threshold
+            # Find first invalid index for each subcarrier
+            invalid_indices = torch.argmax((~valid_mask_batch).int(), dim=1)
+            
+            # Create mask to zero out contributions after early termination
+            sample_indices = torch.arange(num_samples, device=self.device).unsqueeze(0).expand(num_subcarriers, -1)
+            termination_mask = sample_indices < invalid_indices.unsqueeze(1)
+            signal_contributions_batch = signal_contributions_batch * termination_mask
+        
+        # Final reduction - sum across samples for each subcarrier
+        total_signals_complex = torch.sum(signal_contributions_batch, dim=1)  # (num_subcarriers,)
+        
+        # Handle complex results
+        if torch.is_complex(total_signals_complex):
+            total_signals = torch.abs(total_signals_complex)
+        else:
+            total_signals = total_signals_complex
+        
+        return total_signals
     
     def _simple_distance_model(self, 
                               ray: Ray,
