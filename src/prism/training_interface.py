@@ -304,8 +304,15 @@ class PrismTrainingInterface(nn.Module):
         else:
             num_spatial_points = 64  # Default from config
         
-        total_rays_total = batch_size * num_bs_antennas * num_ue_antennas * num_selected * num_directions * num_spatial_points
-        logger.info(f"🚀 Starting BS-Centric ray tracing: {batch_size} batches × {num_bs_antennas} BS antennas × {num_ue_antennas} UE antennas × {num_selected} subcarriers × {num_directions} directions × {num_spatial_points} spatial points = ~{total_rays_total:,} total rays")
+        # Calculate computational workload for vectorized ray tracing
+        total_vectorized_operations = batch_size * num_bs_antennas * num_ue_antennas * num_directions
+        total_voxel_subcarrier_pairs = num_selected * num_spatial_points
+        total_computations = total_vectorized_operations * total_voxel_subcarrier_pairs
+        
+        logger.info(f"🚀 Starting BS-Centric vectorized ray tracing:")
+        logger.info(f"   📊 Workload: {batch_size} batches × {num_bs_antennas} BS antennas × {num_ue_antennas} UE antennas × {num_directions} directions = {total_vectorized_operations:,} rays")
+        logger.info(f"   🎯 Per ray: {num_selected} subcarriers × {num_spatial_points} spatial points = {total_voxel_subcarrier_pairs:,} voxel-subcarrier pairs processed in parallel")
+        logger.info(f"   ⚡ Total computations: {total_computations:,} (vectorized from {total_computations:,} serial operations)")
         
         all_ray_results = []
         all_signal_strengths = []
@@ -344,8 +351,14 @@ class PrismTrainingInterface(nn.Module):
                     else:
                         num_spatial_points = 64  # Default from config
                     
-                    total_rays_per_antenna = actual_directions * num_ue_antennas * num_selected * num_spatial_points
-                    logger.info(f"📡 Processing BS antenna {bs_antenna_idx+1}/{num_bs_antennas} ({progress:.1f}%) - Will trace ~{total_rays_per_antenna:,} rays ({actual_directions} directions × {num_ue_antennas} UE antennas × {num_selected} subcarriers × {num_spatial_points} spatial points)")
+                    vectorized_ops_per_antenna = actual_directions * num_ue_antennas
+                    computations_per_op = num_selected * num_spatial_points
+                    total_computations_per_antenna = vectorized_ops_per_antenna * computations_per_op
+                    
+                    logger.info(f"📡 Processing BS antenna {bs_antenna_idx+1}/{num_bs_antennas} ({progress:.1f}%)")
+                    logger.info(f"   🎯 Rays: {actual_directions} directions × {num_ue_antennas} UE antennas = {vectorized_ops_per_antenna:,}")
+                    logger.info(f"   ⚡ Per ray: {num_selected} subcarriers × {num_spatial_points} voxels = {computations_per_op:,} parallel computations")
+                    logger.info(f"   📊 Total: {total_computations_per_antenna:,} computations (vectorized execution)")
             
             # Get antenna-specific embedding
             antenna_embedding = self.prism_network.antenna_codebook(
