@@ -353,11 +353,15 @@ class RayTracer(ABC):
         
         return resampled_positions
     
-    def _ensure_complex_accumulation(self, accumulated_signals: Dict, key: tuple, signal_strength: torch.Tensor):
+    def _ensure_complex_accumulation(self, accumulated_signals: Dict, key: tuple, signal_strength):
         """Helper function to ensure proper complex signal accumulation."""
         if key not in accumulated_signals:
             # Initialize with complex zero
             accumulated_signals[key] = torch.tensor(0.0 + 0.0j, dtype=torch.complex64)
+        
+        # Convert signal_strength to tensor if it's a scalar
+        if not isinstance(signal_strength, torch.Tensor):
+            signal_strength = torch.tensor(signal_strength, dtype=torch.complex64)
         
         # Ensure signal_strength is complex
         if not torch.is_complex(signal_strength):

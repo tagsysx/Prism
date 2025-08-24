@@ -936,7 +936,8 @@ class CPURayTracer(RayTracer):
                     # Accumulate signals with level weighting
                     level_weight = 1.0 / (level + 1)  # Higher levels get lower weight
                     for (ue_pos, subcarrier), signal_strength in ray_results.items():
-                        self._ensure_complex_accumulation(accumulated_signals, (ue_pos, subcarrier), signal_strength) * level_weight
+                        weighted_signal = signal_strength * level_weight
+                        self._ensure_complex_accumulation(accumulated_signals, (ue_pos, subcarrier), weighted_signal)
         
         return accumulated_signals
     
