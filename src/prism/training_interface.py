@@ -509,11 +509,8 @@ class PrismTrainingInterface(nn.Module):
                             if (ue_pos_tuple, k) in ray_results:
                                 signal_strength = ray_results[(ue_pos_tuple, k)]
                                 
-                                # Convert signal strength to complex CSI
-                                # All UE antennas share the same device position
-                                csi_value = self._signal_strength_to_csi(
-                                    signal_strength, bs_position[b], ue_positions[b], k
-                                )
+                                # Use complex signal directly as CSI (already contains phase information)
+                                csi_value = signal_strength.to(torch.complex64)
                                 csi_predictions[b, bs_antenna_idx, u, k_idx] = csi_value
                             else:
                                 # Fallback for missing results
@@ -624,43 +621,7 @@ class PrismTrainingInterface(nn.Module):
         view_directions = view_directions / (torch.norm(view_directions, dim=-1, keepdim=True) + 1e-8)
         return view_directions
     
-    def _signal_strength_to_csi(
-        self,
-        signal_strength: torch.Tensor,
-        bs_pos: torch.Tensor,
-        ue_pos: torch.Tensor,
-        subcarrier_idx: int
-    ) -> torch.complex64:
-        """
-        Convert ray_tracer complex signal to complex CSI value.
-        
-        Args:
-            signal_strength: Complex signal from ray_tracer (already contains phase information)
-            bs_pos: Base station position
-            ue_pos: UE position
-            subcarrier_idx: Subcarrier index
-            
-        Returns:
-            Complex CSI value
-        """
-        # If signal_strength is already complex, use it directly
-        if torch.is_complex(signal_strength):
-            # Ray tracer already provides complex signal with proper phase
-            return signal_strength.to(torch.complex64)
-        else:
-            # Fallback for backward compatibility: convert real signal to complex
-            # Calculate distance-based phase
-            distance = torch.norm(ue_pos - bs_pos)
-            phase = 2 * torch.pi * subcarrier_idx * distance / 100.0  # Normalized wavelength
-            
-            # Convert signal strength to complex CSI with phase
-            amplitude = torch.sqrt(torch.as_tensor(signal_strength, dtype=torch.float32, device=bs_pos.device))
-            csi_value = torch.complex(
-                amplitude * torch.cos(phase), 
-                amplitude * torch.sin(phase)
-            )
-            
-            return csi_value.to(torch.complex64)
+
     
 
     

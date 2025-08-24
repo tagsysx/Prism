@@ -296,33 +296,13 @@ def integrated_forward_pass(prism_network, ray_tracer, bs_positions, ue_position
                 for k_idx, k in enumerate(selected_subcarriers):
                     complex_signal = accumulated_signals[b, u, k_idx]
                     
-                    # Convert complex signal to CSI (signal already contains phase information)
-                    csi_value = signal_strength_to_csi(
-                        complex_signal, bs_positions[b], ue_positions[b, u], k
-                    )
+                    # Use complex signal directly as CSI (already contains phase information)
+                    csi_value = complex_signal.to(torch.complex64)
                     csi_predictions[b, k_idx, u, bs_antenna_idx] = csi_value
     
     return csi_predictions
 
-def signal_strength_to_csi(complex_signal, bs_pos, ue_pos, subcarrier_idx):
-    """Convert ray tracing complex signal to complex CSI value"""
-    # Ray tracer now returns complex signals that already contain phase information
-    if torch.is_complex(complex_signal):
-        # Use the complex signal directly - it already contains proper phase
-        return complex_signal.to(torch.complex64)
-    else:
-        # Fallback for backward compatibility
-        # Compute distance-based phase
-        distance = torch.norm(ue_pos - bs_pos)
-        phase = 2 * torch.pi * subcarrier_idx * distance / 100.0  # Normalized wavelength
-        
-        # Convert to complex CSI
-        amplitude = torch.sqrt(torch.abs(complex_signal))
-        csi_value = torch.complex(
-            amplitude * torch.cos(phase),
-            amplitude * torch.sin(phase)
-        )
-        return csi_value
+
 ```
 
 #### 6.2 Ray Tracing with Neural Network Components
