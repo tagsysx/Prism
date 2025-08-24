@@ -509,107 +509,12 @@ class CPURayTracer(RayTracer):
             logger.warning(f"Neural network computation failed: {e}. Using fallback model.")
             return self._simple_distance_model(ray, ue_pos, subcarrier_idx, antenna_embedding)
     
-    def _sample_ray_points(self, ray: Ray, ue_pos: torch.Tensor, num_samples: int) -> torch.Tensor:
-        """
-        Sample points along the ray for discrete radiance field computation.
-        Ray tracing is from BS antenna (ray.origin) in the given direction.
-        UE position is only used as input to RadianceNetwork, not for ray length calculation.
-        
-        Args:
-            ray: Ray object (from BS antenna)
-            ue_pos: UE position (used only for RadianceNetwork input)
-            num_samples: Number of sample points
-        
-        Returns:
-            Sampled positions along the ray
-        """
-        # Sample points along the ray from BS antenna up to max_ray_length
-        # No need to consider UE position for ray length calculation
-        ray_length = self.max_ray_length
-        
-        # Sample points along the ray from BS antenna
-        t_values = torch.linspace(0, ray_length, num_samples, device=self.device)
-        sampled_positions = ray.origin.unsqueeze(0) + t_values.unsqueeze(1) * ray.direction.unsqueeze(0)
-        
-        # Filter out points outside scene boundaries
-        valid_mask = self.is_position_in_scene(sampled_positions)
-        if not valid_mask:
-            # If no valid positions, return empty tensor
-            return torch.empty(0, 3, device=self.device)
-        
-        # Return only valid positions
-        valid_positions = sampled_positions[valid_mask]
-        
-        # Ensure we have at least some samples
-        if len(valid_positions) < num_samples // 2:
-            logger.warning(f"Only {len(valid_positions)} valid positions out of {num_samples} requested")
-        
-        return valid_positions
-    
-
-    def _compute_importance_weights(self, attenuation_factors: torch.Tensor) -> torch.Tensor:
-        """
-        Compute importance weights based on attenuation factors.
-        
-        Higher attenuation regions get higher weights for importance sampling.
-        
-        Args:
-            attenuation_factors: Attenuation factors from uniform sampling (num_samples,)
-        
-        Returns:
-            Importance weights for resampling (num_samples,)
-        """
-        # For importance sampling, use magnitude of complex attenuation
-        # but preserve complex values for actual computation
-        attenuation_magnitude = torch.abs(attenuation_factors)
-        
-        # Normalize to [0, 1] range
-        if torch.max(attenuation_magnitude) > 0:
-            normalized_attenuation = attenuation_magnitude / torch.max(attenuation_magnitude)
-        else:
-            normalized_attenuation = torch.ones_like(attenuation_magnitude)
-        
-        # Apply non-linear transformation to emphasize high-attenuation regions
-        # Use power function to increase contrast
-        importance_weights = torch.pow(normalized_attenuation, 2.0)
-        
-        # Add small epsilon to avoid zero weights
-        importance_weights = importance_weights + 1e-6
-        
-        # Normalize weights to sum to 1
-        importance_weights = importance_weights / torch.sum(importance_weights)
-        
-        return importance_weights
-    
-    def _importance_based_resampling(self, 
-                                   uniform_positions: torch.Tensor,
-                                   importance_weights: torch.Tensor,
-                                   num_samples: int) -> torch.Tensor:
-        """
-        Perform importance-based resampling based on computed weights.
-        
-        Args:
-            uniform_positions: Uniformly sampled positions (num_uniform_samples, 3)
-            importance_weights: Importance weights for each position (num_uniform_samples,)
-            num_samples: Number of samples to select
-        
-        Returns:
-            Resampled positions based on importance (num_samples, 3)
-        """
-        num_uniform_samples = uniform_positions.shape[0]
-        
-        if num_samples >= num_uniform_samples:
-            # If we want more samples than available, return all with repetition
-            return uniform_positions
-        
-        # Use importance sampling to select positions
-        # Higher weight positions have higher probability of being selected
-        selected_indices = torch.multinomial(importance_weights, num_samples, replacement=True)
-        
-        # Get resampled positions
-        resampled_positions = uniform_positions[selected_indices]
-        
-        return resampled_positions
+    # Common functions moved to base class:
+    # - _sample_ray_points
+    # - _compute_importance_weights  
+    # - _importance_based_resampling
+    # - _ensure_complex_accumulation
+    # - _simple_distance_model
     
     def _integrate_along_ray_with_importance(self,
                                            sampled_positions: torch.Tensor,
@@ -800,39 +705,7 @@ class CPURayTracer(RayTracer):
         
         return total_signals
     
-    def _simple_distance_model(self, 
-                              ray: Ray,
-                              ue_pos: torch.Tensor,
-                              subcarrier_idx: int,
-                              antenna_embedding: torch.Tensor) -> float:
-        """
-        Simple distance-based model as fallback when neural network is not available.
-        
-        Args:
-            ray: Ray object
-            ue_pos: UE position
-            subcarrier_idx: Subcarrier index
-            antenna_embedding: Antenna embedding parameter
-        
-        Returns:
-            Computed signal strength using simple model
-        """
-        # Calculate distance from base station to UE
-        distance = torch.norm(ue_pos - ray.origin)
-        
-        # Apply distance-based attenuation (exponential decay model)
-        base_attenuation = torch.exp(-distance / 50.0)  # 50m characteristic distance
-        
-        # Apply antenna embedding influence
-        antenna_factor = torch.norm(antenna_embedding) / math.sqrt(128)  # Normalize to [0, 1]
-        
-        # Apply frequency-dependent effects (subcarrier index)
-        frequency_factor = 1.0 / (1.0 + 0.1 * subcarrier_idx)  # Simple frequency dependency
-        
-        # Combine factors
-        signal_strength = base_attenuation * antenna_factor * frequency_factor
-        
-        return signal_strength.item()
+    # _simple_distance_model moved to base class
     
     def accumulate_signals(self, 
                           base_station_pos: torch.Tensor,
@@ -1199,17 +1072,7 @@ class CPURayTracer(RayTracer):
             logger.warning(f"Parallel ray tracing failed for direction {direction}: {e}")
             return {}
     
-    def _ensure_complex_accumulation(self, accumulated_signals: Dict, key: tuple, signal_strength: torch.Tensor):
-        """Helper function to ensure proper complex signal accumulation."""
-        if key not in accumulated_signals:
-            # Initialize with complex zero
-            accumulated_signals[key] = torch.tensor(0.0 + 0.0j, dtype=torch.complex64)
-        
-        # Ensure signal_strength is complex
-        if not torch.is_complex(signal_strength):
-            signal_strength = torch.complex(signal_strength, torch.tensor(0.0))
-        
-        accumulated_signals[key] += signal_strength
+    # _ensure_complex_accumulation moved to base class
     
     def _accumulate_signals_parallel(self, 
                                    base_station_pos: torch.Tensor,
