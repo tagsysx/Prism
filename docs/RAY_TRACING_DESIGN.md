@@ -217,18 +217,16 @@ The ray tracing system integrates with four neural networks:
 #### 3.4.1 Complex Signal Flow
 
 ```python
-# ✅ CORRECT: Complex computation throughout
 def _compute_signal_at_spatial_point(spatial_position, ue_pos, subcarrier_idx, antenna_embedding):
     # Neural networks output complex values
     attenuation_factor = attenuation_network(spatial_position)  # Complex
     radiation_factor = radiance_network(ue_pos, view_dir, antenna_embedding)  # Complex
     
-    # Preserve complex computation - DO NOT convert to real
+    # Preserve complex computation throughout
     complex_signal = attenuation_factor * radiation_factor  # Complex multiplication
     
     return complex_signal  # Return complex tensor
 
-# ✅ CORRECT: Complex signal accumulation
 def accumulate_signals(bs_pos, ue_positions, selected_subcarriers, antenna_embedding):
     accumulated_signals = {}
     
@@ -242,10 +240,9 @@ def accumulate_signals(bs_pos, ue_positions, selected_subcarriers, antenna_embed
     
     return accumulated_signals  # Returns complex signals
 
-# ✅ CORRECT: Only convert to real during loss computation
 def compute_loss(predictions, targets, loss_function):
     # predictions and targets are complex CSI values
-    # Only here do we convert to real for MSE calculation
+    # Convert to real only during loss computation
     pred_magnitude = torch.abs(predictions)  # Complex → Real
     target_magnitude = torch.abs(targets)    # Complex → Real
     
@@ -262,18 +259,7 @@ def compute_loss(predictions, targets, loss_function):
 - **Frequency Domain**: Natural representation for OFDM subcarriers
 - **Channel State Information**: CSI inherently complex-valued in wireless systems
 
-**Incorrect Approaches to Avoid**:
-```python
-# ❌ WRONG: Converting to real during ray tracing
-if complex_signal.is_complex():
-    signal_strength = torch.abs(complex_signal)  # Loses phase information!
 
-# ❌ WRONG: Real-valued accumulation
-accumulated_signals[(ue_pos, subcarrier)] = 0.0  # Should be complex zero
-
-# ❌ WRONG: Real-valued initialization
-results = torch.zeros(shape, dtype=torch.float32)  # Should be complex64
-```
 
 ### 3.5 Virtual Link Computation
 
