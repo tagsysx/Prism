@@ -675,25 +675,12 @@ class CPURayTracer(RayTracer):
         # Note: In future, this should be per-voxel radiance values
         radiance_vector = radiation.expand(num_samples)  # Broadcast to (num_samples,)
         
-        # Term 5: Vectorized importance sampling correction
-        if len(importance_weights) > 0:
-            # Pad importance weights if needed
-            if len(importance_weights) < num_samples:
-                importance_correction = torch.cat([
-                    1.0 / (importance_weights + 1e-8),
-                    torch.ones(num_samples - len(importance_weights), device=self.device)
-                ], dim=0)
-            else:
-                importance_correction = 1.0 / (importance_weights[:num_samples] + 1e-8)
-        else:
-            importance_correction = torch.ones(num_samples, device=self.device)
-        
         # 🎯 VECTORIZED FINAL COMPUTATION - Single tensor operation!
         # All terms computed in parallel across all voxels
+        # Note: No importance correction needed here since we already did importance-based resampling
         signal_contributions = (attenuation_factors * 
                               local_absorption * 
-                              radiance_vector * 
-                              importance_correction)  # (num_samples,) complex
+                              radiance_vector)  # (num_samples,) complex
         
         # Early termination using vectorized operations
         if self.enable_early_termination:

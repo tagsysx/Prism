@@ -53,9 +53,13 @@ For each antenna of the base station, the system traces RF energy along all $A \
 The system implements two key optimization strategies (as detailed in the Specification):
 
 #### 2.3.1 Importance-Based Sampling
+- **Two-stage sampling process**: 
+  1. **Uniform sampling**: Sample points uniformly along the ray to compute importance weights
+  2. **Importance-based resampling**: Resample points based on computed importance weights
 - **Adaptive sampling density**: Concentrates computational resources in high-attenuation regions
 - **Non-uniform discretization**: Optimizes sampling based on material properties
 - **Efficiency improvement**: Reduces ineffective computation in low-attenuation areas
+- **No importance correction in integration**: Since resampling is already done, no additional importance weights are needed in signal integration
 
 #### 2.3.2 Pyramid Ray Tracing
 - **Spatial subdivision**: Divides directional space into pyramidal regions
@@ -363,16 +367,13 @@ def vectorized_ray_tracing(attenuation, radiation, delta_t, importance_weights):
     # Step 5: Broadcast radiance S_expanded = S ⊕ K
     radiation_expanded = radiation.unsqueeze(0).expand(K, -1)  # (N,) → (K,N)
     
-    # Step 6: Broadcast importance weights W = (1/w) ⊕ N
-    importance_correction = (1.0 / (importance_weights + 1e-8)).unsqueeze(1).expand(-1, N)
-    
-    # Step 7: Vectorized computation Contrib = A ⊙ L ⊙ S ⊙ W
+    # Step 6: Vectorized computation Contrib = A ⊙ L ⊙ S
+    # Note: No importance correction needed since we already did importance-based resampling
     signal_contributions = (attenuation_factors * 
                           local_absorption * 
-                          radiation_expanded * 
-                          importance_correction)  # (K,N)
+                          radiation_expanded)  # (K,N)
     
-    # Step 8: Final reduction Result = Σ_k Contrib
+    # Step 7: Final reduction Result = Σ_k Contrib
     result = torch.sum(signal_contributions, dim=0)  # (K,N) → (N,)
     
     return result  # Return complex result - DO NOT convert to magnitude
