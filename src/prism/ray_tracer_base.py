@@ -404,29 +404,68 @@ class RayTracer(ABC):
                               antenna_embedding: torch.Tensor) -> float:
         """
         Simple distance-based model as fallback when neural network is not available.
+        This model simulates ray tracing by sampling points along the ray and computing
+        signal contributions from sampling points to BS antenna.
         
         Args:
-            ray: Ray object
-            ue_pos: UE position
+            ray: Ray object (from BS antenna)
+            ue_pos: UE position (used for radiation direction calculation)
             subcarrier_idx: Subcarrier index
             antenna_embedding: Antenna embedding parameter
         
         Returns:
             Computed signal strength using simple model
         """
-        # Calculate distance from base station to UE
-        distance = torch.norm(ue_pos - ray.origin)
+        # Sample points along the ray from BS antenna
+        num_samples = 32  # Simple model uses fewer samples
+        ray_length = self.max_ray_length
+        t_values = torch.linspace(0, ray_length, num_samples, device=self.device)
+        sampled_positions = ray.origin.unsqueeze(0) + t_values.unsqueeze(1) * ray.direction.unsqueeze(0)
         
-        # Apply distance-based attenuation (exponential decay model)
-        base_attenuation = torch.exp(-distance / 50.0)  # 50m characteristic distance
+        # Filter points within scene boundaries
+        valid_mask = self.is_position_in_scene(sampled_positions)
+        if not valid_mask.any():
+            return 0.0
         
-        # Apply antenna embedding influence
-        antenna_factor = torch.norm(antenna_embedding) / math.sqrt(128)  # Normalize to [0, 1]
+        valid_positions = sampled_positions[valid_mask]
+        valid_t_values = t_values[valid_mask]
         
-        # Apply frequency-dependent effects (subcarrier index)
-        frequency_factor = 1.0 / (1.0 + 0.1 * subcarrier_idx)  # Simple frequency dependency
+        # Calculate signal contributions from each sampling point
+        total_signal = 0.0
+        step_size = ray_length / num_samples
+        cumulative_attenuation = 1.0
         
-        # Combine factors
-        signal_strength = base_attenuation * antenna_factor * frequency_factor
+        for i, (pos, t) in enumerate(zip(valid_positions, valid_t_values)):
+            # Distance from sampling point to BS antenna (ray origin)
+            distance_to_bs = t.item()  # Distance along ray from BS antenna
+            
+            # Distance from sampling point to UE (for radiation calculation)
+            distance_to_ue = torch.norm(pos - ue_pos).item()
+            
+            # Local attenuation based on distance from BS antenna
+            local_attenuation = 0.1 * torch.exp(-distance_to_bs / 30.0)  # Attenuation coefficient
+            
+            # Radiation factor based on distance to UE (closer UE = stronger radiation)
+            radiation_factor = torch.exp(-distance_to_ue / 40.0)  # Radiation strength
+            
+            # Apply antenna embedding influence
+            antenna_factor = torch.norm(antenna_embedding) / math.sqrt(128)  # Normalize to [0, 1]
+            
+            # Apply frequency-dependent effects
+            frequency_factor = 1.0 / (1.0 + 0.1 * subcarrier_idx)
+            
+            # Local signal contribution: (1 - e^(-ρΔt)) × S
+            local_absorption = 1.0 - torch.exp(-local_attenuation * step_size)
+            local_contribution = local_absorption * radiation_factor * antenna_factor * frequency_factor
+            
+            # Apply cumulative attenuation and accumulate
+            total_signal += cumulative_attenuation * local_contribution
+            
+            # Update cumulative attenuation for next sample
+            cumulative_attenuation *= torch.exp(-local_attenuation * step_size)
+            
+            # Early termination if signal becomes negligible
+            if cumulative_attenuation < 1e-6:
+                break
         
-        return signal_strength.item()
+        return float(total_signal)
