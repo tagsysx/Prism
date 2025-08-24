@@ -18,6 +18,7 @@ from .attenuation_decoder import AttenuationDecoder, AttenuationDecoderConfig
 from .antenna_codebook import AntennaEmbeddingCodebook, AntennaEmbeddingCodebookConfig
 from .antenna_network import AntennaNetwork, AntennaNetworkConfig
 from .radiance_network import RadianceNetwork, RadianceNetworkConfig
+from .positional_encoder import PositionalEncoder, create_position_encoder, create_direction_encoder
 
 
 class PrismNetwork(nn.Module):
@@ -64,14 +65,20 @@ class PrismNetwork(nn.Module):
         self.top_k_directions = top_k_directions
         self.complex_output = complex_output
         
-        # Calculate IPE encoding dimensions
+        # Initialize positional encoders
         if use_ipe_encoding:
-            # IPE encoding: 21 frequencies * 3 dimensions = 63
-            self.ipe_position_dim = 63
-            self.ipe_direction_dim = 63
+            # Use traditional PE encoding instead of IPE for now
+            self.position_encoder = create_position_encoder()  # 10 frequencies, include_input=True
+            self.direction_encoder = create_position_encoder()  # Use same as position (10 frequencies) for consistency
+            
+            # Calculate PE encoding dimensions
+            self.pe_position_dim = self.position_encoder.get_output_dim()  # 3 + 2*10*3 = 63
+            self.pe_direction_dim = self.direction_encoder.get_output_dim()  # 3 + 2*10*3 = 63
         else:
-            self.ipe_position_dim = position_dim
-            self.ipe_direction_dim = position_dim
+            self.position_encoder = None
+            self.direction_encoder = None
+            self.pe_position_dim = position_dim
+            self.pe_direction_dim = position_dim
         
         # Build network components
         self._build_networks()
@@ -81,7 +88,7 @@ class PrismNetwork(nn.Module):
         
         # 1. AttenuationNetwork: Encode spatial position information
         self.attenuation_network = AttenuationNetwork(
-            input_dim=self.ipe_position_dim,
+            input_dim=self.pe_position_dim,
             hidden_dim=self.hidden_dim,
             output_dim=self.feature_dim,
             complex_output=self.complex_output
@@ -115,8 +122,8 @@ class PrismNetwork(nn.Module):
         
         # 5. RadianceNetwork: Radiation modeling
         self.radiance_network = RadianceNetwork(
-            ue_position_dim=self.ipe_position_dim,
-            view_direction_dim=self.ipe_direction_dim,
+            ue_position_dim=self.pe_position_dim,
+            view_direction_dim=self.pe_direction_dim,
             feature_dim=self.feature_dim,
             antenna_embedding_dim=self.antenna_embedding_dim,
             hidden_dim=self.hidden_dim,
@@ -153,16 +160,10 @@ class PrismNetwork(nn.Module):
         # Reshape to (batch_size * num_voxels, 3) for processing
         positions_flat = sampled_positions.view(-1, 3)
         
-        # Apply IPE encoding if enabled
-        if self.use_ipe_encoding:
-            # Note: In practice, you would implement IPE encoding here
-            # For now, we'll expand 3D positions to match the expected input dimension
-            # This is a placeholder - in practice you would implement proper IPE encoding
-            if positions_flat.shape[-1] == 3:
-                # Expand 3D positions to 63D (placeholder for IPE encoding)
-                encoded_positions = positions_flat.repeat(1, 21)  # 21 frequencies * 3 dimensions
-            else:
-                encoded_positions = positions_flat
+        # Apply positional encoding if enabled
+        if self.use_ipe_encoding and self.position_encoder is not None:
+            # Use traditional PE encoding
+            encoded_positions = self.position_encoder(positions_flat)
         else:
             encoded_positions = positions_flat
         
@@ -224,29 +225,26 @@ class PrismNetwork(nn.Module):
         )
         
         # 5. RadianceNetwork: Get radiation factors
-        # Apply IPE encoding to UE positions and view directions if enabled
-        if self.use_ipe_encoding:
-            # Note: In practice, you would implement IPE encoding here
-            # For now, we'll expand 3D positions/directions to match the expected input dimension
-            # This is a placeholder - in practice you would implement proper IPE encoding
-            if ue_positions.shape[-1] == 3:
-                encoded_ue_positions = ue_positions.repeat(1, 21)  # 21 frequencies * 3 dimensions
-            else:
-                encoded_ue_positions = ue_positions
-                
-            if view_directions.shape[-1] == 3:
-                encoded_view_directions = view_directions.repeat(1, 21)  # 21 frequencies * 3 dimensions
-            else:
-                encoded_view_directions = view_directions
+        # Apply positional encoding to UE positions and view directions if enabled
+        if self.use_ipe_encoding and self.position_encoder is not None and self.direction_encoder is not None:
+            # Use traditional PE encoding
+            encoded_ue_positions = self.position_encoder(ue_positions)
+            encoded_view_directions = self.direction_encoder(view_directions)
         else:
             encoded_ue_positions = ue_positions
             encoded_view_directions = view_directions
         
         # Get radiation factors
+        # Convert complex features to real for RadianceNetwork input
+        mean_features = features.mean(dim=1)  # Use mean features across voxels
+        if torch.is_complex(mean_features):
+            # Convert complex features to real by taking magnitude
+            mean_features = torch.abs(mean_features)
+        
         radiation_factors = self.radiance_network(
             encoded_ue_positions,
             encoded_view_directions,
-            features.mean(dim=1),  # Use mean features across voxels
+            mean_features,
             antenna_embeddings
         )
         
