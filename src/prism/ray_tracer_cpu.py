@@ -1290,7 +1290,7 @@ class CPURayTracer(RayTracer):
             
             # Compute signal strength at this spatial point
             signal_strength = self._compute_signal_at_spatial_point(
-                spatial_position, ue_pos, subcarrier_idx, antenna_embedding
+                spatial_position, ue_pos, subcarrier_idx, antenna_embedding, ray.origin
             )
             
             return signal_strength
@@ -1333,7 +1333,8 @@ class CPURayTracer(RayTracer):
                                        spatial_position: torch.Tensor,
                                        ue_pos: torch.Tensor,
                                        subcarrier_idx: int,
-                                       antenna_embedding: torch.Tensor) -> torch.Tensor:
+                                       antenna_embedding: torch.Tensor,
+                                       bs_position: torch.Tensor) -> torch.Tensor:
         """
         Compute signal strength at a specific spatial point.
         
@@ -1342,14 +1343,14 @@ class CPURayTracer(RayTracer):
             ue_pos: UE position
             subcarrier_idx: Subcarrier index
             antenna_embedding: Antenna embedding parameter
+            bs_position: BS antenna position (ray origin)
         
         Returns:
             Computed signal strength
         """
         try:
-            # Compute viewing direction from spatial point to UE
-            view_direction = ue_pos - spatial_position
-            view_direction = view_direction / (torch.norm(view_direction) + 1e-8)
+            # Compute viewing direction from spatial point to BS antenna (consistent with unified approach)
+            view_direction = self._compute_view_directions(spatial_position.unsqueeze(0), bs_position).squeeze(0)
             
             # Create antenna indices
             antenna_indices = torch.zeros(1, dtype=torch.long, device=self.device)
@@ -1533,7 +1534,7 @@ class CPURayTracer(RayTracer):
                             spatial_position = self._sample_ray_point_at_index(ray, ue_pos_tensor, i)
                             if spatial_position is not None:
                                 signal = self._compute_signal_at_spatial_point(
-                                    spatial_position, ue_pos_tensor, subcarrier_idx, antenna_embedding
+                                    spatial_position, ue_pos_tensor, subcarrier_idx, antenna_embedding, ray.origin
                                 )
                                 total_signal += signal
                         direction_results[(tuple(ue_pos), subcarrier_idx)] = total_signal
@@ -1686,7 +1687,7 @@ class CPURayTracer(RayTracer):
                             spatial_position = self._sample_ray_point_at_index(ray, ue_pos_tensor, i)
                             if spatial_position is not None:
                                 signal = self._compute_signal_at_spatial_point(
-                                    spatial_position, ue_pos_tensor, subcarrier_idx, antenna_embedding
+                                    spatial_position, ue_pos_tensor, subcarrier_idx, antenna_embedding, ray.origin
                                 )
                                 total_signal += signal
                     direction_results[(tuple(ue_pos), subcarrier_indices[0])] = total_signal
@@ -1744,7 +1745,7 @@ class CPURayTracer(RayTracer):
                 spatial_position = self._sample_ray_point_at_index(ray, ue_pos, i)
                 if spatial_position is not None:
                     signal = self._compute_signal_at_spatial_point(
-                        spatial_position, ue_pos, subcarrier_idx, antenna_embedding
+                        spatial_position, ue_pos, subcarrier_idx, antenna_embedding, ray.origin
                     )
                     total_signal += signal
             
@@ -1926,7 +1927,7 @@ class CPURayTracer(RayTracer):
                             spatial_position = self._sample_ray_point_at_index(ray, ue_pos_tensor, i)
                             if spatial_position is not None:
                                 signal = self._compute_signal_at_spatial_point(
-                                    spatial_position, ue_pos_tensor, subcarrier_idx, antenna_embedding
+                                    spatial_position, ue_pos_tensor, subcarrier_idx, antenna_embedding, ray.origin
                                 )
                                 total_signal += signal
                         direction_results[(tuple(ue_pos), subcarrier_idx)] = total_signal
@@ -1956,7 +1957,7 @@ class CPURayTracer(RayTracer):
             
             # Compute signal at this spatial point
             signal = self._compute_signal_at_spatial_point(
-                spatial_position, ue_pos, subcarrier_idx, antenna_embedding
+                spatial_position, ue_pos, subcarrier_idx, antenna_embedding, ray.origin
             )
             
             return signal
@@ -2040,7 +2041,7 @@ class CPURayTracer(RayTracer):
                             spatial_position = self._sample_ray_point_at_index(ray, ue_pos_tensor, i)
                             if spatial_position is not None:
                                 signal = self._compute_signal_at_spatial_point(
-                                    spatial_position, ue_pos_tensor, subcarrier_idx, antenna_embedding
+                                    spatial_position, ue_pos_tensor, subcarrier_idx, antenna_embedding, ray.origin
                                 )
                                 total_signal += signal
                         direction_results[(tuple(ue_pos), subcarrier_idx)] = total_signal
@@ -2070,7 +2071,7 @@ class CPURayTracer(RayTracer):
             
             # Compute signal at this spatial point
             signal = self._compute_signal_at_spatial_point(
-                spatial_position, ue_pos, subcarrier_idx, antenna_embedding
+                spatial_position, ue_pos, subcarrier_idx, antenna_embedding, ray.origin
             )
             
             return signal
@@ -2159,7 +2160,7 @@ class CPURayTracer(RayTracer):
                 spatial_position = self._sample_ray_point_at_index(ray, ue_pos, i)
                 if spatial_position is not None:
                     signal = self._compute_signal_at_spatial_point(
-                        spatial_position, ue_pos, subcarrier_idx, antenna_embedding
+                        spatial_position, ue_pos, subcarrier_idx, antenna_embedding, ray.origin
                     )
                     total_signal += signal
             

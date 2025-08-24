@@ -119,7 +119,7 @@ The system implements a sophisticated two-stage sampling strategy to optimize co
 The importance weights are calculated using the physically-based formula from SPECIFICATION.md 8.1.2:
 
 ```math
-w_k = \big(1 - e^{-\beta_k \Delta t}\big)\, \exp\!\Big(-\!\!\sum_{j<k}\beta_j\,\Delta t\Big)
+w_k = (1 - e^{-\beta_k \Delta t}) \, \exp\Bigl(-\sum_{j<k}\beta_j\,\Delta t\Bigr)
 ```
 
 Where:
