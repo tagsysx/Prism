@@ -551,16 +551,8 @@ class CPURayTracer(RayTracer):
         attenuation = attenuation_factors[0, :, 0, subcarrier_idx]  # (num_samples,) - complex
         radiation = radiation_factors[0, 0, subcarrier_idx]  # scalar - complex
         
-        # Calculate dynamic step sizes (Δt_k = t_k - t_{k-1}) for each voxel
-        if num_samples > 1:
-            delta_t = torch.norm(sampled_positions[1:] - sampled_positions[:-1], dim=1)
-            # For the first voxel, use the distance from origin to first sample
-            first_delta_t = torch.norm(sampled_positions[0] - sampled_positions[0], dim=0).unsqueeze(0)  # This will be 0
-            if len(sampled_positions) > 1:
-                first_delta_t = torch.norm(sampled_positions[1] - sampled_positions[0], dim=0).unsqueeze(0)
-            delta_t = torch.cat([first_delta_t, delta_t], dim=0)
-        else:
-            delta_t = torch.tensor([1.0], device=self.device)
+        # Calculate dynamic step sizes using base class method
+        delta_t = self.compute_dynamic_path_lengths(sampled_positions)
         
         # 🚀 VECTORIZED discrete radiance field integration according to SPECIFICATION.md
         # S(P_RX, ω) ≈ Σ[k=1 to K] exp(-Σ[j=1 to k-1] ρ(P_v^j) Δt_j) × (1 - e^(-ρ(P_v^k) Δt_k)) × S(P_v^k, -ω)

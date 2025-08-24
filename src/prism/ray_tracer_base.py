@@ -478,3 +478,33 @@ class RayTracer(ABC):
                 break
         
         return float(total_signal)
+    
+    def compute_dynamic_path_lengths(self, sampled_positions: torch.Tensor) -> torch.Tensor:
+        """
+        Compute dynamic path lengths Δt_k = ||P_k - P_{k-1}|| for each voxel.
+        
+        This function calculates the distance between consecutive sampling points
+        along a ray, which is used in the discrete radiance field integration.
+        
+        Args:
+            sampled_positions: (K, 3) - 3D positions of sampled voxels along the ray
+        
+        Returns:
+            delta_t: (K,) - Dynamic path lengths for each voxel
+        """
+        if len(sampled_positions) <= 1:
+            # Single point or empty - use default step size
+            return torch.tensor([1.0], device=sampled_positions.device, dtype=sampled_positions.dtype)
+        
+        # Compute distances between consecutive points: ||P_k - P_{k-1}||
+        distances = torch.norm(sampled_positions[1:] - sampled_positions[:-1], dim=1)
+        
+        # For the first voxel, use distance from first to second point
+        # This represents the step size for the first segment
+        first_distance = torch.norm(sampled_positions[1] - sampled_positions[0], dim=0).unsqueeze(0)
+        
+        # Concatenate: [first_distance, distances]
+        # This gives us delta_t for each voxel position
+        delta_t = torch.cat([first_distance, distances], dim=0)
+        
+        return delta_t

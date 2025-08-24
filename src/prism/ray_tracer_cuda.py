@@ -25,7 +25,7 @@ import time
 import sys
 from typing import Dict, List, Tuple, Optional, Union
 import numpy as np
-from .ray_tracer_base import Ray
+from .ray_tracer_base import Ray, RayTracer
 
 logger = logging.getLogger(__name__)
 
@@ -258,7 +258,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 }
 """
 
-class CUDARayTracer:
+class CUDARayTracer(RayTracer):
     """CUDA-accelerated discrete ray tracer implementing the design document specifications."""
     
     def __init__(self, 
@@ -294,33 +294,27 @@ class CUDARayTracer:
         # Log initialization
         logger.info("🚀 Initializing CUDARayTracer - CUDA-accelerated ray tracing implementation")
         
-        self.device = device
-        self.azimuth_divisions = azimuth_divisions
-        self.elevation_divisions = elevation_divisions
-        self.max_ray_length = max_ray_length
-        self.scene_size = scene_size
+        # Initialize parent class
+        super().__init__(
+            azimuth_divisions=azimuth_divisions,
+            elevation_divisions=elevation_divisions,
+            max_ray_length=max_ray_length,
+            scene_size=scene_size,
+            device=device,
+            uniform_samples=uniform_samples,
+            resampled_points=resampled_points
+        )
+        
+        # CUDA-specific attributes
         self.prism_network = prism_network
         self.signal_threshold = signal_threshold
         self.enable_early_termination = enable_early_termination
-        self.uniform_samples = uniform_samples
-        self.resampled_points = resampled_points
-        
-        # Calculate angular resolutions
-        self.azimuth_resolution = 2 * math.pi / azimuth_divisions
-        self.elevation_resolution = math.pi / elevation_divisions
-        
-        # Total number of directions
-        self.total_directions = azimuth_divisions * elevation_divisions
-        
-        # Scene boundaries
-        self.scene_min = -scene_size / 2.0
-        self.scene_max = scene_size / 2.0
         
         # Device detection and CUDA setup
         self.device, self.use_cuda = self._detect_device()
         self.cuda_module = None  # Initialize to None
         self.cuda_compilation_successful = False  # Track compilation status
-        self.actual_directions_used = self.azimuth_divisions * self.elevation_divisions  # Track actual directions used
+        self.actual_directions_used = self.total_directions  # Track actual directions used
         self._setup_cuda()
         
         # Validate scene configuration
@@ -1991,16 +1985,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         attenuation = attenuation_factors[0, :, 0, subcarrier_idx]  # (num_samples,) - complex
         radiation = radiation_factors[0, 0, subcarrier_idx]  # scalar - complex
         
-        # Calculate dynamic step sizes (Δt_k = t_k - t_{k-1}) for each voxel
-        if num_samples > 1:
-            delta_t = torch.norm(sampled_positions[1:] - sampled_positions[:-1], dim=1)
-            # For the first voxel, use the distance from origin to first sample
-            first_delta_t = torch.norm(sampled_positions[0] - sampled_positions[0], dim=0).unsqueeze(0)  # This will be 0
-            if len(sampled_positions) > 1:
-                first_delta_t = torch.norm(sampled_positions[1] - sampled_positions[0], dim=0).unsqueeze(0)
-            delta_t = torch.cat([first_delta_t, delta_t], dim=0)
-        else:
-            delta_t = torch.tensor([1.0], device=self.device)
+        # Calculate dynamic step sizes using base class method
+        delta_t = self.compute_dynamic_path_lengths(sampled_positions)
         
         # 🚀 VECTORIZED discrete radiance field integration according to SPECIFICATION.md
         # S(P_RX, ω) ≈ Σ[k=1 to K] exp(-Σ[j=1 to k-1] ρ(P_v^j) Δt_j) × (1 - e^(-ρ(P_v^k) Δt_k)) × S(P_v^k, -ω)
