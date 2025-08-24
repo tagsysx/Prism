@@ -326,6 +326,9 @@ class PrismTrainer:
         
         # Display checkpoint information
         self._display_checkpoint_info()
+        
+        # Display batch checkpoint settings
+        self._display_batch_checkpoint_info()
     
     def _complex_mse_loss(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """Custom MSE loss for complex-valued tensors that always returns a tensor."""
@@ -543,6 +546,10 @@ class PrismTrainer:
         self.learning_rate = 1e-4
         self.num_epochs = self.config['training']['num_epochs']  # Read from config
         self.save_interval = 10
+        
+        # Batch-level checkpoint settings
+        self.batch_save_interval = 10  # Save checkpoint every 10 batches
+        self.enable_batch_checkpoints = True  # Enable batch-level checkpointing
         
         # Deadlock detection settings
         self.batch_timeout = 600  # 10 minutes per batch
@@ -915,6 +922,12 @@ class PrismTrainer:
                     # Update training state in TrainingInterface
                     self.model.update_training_state(epoch, batch_idx, loss.item())
                     
+                    # Save batch checkpoint if enabled and at the right interval
+                    if (self.enable_batch_checkpoints and 
+                        self.batch_save_interval > 0 and 
+                        (batch_idx + 1) % self.batch_save_interval == 0):
+                        self._save_batch_checkpoint(epoch, batch_idx + 1, loss.item())
+                    
                     # Update progress monitor with real-time information if available
                     if hasattr(self, 'progress_monitor') and self.progress_monitor is not None:
                         self.progress_monitor.update_batch_progress(batch_idx, loss.item(), len(self.dataloader))
@@ -1100,6 +1113,40 @@ class PrismTrainer:
         # Clean up old checkpoints (keep last 5)
         self._cleanup_old_checkpoints()
     
+    def _save_batch_checkpoint(self, epoch: int, batch_idx: int, batch_loss: float):
+        """Save checkpoint after completing a batch"""
+        try:
+            if not self.enable_batch_checkpoints:
+                return
+                
+            # Save TrainingInterface batch checkpoint
+            checkpoint_name = f'checkpoint_epoch_{epoch}_batch_{batch_idx}.pt'
+            self.model.save_checkpoint(checkpoint_name)
+            
+            # Save batch training state
+            batch_state = {
+                'epoch': epoch,
+                'batch_idx': batch_idx,
+                'batch_loss': batch_loss,
+                'learning_rate': self.learning_rate,
+                'timestamp': datetime.now().isoformat(),
+                'batch_checkpoint': True
+            }
+            
+            batch_state_path = self.output_dir / f'training_state_epoch_{epoch}_batch_{batch_idx}.pt'
+            torch.save(batch_state, batch_state_path)
+            
+            # Update latest batch checkpoint
+            latest_batch_path = self.output_dir / 'latest_batch_checkpoint.pt'
+            self.model.save_checkpoint('latest_batch_checkpoint.pt')
+            torch.save(batch_state, str(latest_batch_path).replace('.pt', '_state.pt'))
+            
+            self.logger.info(f"Batch checkpoint saved: Epoch {epoch}, Batch {batch_idx}, Loss: {batch_loss:.6f}")
+            print(f"💾 Batch checkpoint saved: E{epoch}B{batch_idx} (Loss: {batch_loss:.6f})")
+            
+        except Exception as e:
+            self.logger.warning(f"Batch checkpoint failed: {e}")
+    
     def _save_emergency_checkpoint(self, epoch: int, train_loss: float, val_loss: float):
         """Save emergency checkpoint for quick recovery"""
         try:
@@ -1127,9 +1174,10 @@ class PrismTrainer:
         
         # Priority order for checkpoint detection
         checkpoint_candidates = [
-            self.output_dir / 'emergency_checkpoint.pt',  # Most recent
-            self.output_dir / 'latest_checkpoint.pt',    # Latest epoch
-            self.output_dir / 'best_model.pt'            # Best performance
+            self.output_dir / 'latest_batch_checkpoint.pt',  # Most recent batch
+            self.output_dir / 'emergency_checkpoint.pt',     # Emergency checkpoint
+            self.output_dir / 'latest_checkpoint.pt',        # Latest epoch
+            self.output_dir / 'best_model.pt'                # Best performance
         ]
         
         for checkpoint_path in checkpoint_candidates:
@@ -1137,38 +1185,78 @@ class PrismTrainer:
                 print(f"✅ Found checkpoint: {checkpoint_path}")
                 return str(checkpoint_path)
         
-        # Check for epoch-specific checkpoints
+        # Check for batch-specific checkpoints
         checkpoint_dir = self.output_dir / 'checkpoints'
         if checkpoint_dir.exists():
-            checkpoints = list(checkpoint_dir.glob('checkpoint_epoch_*.pt'))
-            if checkpoints:
+            # First check for batch checkpoints (most recent)
+            batch_checkpoints = list(checkpoint_dir.glob('checkpoint_epoch_*_batch_*.pt'))
+            if batch_checkpoints:
+                # Get the latest batch checkpoint
+                latest_batch_checkpoint = max(batch_checkpoints, key=lambda x: (
+                    int(x.stem.split('_')[2]),  # epoch number
+                    int(x.stem.split('_')[4])   # batch number
+                ))
+                print(f"✅ Found batch checkpoint: {latest_batch_checkpoint}")
+                return str(latest_batch_checkpoint)
+            
+            # Then check for epoch checkpoints
+            epoch_checkpoints = list(checkpoint_dir.glob('checkpoint_epoch_*.pt'))
+            epoch_only_checkpoints = [cp for cp in epoch_checkpoints if '_batch_' not in cp.name]
+            if epoch_only_checkpoints:
                 # Get the latest epoch checkpoint
-                latest_checkpoint = max(checkpoints, key=lambda x: int(x.stem.split('_')[-1]))
-                print(f"✅ Found epoch checkpoint: {latest_checkpoint}")
-                return str(latest_checkpoint)
+                latest_epoch_checkpoint = max(epoch_only_checkpoints, key=lambda x: int(x.stem.split('_')[-1]))
+                print(f"✅ Found epoch checkpoint: {latest_epoch_checkpoint}")
+                return str(latest_epoch_checkpoint)
         
         print("❌ No checkpoints found")
         return None
     
     def _cleanup_old_checkpoints(self):
         """Clean up old checkpoints to save disk space"""
-        # Clean up TrainingInterface checkpoints
+        # Clean up TrainingInterface epoch checkpoints
         checkpoint_dir = Path(self.model.checkpoint_dir)
-        checkpoints = list(checkpoint_dir.glob('checkpoint_epoch_*.pt'))
-        if len(checkpoints) > 5:
+        epoch_checkpoints = list(checkpoint_dir.glob('checkpoint_epoch_*.pt'))
+        # Filter out batch checkpoints from epoch cleanup
+        epoch_only_checkpoints = [cp for cp in epoch_checkpoints if '_batch_' not in cp.name]
+        if len(epoch_only_checkpoints) > 5:
             # Sort by epoch number and remove oldest
-            checkpoints.sort(key=lambda x: int(x.stem.split('_')[-1]))
-            for checkpoint in checkpoints[:-5]:
+            epoch_only_checkpoints.sort(key=lambda x: int(x.stem.split('_')[-1]))
+            for checkpoint in epoch_only_checkpoints[:-5]:
                 checkpoint.unlink()
-                self.logger.info(f"Removed old checkpoint: {checkpoint}")
+                self.logger.info(f"Removed old epoch checkpoint: {checkpoint}")
         
-        # Clean up training state files
-        training_states = list(self.output_dir.glob('training_state_epoch_*.pt'))
-        if len(training_states) > 5:
-            training_states.sort(key=lambda x: int(x.stem.split('_')[-1]))
-            for state in training_states[:-5]:
+        # Clean up batch checkpoints (keep last 20 batch checkpoints)
+        batch_checkpoints = list(checkpoint_dir.glob('checkpoint_epoch_*_batch_*.pt'))
+        if len(batch_checkpoints) > 20:
+            # Sort by epoch and batch number
+            batch_checkpoints.sort(key=lambda x: (
+                int(x.stem.split('_')[2]),  # epoch number
+                int(x.stem.split('_')[4])   # batch number
+            ))
+            for checkpoint in batch_checkpoints[:-20]:
+                checkpoint.unlink()
+                self.logger.info(f"Removed old batch checkpoint: {checkpoint}")
+        
+        # Clean up epoch training state files
+        epoch_training_states = list(self.output_dir.glob('training_state_epoch_*.pt'))
+        # Filter out batch training states
+        epoch_only_states = [ts for ts in epoch_training_states if '_batch_' not in ts.name]
+        if len(epoch_only_states) > 5:
+            epoch_only_states.sort(key=lambda x: int(x.stem.split('_')[-1]))
+            for state in epoch_only_states[:-5]:
                 state.unlink()
-                self.logger.info(f"Removed old training state: {state}")
+                self.logger.info(f"Removed old epoch training state: {state}")
+        
+        # Clean up batch training state files (keep last 20)
+        batch_training_states = list(self.output_dir.glob('training_state_epoch_*_batch_*.pt'))
+        if len(batch_training_states) > 20:
+            batch_training_states.sort(key=lambda x: (
+                int(x.stem.split('_')[3]),  # epoch number
+                int(x.stem.split('_')[5])   # batch number
+            ))
+            for state in batch_training_states[:-20]:
+                state.unlink()
+                self.logger.info(f"Removed old batch training state: {state}")
     
     def _resume_from_checkpoint(self):
         """Resume training from a checkpoint using TrainingInterface"""
@@ -1514,6 +1602,32 @@ class PrismTrainer:
         else:
             print(f"\nEmergency Checkpoint (in {self.output_dir}):")
             print("  - Not found.")
+    
+    def _display_batch_checkpoint_info(self):
+        """Display batch checkpoint configuration information"""
+        print(f"\n💾 Batch Checkpoint Configuration:")
+        if self.enable_batch_checkpoints:
+            print(f"   ✅ Batch checkpoints: ENABLED")
+            print(f"   🔄 Save interval: Every {self.batch_save_interval} batches")
+            print(f"   🧹 Cleanup: Keep last 20 batch checkpoints")
+            print(f"   📝 Format: checkpoint_epoch_X_batch_Y.pt")
+            
+            # Show existing batch checkpoints
+            checkpoint_dir = Path(self.model.checkpoint_dir)
+            if checkpoint_dir.exists():
+                batch_checkpoints = list(checkpoint_dir.glob('checkpoint_epoch_*_batch_*.pt'))
+                if batch_checkpoints:
+                    print(f"   📊 Existing batch checkpoints: {len(batch_checkpoints)}")
+                    latest_batch = max(batch_checkpoints, key=lambda x: (
+                        int(x.stem.split('_')[2]),  # epoch number
+                        int(x.stem.split('_')[4])   # batch number
+                    ))
+                    print(f"   📄 Latest: {latest_batch.name}")
+                else:
+                    print(f"   📊 No batch checkpoints found yet")
+        else:
+            print(f"   ❌ Batch checkpoints: DISABLED")
+        print(f"   💡 This allows recovery from mid-epoch failures")
 
         # Display latest checkpoint
         latest_checkpoint_path = self.output_dir / 'latest_checkpoint.pt'
