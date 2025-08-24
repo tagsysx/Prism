@@ -776,7 +776,7 @@ class CPURayTracer(RayTracer):
             with torch.no_grad():
                 # Enable mixed precision for MLP direction selection (if CUDA available)
                 use_mixed_precision = torch.cuda.is_available() and getattr(self, 'use_mixed_precision', False)
-                with torch.cuda.amp.autocast(enabled=use_mixed_precision):
+                with torch.amp.autocast('cuda', enabled=use_mixed_precision):
                     # Ensure antenna embedding is on the same device as prism_network
                     device = next(self.prism_network.parameters()).device
                     antenna_embedding_device = antenna_embedding.to(device)
