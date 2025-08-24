@@ -47,7 +47,9 @@ class CPURayTracer(RayTracer):
                  enable_parallel_processing: bool = True,
                  max_workers: int = None,
                  uniform_samples: int = 128,
-                 resampled_points: int = 64):
+                 resampled_points: int = 64,
+                 config_loader = None,
+                 use_mixed_precision: bool = None):
         """
         Initialize CPU ray tracer.
         
@@ -92,6 +94,19 @@ class CPURayTracer(RayTracer):
             # Default formula: min(32, total_directions // 4)
             self.top_k_directions = min(32, (azimuth_divisions * elevation_divisions) // 4)
             logger.info(f"Using default top-K formula: min(32, {azimuth_divisions * elevation_divisions} // 4) = {self.top_k_directions}")
+        
+        # Configure mixed precision from config loader or parameter
+        self.config_loader = config_loader
+        if config_loader is not None:
+            self.use_mixed_precision = config_loader.get_ray_tracer_mixed_precision_config('cpu')
+        elif use_mixed_precision is not None:
+            self.use_mixed_precision = use_mixed_precision
+        else:
+            # Default: enable if CUDA available for mixed precision support
+            self.use_mixed_precision = torch.cuda.is_available()
+        
+        if self.use_mixed_precision:
+            logger.info("   ✓ Mixed precision enabled for MLP direction selection")
         
         # Parallel processing configuration
         self.enable_parallel_processing = enable_parallel_processing
@@ -759,17 +774,20 @@ class CPURayTracer(RayTracer):
         try:
             # Use AntennaNetwork to get directional importance based on antenna embedding C
             with torch.no_grad():
-                # Ensure antenna embedding is on the same device as prism_network
-                device = next(self.prism_network.parameters()).device
-                antenna_embedding_device = antenna_embedding.to(device)
-                
-                # Get directional importance matrix from AntennaNetwork
-                directional_importance = self.prism_network.antenna_network(antenna_embedding_device.unsqueeze(0))
-                
-                # Get top-K directions for efficient sampling
-                top_k_directions, top_k_importance = self.prism_network.antenna_network.get_top_k_directions(
-                    directional_importance, k=self.top_k_directions
-                )
+                # Enable mixed precision for MLP direction selection (if CUDA available)
+                use_mixed_precision = torch.cuda.is_available() and getattr(self, 'use_mixed_precision', False)
+                with torch.cuda.amp.autocast(enabled=use_mixed_precision):
+                    # Ensure antenna embedding is on the same device as prism_network
+                    device = next(self.prism_network.parameters()).device
+                    antenna_embedding_device = antenna_embedding.to(device)
+                    
+                    # Get directional importance matrix from AntennaNetwork (with mixed precision)
+                    directional_importance = self.prism_network.antenna_network(antenna_embedding_device.unsqueeze(0))
+                    
+                    # Get top-K directions for efficient sampling (with mixed precision)
+                    top_k_directions, top_k_importance = self.prism_network.antenna_network.get_top_k_directions(
+                        directional_importance, k=self.top_k_directions
+                    )
                 
                 # Extract direction indices for the first batch element
                 selected_directions = top_k_directions[0]  # Shape: (k, 2)

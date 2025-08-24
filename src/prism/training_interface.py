@@ -63,9 +63,13 @@ class PrismTrainingInterface(nn.Module):
         scene_bounds: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         subcarrier_sampling_ratio: float = 0.3,
         checkpoint_dir: str = "checkpoints",
-        ray_tracing_mode: str = 'hybrid'  # Ray tracing mode: 'cuda', 'cpu', or 'hybrid'
+        ray_tracing_mode: str = 'hybrid',  # Ray tracing mode: 'cuda', 'cpu', or 'hybrid'
+        config_loader = None
     ):
         super().__init__()
+        
+        # Store config loader for mixed precision and other configurations
+        self.config_loader = config_loader
         
         # Validate ray tracing mode first
         if ray_tracing_mode not in ['cuda', 'cpu', 'hybrid']:
@@ -134,7 +138,8 @@ class PrismTrainingInterface(nn.Module):
                     prism_network=self.prism_network,  # Pass the prism_network for MLP direction selection
                     uniform_samples=64,        # From config
                     enable_parallel_processing=True,
-                    max_workers=2             # From config
+                    max_workers=2,             # From config
+                    config_loader=self.config_loader  # Pass config loader for mixed precision
                 )
             except Exception as e:
                 logger.warning(f"Failed to create CUDARayTracer: {e}. Falling back to CPURayTracer.")
@@ -145,7 +150,8 @@ class PrismTrainingInterface(nn.Module):
                     max_ray_length=200.0,
                     scene_size=200.0,
                     prism_network=self.prism_network,  # Pass the prism_network for MLP direction selection
-                    uniform_samples=64
+                    uniform_samples=64,
+                    config_loader=self.config_loader  # Pass config loader for mixed precision
                 )
         
         elif ray_tracing_mode == 'cpu':
@@ -186,7 +192,8 @@ class PrismTrainingInterface(nn.Module):
                     max_ray_length=200.0,
                     scene_size=200.0,
                     prism_network=self.prism_network,  # Pass the prism_network for MLP direction selection
-                    uniform_samples=64
+                    uniform_samples=64,
+                    config_loader=self.config_loader  # Pass config loader for mixed precision
                 )
     
     def _validate_ray_tracer(self, ray_tracer, ray_tracing_mode: str) -> Union['CPURayTracer', 'CUDARayTracer']:
@@ -314,9 +321,9 @@ class PrismTrainingInterface(nn.Module):
         total_computations = total_vectorized_operations * total_voxel_subcarrier_pairs
         
         logger.info(f"🚀 Starting BS-Centric vectorized ray tracing:")
-        logger.info(f"   📊 Workload: {batch_size} batches × {num_bs_antennas} BS antennas × {num_ue_antennas} UE antennas × {num_directions} directions = {total_vectorized_operations:,} rays")
-        logger.info(f"   🎯 Per ray: {num_selected} subcarriers × {num_spatial_points} spatial points = {total_voxel_subcarrier_pairs:,} voxel-subcarrier pairs processed in parallel")
-        logger.info(f"   ⚡ Total computations: {total_computations:,} (vectorized from {total_computations:,} serial operations)")
+        logger.info(f"   📊 Ray workload: {batch_size} batches × {num_bs_antennas} BS antennas × {num_ue_antennas} UE antennas × {num_directions} directions = {total_vectorized_operations:,} rays")
+        logger.info(f"   🎯 Per ray: {num_selected} selected subcarriers × {num_spatial_points} spatial points = {total_voxel_subcarrier_pairs:,} voxel-subcarrier pairs")
+        logger.info(f"   ⚡ Total computations: {batch_size} × {num_bs_antennas} × {num_ue_antennas} × {num_directions} × {num_selected} × {num_spatial_points} = {total_computations:,} operations")
         
         all_ray_results = []
         all_signal_strengths = []

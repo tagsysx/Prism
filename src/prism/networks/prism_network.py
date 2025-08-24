@@ -46,6 +46,8 @@ class PrismNetwork(nn.Module):
         elevation_divisions: int = 8,
         top_k_directions: int = 32,
         complex_output: bool = True,
+        use_mixed_precision: bool = False,
+        config_loader = None,
         **kwargs
     ):
         super().__init__()
@@ -64,6 +66,21 @@ class PrismNetwork(nn.Module):
         self.elevation_divisions = elevation_divisions
         self.top_k_directions = top_k_directions
         self.complex_output = complex_output
+        
+        # Configure mixed precision from config loader or parameter
+        self.config_loader = config_loader
+        if config_loader is not None:
+            # Get mixed precision settings from config
+            self.use_mixed_precision = config_loader.get_network_mixed_precision_config('prism_network')
+            self.attenuation_use_mixed_precision = config_loader.get_network_mixed_precision_config('attenuation_network')
+            self.antenna_use_mixed_precision = config_loader.get_network_mixed_precision_config('antenna_network')
+            self.radiance_use_mixed_precision = config_loader.get_network_mixed_precision_config('radiance_network')
+        else:
+            # Use parameter or default
+            self.use_mixed_precision = use_mixed_precision
+            self.attenuation_use_mixed_precision = use_mixed_precision
+            self.antenna_use_mixed_precision = use_mixed_precision
+            self.radiance_use_mixed_precision = use_mixed_precision
         
         # Initialize positional encoders
         if use_ipe_encoding:
@@ -156,36 +173,40 @@ class PrismNetwork(nn.Module):
         batch_size = sampled_positions.shape[0]
         num_voxels = sampled_positions.shape[1]
         
-        # 1. AttenuationNetwork: Encode spatial positions
-        # Reshape to (batch_size * num_voxels, 3) for processing
-        positions_flat = sampled_positions.view(-1, 3)
+        # Enable mixed precision for forward pass if configured
+        use_autocast = torch.cuda.is_available() and self.use_mixed_precision
         
-        # Apply positional encoding if enabled
-        if self.use_ipe_encoding and self.position_encoder is not None:
-            # Use traditional PE encoding
-            encoded_positions = self.position_encoder(positions_flat)
-        else:
-            encoded_positions = positions_flat
-        
-        # Get spatial features
-        features = self.attenuation_network(encoded_positions)
-        # Reshape back to (batch_size, num_voxels, feature_dim)
-        features = features.view(batch_size, num_voxels, self.feature_dim)
-        
-        # Keep complex features throughout the computation - DO NOT convert to real
-        # Complex features preserve both magnitude and phase information
-        
-        # 2. AttenuationDecoder: Get attenuation factors
-        # Process each voxel's features - handle complex features properly
-        attenuation_factors = []
-        for i in range(num_voxels):
-            voxel_features = features[:, i, :]  # (batch_size, feature_dim)
+        with torch.cuda.amp.autocast(enabled=use_autocast):
+            # 1. AttenuationNetwork: Encode spatial positions
+            # Reshape to (batch_size * num_voxels, 3) for processing
+            positions_flat = sampled_positions.view(-1, 3)
             
-            # If features are complex, process real and imaginary parts separately
-            if voxel_features.is_complex():
-                # Process real and imaginary parts through the decoder
-                real_features = voxel_features.real
-                imag_features = voxel_features.imag
+            # Apply positional encoding if enabled
+            if self.use_ipe_encoding and self.position_encoder is not None:
+                # Use traditional PE encoding
+                encoded_positions = self.position_encoder(positions_flat)
+            else:
+                encoded_positions = positions_flat
+            
+            # Get spatial features
+            features = self.attenuation_network(encoded_positions)
+            # Reshape back to (batch_size, num_voxels, feature_dim)
+            features = features.view(batch_size, num_voxels, self.feature_dim)
+            
+            # Keep complex features throughout the computation - DO NOT convert to real
+            # Complex features preserve both magnitude and phase information
+            
+            # 2. AttenuationDecoder: Get attenuation factors
+            # Process each voxel's features - handle complex features properly
+            attenuation_factors = []
+            for i in range(num_voxels):
+                voxel_features = features[:, i, :]  # (batch_size, feature_dim)
+            
+                # If features are complex, process real and imaginary parts separately
+                if voxel_features.is_complex():
+                    # Process real and imaginary parts through the decoder
+                    real_features = voxel_features.real
+                    imag_features = voxel_features.imag
                 
                 real_attenuation = self.attenuation_decoder(real_features)
                 imag_attenuation = self.attenuation_decoder(imag_features)
@@ -263,7 +284,7 @@ class PrismNetwork(nn.Module):
                 'antenna_embeddings': antenna_embeddings
             })
         
-        return outputs
+            return outputs
     
     def get_network_info(self) -> Dict[str, Any]:
         """Get information about the network architecture."""

@@ -36,6 +36,17 @@ ray_tracing:
   signal_threshold: 1e-6          # Signal strength threshold for early termination
   # 代码实现有对应参数
   
+  # Mixed precision for ray tracing
+  use_mixed_precision: true       # Enable mixed precision in ray tracers
+  
+  # CUDA-specific settings
+  cuda:
+    use_mixed_precision: true     # CUDA ray tracer mixed precision
+    
+  # CPU-specific settings  
+  cpu:
+    use_mixed_precision: false    # CPU ray tracer mixed precision (limited support)
+  
   # MLP-based direction selection
   top_k_directions: 32            # Number of top-K directions to select (configurable)
   # 代码实现：DiscreteRayTracer使用此参数，替代硬编码的K值
@@ -53,6 +64,7 @@ neural_networks:
     feature_dim: 128              # Output feature dimension
     activation: 'relu'            # Activation function
     use_shortcut: true            # Enable shortcut connections
+    use_mixed_precision: true     # Network-specific mixed precision
     
   # Attenuation Decoder
   attenuation_decoder:
@@ -62,12 +74,14 @@ neural_networks:
     output_dim: 408               # Number of subcarriers K
     num_ue_antennas: 4            # Number of UE antennas per device (clarified naming)
     activation: 'relu'            # Activation function
+    use_mixed_precision: true     # Network-specific mixed precision
     
   # Antenna Codebook
   antenna_codebook:
     num_antennas: 64              # Number of BS antennas N_BS
     embedding_dim: 64             # Antenna embedding dimension
     learnable: true               # Learnable embeddings
+    use_mixed_precision: true     # Network-specific mixed precision
     
   # Antenna Network (MLP-based direction sampling)
   antenna_network:
@@ -77,6 +91,7 @@ neural_networks:
     output_dim: 162               # A × B directions (18 × 9 = 162) - OPTIMIZED
     activation: 'relu'            # Activation function
     dropout_rate: 0.1             # Dropout rate for regularization
+    use_mixed_precision: true     # Network-specific mixed precision
     
   # Radiance Network
   radiance_network:
@@ -89,6 +104,7 @@ neural_networks:
     output_dim: 408               # Number of subcarriers K
     num_ue_antennas: 4            # Number of UE antennas per device (clarified naming)
     activation: 'relu'            # Activation function
+    use_mixed_precision: true     # Network-specific mixed precision
 
 # Base Station Configuration
 base_station:
@@ -153,8 +169,14 @@ performance:
   
   # Memory management
   gpu_memory_fraction: 0.8             # GPU memory usage fraction
-  enable_mixed_precision: true         # Enable mixed precision for efficiency
   cuda_memory_pool: true               # Enable CUDA memory pool for better memory management
+  
+  # Mixed Precision Configuration
+  mixed_precision:
+    enabled: true                      # Enable/disable mixed precision globally
+    autocast_enabled: true             # Enable autocast for forward pass
+    grad_scaler_enabled: true          # Enable gradient scaler for training
+    loss_scale: "dynamic"              # "dynamic" or fixed number (e.g., 2048)
   # 代码实现：支持混合精度和显存分配
 
   # Parallel processing

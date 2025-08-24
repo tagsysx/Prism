@@ -64,6 +64,48 @@ class ConfigLoader:
         """Get performance configuration."""
         return self.config.get('performance', {})
     
+    def get_mixed_precision_config(self) -> Dict[str, Any]:
+        """Get mixed precision configuration."""
+        performance_config = self.get_performance_config()
+        return performance_config.get('mixed_precision', {})
+    
+    def is_mixed_precision_enabled(self) -> bool:
+        """Check if mixed precision is globally enabled."""
+        mixed_precision_config = self.get_mixed_precision_config()
+        return mixed_precision_config.get('enabled', False)
+    
+    def get_network_mixed_precision_config(self, network_name: str) -> bool:
+        """Get mixed precision configuration for a specific network."""
+        nn_config = self.get_neural_network_config()
+        network_config = nn_config.get(network_name, {})
+        
+        # Check network-specific setting first, then fall back to global setting
+        network_specific = network_config.get('use_mixed_precision', None)
+        if network_specific is not None:
+            return network_specific
+        
+        # Fall back to global mixed precision setting
+        return self.is_mixed_precision_enabled()
+    
+    def get_ray_tracer_mixed_precision_config(self, ray_tracer_type: str = None) -> bool:
+        """Get mixed precision configuration for ray tracers."""
+        ray_config = self.get_ray_tracer_config()
+        
+        # Check ray tracer specific setting first
+        if ray_tracer_type and ray_tracer_type in ray_config:
+            tracer_config = ray_config.get(ray_tracer_type, {})
+            tracer_specific = tracer_config.get('use_mixed_precision', None)
+            if tracer_specific is not None:
+                return tracer_specific
+        
+        # Check general ray tracing mixed precision setting
+        general_setting = ray_config.get('use_mixed_precision', None)
+        if general_setting is not None:
+            return general_setting
+        
+        # Fall back to global mixed precision setting
+        return self.is_mixed_precision_enabled()
+    
     def get_output_config(self) -> Dict[str, Any]:
         """Get output configuration."""
         return self.config.get('output', {})

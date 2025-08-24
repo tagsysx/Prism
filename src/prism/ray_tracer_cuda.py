@@ -273,7 +273,9 @@ class CUDARayTracer(RayTracer):
                  uniform_samples: int = 128,
                  resampled_points: int = 64,
                  enable_parallel_processing: bool = True,  # Kept for compatibility but ignored
-                 max_workers: Optional[int] = None):       # Kept for compatibility but ignored
+                 max_workers: Optional[int] = None,        # Kept for compatibility but ignored
+                 config_loader = None,
+                 use_mixed_precision: bool = None):
         """
         Initialize CUDA discrete ray tracer.
         
@@ -320,6 +322,16 @@ class CUDARayTracer(RayTracer):
         self.cuda_module = None  # Initialize to None
         self.cuda_compilation_successful = False  # Track compilation status
         self.actual_directions_used = self.total_directions  # Track actual directions used
+        
+        # Configure mixed precision from config loader or parameter
+        self.config_loader = config_loader
+        if config_loader is not None:
+            self.use_mixed_precision = config_loader.get_ray_tracer_mixed_precision_config('cuda')
+        elif use_mixed_precision is not None:
+            self.use_mixed_precision = use_mixed_precision
+        else:
+            self.use_mixed_precision = True  # Default to True for CUDA
+        
         self._setup_cuda()
         
         # Validate scene configuration
@@ -2099,24 +2111,26 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         try:
             # Use AntennaNetwork to get directional importance based on antenna embedding C
             with torch.no_grad():
-                # Ensure prism_network and its components are on the correct device
-                if hasattr(self.prism_network, 'to'):
-                    self.prism_network = self.prism_network.to(self.device)
-                if hasattr(self.prism_network.antenna_network, 'to'):
-                    self.prism_network.antenna_network = self.prism_network.antenna_network.to(self.device)
-                
-                # Ensure all input tensors are on the correct device
-                base_station_pos = base_station_pos.to(self.device)
-                ue_positions = [ue_pos.to(self.device) for ue_pos in ue_positions]
-                antenna_embedding = antenna_embedding.to(self.device)
-                
-                # Get directional importance matrix from AntennaNetwork
-                directional_importance = self.prism_network.antenna_network(antenna_embedding.unsqueeze(0))
-                
-                # Get top-K directions for efficient sampling
-                top_k_directions, top_k_importance = self.prism_network.antenna_network.get_top_k_directions(
-                    directional_importance, k=min(32, self.azimuth_divisions * self.elevation_divisions // 4)
-                )
+                # Enable mixed precision for MLP direction selection
+                with torch.cuda.amp.autocast(enabled=getattr(self, 'use_mixed_precision', False)):
+                    # Ensure prism_network and its components are on the correct device
+                    if hasattr(self.prism_network, 'to'):
+                        self.prism_network = self.prism_network.to(self.device)
+                    if hasattr(self.prism_network.antenna_network, 'to'):
+                        self.prism_network.antenna_network = self.prism_network.antenna_network.to(self.device)
+                    
+                    # Ensure all input tensors are on the correct device
+                    base_station_pos = base_station_pos.to(self.device)
+                    ue_positions = [ue_pos.to(self.device) for ue_pos in ue_positions]
+                    antenna_embedding = antenna_embedding.to(self.device)
+                    
+                    # Get directional importance matrix from AntennaNetwork (with mixed precision)
+                    directional_importance = self.prism_network.antenna_network(antenna_embedding.unsqueeze(0))
+                    
+                    # Get top-K directions for efficient sampling (with mixed precision)
+                    top_k_directions, top_k_importance = self.prism_network.antenna_network.get_top_k_directions(
+                        directional_importance, k=min(32, self.azimuth_divisions * self.elevation_divisions // 4)
+                    )
                 
                 # Extract direction indices for the first batch element
                 selected_directions = top_k_directions[0]  # Shape: (k, 2)
