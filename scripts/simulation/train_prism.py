@@ -545,7 +545,7 @@ class PrismTrainer:
         self.save_interval = 10
         
         # Deadlock detection settings
-        self.batch_timeout = 300  # 5 minutes per batch
+        self.batch_timeout = 600  # 10 minutes per batch
         self.progress_check_interval = 30  # Check progress every 30 seconds
         
         # Loss function for complex-valued outputs - ensure it returns tensors
