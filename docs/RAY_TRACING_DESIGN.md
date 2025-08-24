@@ -53,6 +53,197 @@ For each antenna of the base station, the system traces RF energy along all $A \
 The system implements two key optimization strategies (as detailed in the Specification):
 
 #### 2.3.1 Importance-Based Sampling
+
+**Two-Stage Sampling Process**:
+
+The system implements a sophisticated two-stage sampling strategy to optimize computational efficiency while maintaining accuracy:
+
+**Stage 1: Uniform Sampling for Weight Computation**
+```python
+def uniform_sampling_stage(ray, ue_pos, num_uniform_samples=128):
+    """
+    Stage 1: Uniform sampling along ray to compute importance weights
+    
+    Args:
+        ray: Ray object with origin and direction
+        ue_pos: User equipment position
+        num_uniform_samples: Number of uniform samples (typically 128)
+    
+    Returns:
+        uniform_positions: Uniformly sampled positions along ray
+        importance_weights: Computed importance weights for each position
+    """
+    # Calculate ray length to UE
+    ray_to_ue = ue_pos - ray.origin
+    ray_length = torch.clamp(torch.dot(ray_to_ue, ray.direction), 0, max_ray_length)
+    
+    # Uniform sampling along ray
+    t_values = torch.linspace(0, ray_length, num_uniform_samples, device=device)
+    uniform_positions = ray.origin.unsqueeze(0) + t_values.unsqueeze(1) * ray.direction.unsqueeze(0)
+    
+    # Get neural network outputs for uniform samples
+    with torch.no_grad():
+        network_outputs = prism_network(
+            sampled_positions=uniform_positions.unsqueeze(0),
+            ue_positions=ue_pos.unsqueeze(0),
+            view_directions=compute_view_directions(uniform_positions, ue_pos),
+            antenna_indices=antenna_indices
+        )
+    
+    # Extract attenuation factors for importance weight computation
+    attenuation_factors = network_outputs['attenuation_factors'][0, :, 0, subcarrier_idx]
+    
+    # Compute importance weights based on attenuation magnitude
+    importance_weights = torch.abs(attenuation_factors)
+    importance_weights = importance_weights / (importance_weights.sum() + 1e-8)  # Normalize
+    
+    return uniform_positions, importance_weights
+```
+
+**Stage 2: Importance-Based Resampling**
+```python
+def importance_based_resampling(uniform_positions, importance_weights, num_final_samples=64):
+    """
+    Stage 2: Resample points based on computed importance weights
+    
+    Args:
+        uniform_positions: Uniformly sampled positions from Stage 1
+        importance_weights: Normalized importance weights
+        num_final_samples: Final number of samples for integration (typically 64)
+    
+    Returns:
+        resampled_positions: Importance-based resampled positions
+    """
+    # Sample indices based on importance weights
+    try:
+        sampled_indices = torch.multinomial(
+            importance_weights, 
+            num_samples=min(num_final_samples, len(importance_weights)), 
+            replacement=True
+        )
+    except RuntimeError:
+        # Fallback to uniform sampling if multinomial fails
+        sampled_indices = torch.randint(0, len(uniform_positions), (num_final_samples,))
+    
+    # Extract resampled positions
+    resampled_positions = uniform_positions[sampled_indices]
+    
+    return resampled_positions
+
+def compute_importance_weights(attenuation_factors):
+    """
+    Compute importance weights based on attenuation factors
+    
+    Args:
+        attenuation_factors: Complex attenuation factors from neural network
+    
+    Returns:
+        importance_weights: Normalized importance weights
+    """
+    # Use magnitude of complex attenuation as importance indicator
+    importance = torch.abs(attenuation_factors)
+    
+    # Add small epsilon to avoid division by zero
+    importance = importance + 1e-8
+    
+    # Normalize to create probability distribution
+    importance_weights = importance / importance.sum()
+    
+    return importance_weights
+```
+
+**Complete Two-Stage Integration**
+```python
+def two_stage_ray_tracing(ray, ue_pos, subcarrier_idx, antenna_embedding):
+    """
+    Complete two-stage importance sampling for ray tracing
+    
+    Returns:
+        complex_signal: Complex signal computed using importance sampling
+    """
+    # Stage 1: Uniform sampling and weight computation
+    uniform_positions, importance_weights = uniform_sampling_stage(
+        ray, ue_pos, num_uniform_samples=128
+    )
+    
+    # Stage 2: Importance-based resampling
+    resampled_positions = importance_based_resampling(
+        uniform_positions, importance_weights, num_final_samples=64
+    )
+    
+    # Get neural network outputs for resampled points
+    with torch.no_grad():
+        final_network_outputs = prism_network(
+            sampled_positions=resampled_positions.unsqueeze(0),
+            ue_positions=ue_pos.unsqueeze(0),
+            view_directions=compute_view_directions(resampled_positions, ue_pos),
+            antenna_indices=antenna_embedding
+        )
+    
+    # Extract final attenuation and radiation factors
+    final_attenuation = final_network_outputs['attenuation_factors'][0, :, 0, subcarrier_idx]
+    final_radiation = final_network_outputs['radiation_factors'][0, 0, subcarrier_idx]
+    
+    # Integrate signal using discrete radiance field model
+    # Note: No importance correction needed since we already resampled
+    complex_signal = integrate_discrete_radiance_field(
+        resampled_positions, final_attenuation, final_radiation
+    )
+    
+    return complex_signal
+```
+
+**Signal Integration with Resampled Points**
+```python
+def integrate_discrete_radiance_field(sampled_positions, attenuation_factors, radiation_factors):
+    """
+    Integrate signal using discrete radiance field model on resampled points
+    
+    Args:
+        sampled_positions: Resampled positions along ray (num_samples, 3)
+        attenuation_factors: Complex attenuation factors (num_samples,)
+        radiation_factors: Complex radiation factors (scalar or num_samples,)
+    
+    Returns:
+        complex_signal: Integrated complex signal
+    """
+    num_samples = len(sampled_positions)
+    
+    # Calculate dynamic step sizes between consecutive points
+    if num_samples > 1:
+        delta_t = torch.norm(sampled_positions[1:] - sampled_positions[:-1], dim=1)
+        first_delta_t = torch.norm(sampled_positions[1] - sampled_positions[0], dim=0).unsqueeze(0)
+        delta_t = torch.cat([first_delta_t, delta_t], dim=0)
+    else:
+        delta_t = torch.tensor([1.0], device=sampled_positions.device)
+    
+    # Discrete radiance field integration (complex throughout)
+    # S(P_RX, ω) ≈ Σ[k=1 to K] exp(-Σ[j=1 to k-1] ρ(P_v^j) Δt_j) × (1 - e^(-ρ(P_v^k) Δt_k)) × S(P_v^k, -ω)
+    
+    # Vectorized cumulative attenuation
+    attenuation_deltas = attenuation_factors * delta_t  # Complex multiplication
+    padded_deltas = torch.cat([torch.zeros(1, dtype=attenuation_deltas.dtype, device=sampled_positions.device), 
+                               attenuation_deltas[:-1]], dim=0)
+    cumulative_attenuation = torch.cumsum(padded_deltas, dim=0)
+    
+    # Vectorized computation (all complex operations)
+    attenuation_exp = torch.exp(-cumulative_attenuation)  # Complex exponential
+    local_absorption = 1.0 - torch.exp(-attenuation_deltas)  # Complex absorption
+    
+    # Broadcast radiation if scalar
+    if radiation_factors.dim() == 0:
+        radiation_vector = radiation_factors.expand(num_samples)
+    else:
+        radiation_vector = radiation_factors
+    
+    # Final integration (no importance weights - already accounted for in resampling)
+    signal_contributions = attenuation_exp * local_absorption * radiation_vector
+    complex_signal = torch.sum(signal_contributions)
+    
+    return complex_signal
+```
+
+**Key Implementation Principles**:
 - **Two-stage sampling process**: 
   1. **Uniform sampling**: Sample points uniformly along the ray to compute importance weights
   2. **Importance-based resampling**: Resample points based on computed importance weights
