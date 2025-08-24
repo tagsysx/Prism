@@ -1257,7 +1257,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         start_time = time.time()
         
         # Enable advanced optimizations
-        with torch.cuda.amp.autocast(enabled=getattr(self, 'use_mixed_precision', False)):
+        with torch.amp.autocast('cuda', enabled=getattr(self, 'use_mixed_precision', False)):
             
             # Convert UE positions to tensor for vectorized operations
             ue_positions_tensor = torch.stack([ue_pos.clone().detach().to(dtype=torch.float32, device=base_station_pos.device) 
@@ -2112,7 +2112,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             # Use AntennaNetwork to get directional importance based on antenna embedding C
             with torch.no_grad():
                 # Enable mixed precision for MLP direction selection
-                with torch.cuda.amp.autocast(enabled=getattr(self, 'use_mixed_precision', False)):
+                with torch.amp.autocast('cuda', enabled=getattr(self, 'use_mixed_precision', False)):
                     # Ensure prism_network and its components are on the correct device
                     if hasattr(self.prism_network, 'to'):
                         self.prism_network = self.prism_network.to(self.device)

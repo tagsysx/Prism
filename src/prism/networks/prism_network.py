@@ -176,7 +176,7 @@ class PrismNetwork(nn.Module):
         # Enable mixed precision for forward pass if configured
         use_autocast = torch.cuda.is_available() and self.use_mixed_precision
         
-        with torch.cuda.amp.autocast(enabled=use_autocast):
+        with torch.amp.autocast('cuda', enabled=use_autocast):
             # 1. AttenuationNetwork: Encode spatial positions
             # Reshape to (batch_size * num_voxels, 3) for processing
             positions_flat = sampled_positions.view(-1, 3)
