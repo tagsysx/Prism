@@ -171,16 +171,34 @@ class PrismNetwork(nn.Module):
         # Reshape back to (batch_size, num_voxels, feature_dim)
         features = features.view(batch_size, num_voxels, self.feature_dim)
         
-        # Convert complex features to real for the decoder
-        if features.is_complex():
-            features = torch.abs(features)  # Use magnitude of complex features
+        # Keep complex features throughout the computation - DO NOT convert to real
+        # Complex features preserve both magnitude and phase information
         
         # 2. AttenuationDecoder: Get attenuation factors
-        # Process each voxel's features
+        # Process each voxel's features - handle complex features properly
         attenuation_factors = []
         for i in range(num_voxels):
             voxel_features = features[:, i, :]  # (batch_size, feature_dim)
-            voxel_attenuation = self.attenuation_decoder(voxel_features)
+            
+            # If features are complex, process real and imaginary parts separately
+            if voxel_features.is_complex():
+                # Process real and imaginary parts through the decoder
+                real_features = voxel_features.real
+                imag_features = voxel_features.imag
+                
+                real_attenuation = self.attenuation_decoder(real_features)
+                imag_attenuation = self.attenuation_decoder(imag_features)
+                
+                # Combine to form complex attenuation
+                if self.attenuation_decoder.is_complex():
+                    # If decoder outputs complex, combine properly
+                    voxel_attenuation = real_attenuation + 1j * imag_attenuation
+                else:
+                    # If decoder outputs real, create complex from real/imag parts
+                    voxel_attenuation = torch.complex(real_attenuation, imag_attenuation)
+            else:
+                voxel_attenuation = self.attenuation_decoder(voxel_features)
+                
             attenuation_factors.append(voxel_attenuation)
         
         # Stack attenuation factors: (batch_size, num_voxels, num_ue_antennas, num_subcarriers)

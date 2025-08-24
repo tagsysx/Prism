@@ -615,7 +615,7 @@ class CPURayTracer(RayTracer):
                                            attenuation_factors: torch.Tensor,
                                            radiation_factors: torch.Tensor,
                                            subcarrier_idx: int,
-                                           importance_weights: torch.Tensor) -> float:
+                                           importance_weights: torch.Tensor) -> torch.Tensor:
         """
         Integrate signal strength along the ray using importance sampling.
         
@@ -707,13 +707,8 @@ class CPURayTracer(RayTracer):
         # Final sum - single reduction operation
         total_signal_complex = torch.sum(signal_contributions)
         
-        # Handle complex result
-        if torch.is_complex(total_signal_complex):
-            total_signal = torch.abs(total_signal_complex)
-        else:
-            total_signal = total_signal_complex
-        
-        return total_signal.item()
+        # Return complex result - DO NOT convert to real
+        return total_signal_complex
     
     def _integrate_along_ray_batch_vectorized(self,
                                             sampled_positions: torch.Tensor,
@@ -1074,9 +1069,7 @@ class CPURayTracer(RayTracer):
                     # Accumulate signals with level weighting
                     level_weight = 1.0 / (level + 1)  # Higher levels get lower weight
                     for (ue_pos, subcarrier), signal_strength in ray_results.items():
-                        if (ue_pos, subcarrier) not in accumulated_signals:
-                            accumulated_signals[(ue_pos, subcarrier)] = 0.0
-                        accumulated_signals[(ue_pos, subcarrier)] += signal_strength * level_weight
+                        self._ensure_complex_accumulation(accumulated_signals, (ue_pos, subcarrier), signal_strength) * level_weight
         
         return accumulated_signals
     
@@ -1218,6 +1211,18 @@ class CPURayTracer(RayTracer):
             logger.warning(f"Parallel ray tracing failed for direction {direction}: {e}")
             return {}
     
+    def _ensure_complex_accumulation(self, accumulated_signals: Dict, key: tuple, signal_strength: torch.Tensor):
+        """Helper function to ensure proper complex signal accumulation."""
+        if key not in accumulated_signals:
+            # Initialize with complex zero
+            accumulated_signals[key] = torch.tensor(0.0 + 0.0j, dtype=torch.complex64)
+        
+        # Ensure signal_strength is complex
+        if not torch.is_complex(signal_strength):
+            signal_strength = torch.complex(signal_strength, torch.tensor(0.0))
+        
+        accumulated_signals[key] += signal_strength
+    
     def _accumulate_signals_parallel(self, 
                                    base_station_pos: torch.Tensor,
                                    ue_positions: List[torch.Tensor],
@@ -1246,9 +1251,7 @@ class CPURayTracer(RayTracer):
                     base_station_pos, direction, ue_positions, selected_subcarriers, antenna_embedding
                 )
                 for (ue_pos, subcarrier), signal_strength in ray_results.items():
-                    if (ue_pos, subcarrier) not in accumulated_signals:
-                        accumulated_signals[(ue_pos, subcarrier)] = 0.0
-                    accumulated_signals[(ue_pos, subcarrier)] += signal_strength
+                    self._ensure_complex_accumulation(accumulated_signals, (ue_pos, subcarrier), signal_strength)
             return accumulated_signals
         
         # Prepare arguments for parallel processing
@@ -1264,9 +1267,7 @@ class CPURayTracer(RayTracer):
             for ray_results in results:
                 if ray_results:  # Check if results are not empty
                     for (ue_pos, subcarrier), signal_strength in ray_results.items():
-                        if (ue_pos, subcarrier) not in accumulated_signals:
-                            accumulated_signals[(ue_pos, subcarrier)] = 0.0
-                        accumulated_signals[(ue_pos, subcarrier)] += signal_strength
+                        self._ensure_complex_accumulation(accumulated_signals, (ue_pos, subcarrier), signal_strength)
                         
         except Exception as e:
             logger.warning(f"Parallel processing failed: {e}. Falling back to sequential processing.")
@@ -1303,9 +1304,7 @@ class CPURayTracer(RayTracer):
                 base_station_pos, direction, ue_positions, selected_subcarriers, antenna_embedding
             )
             for (ue_pos, subcarrier), signal_strength in ray_results.items():
-                if (ue_pos, subcarrier) not in accumulated_signals:
-                    accumulated_signals[(ue_pos, subcarrier)] = 0.0
-                accumulated_signals[(ue_pos, subcarrier)] += signal_strength
+                self._ensure_complex_accumulation(accumulated_signals, (ue_pos, subcarrier), signal_strength)
         
         return accumulated_signals
     
@@ -1411,9 +1410,7 @@ class CPURayTracer(RayTracer):
             for antenna_results in results:
                 if antenna_results:  # Check if results are not empty
                     for (ue_pos, subcarrier, antenna_idx), signal_strength in antenna_results.items():
-                        if (ue_pos, subcarrier) not in accumulated_signals:
-                            accumulated_signals[(ue_pos, subcarrier)] = 0.0
-                        accumulated_signals[(ue_pos, subcarrier)] += signal_strength
+                        self._ensure_complex_accumulation(accumulated_signals, (ue_pos, subcarrier), signal_strength)
                         
         except Exception as e:
             logger.warning(f"Antenna-level parallel processing failed: {e}. Falling back to direction-level parallelization.")
@@ -1487,7 +1484,7 @@ class CPURayTracer(RayTracer):
                                        spatial_position: torch.Tensor,
                                        ue_pos: torch.Tensor,
                                        subcarrier_idx: int,
-                                       antenna_embedding: torch.Tensor) -> float:
+                                       antenna_embedding: torch.Tensor) -> torch.Tensor:
         """
         Compute signal strength at a specific spatial point.
         
@@ -1562,54 +1559,43 @@ class CPURayTracer(RayTracer):
                     radiation_factor = radiation_factors[0, subcarrier_idx]
                 else:
                     logger.error(f"Unexpected radiation_factors shape: {radiation_factors.shape}")
-                    return 0.0
+                    return torch.tensor(0.0 + 0.0j, dtype=torch.complex64, device=spatial_position.device)
                     
             except IndexError as e:
                 logger.error(f"Index error when accessing factors: {e}")
                 logger.error(f"attenuation_factors shape: {attenuation_factors.shape}")
                 logger.error(f"radiation_factors shape: {radiation_factors.shape}")
                 logger.error(f"subcarrier_idx: {subcarrier_idx}")
-                return 0.0
+                return torch.tensor(0.0 + 0.0j, dtype=torch.complex64, device=spatial_position.device)
             
-            # Compute signal strength using discrete radiance field model
+            # Compute complex signal using discrete radiance field model
             try:
-                # Handle complex tensors by converting to real values first
-                if attenuation_factor.is_complex():
-                    attenuation_factor = torch.abs(attenuation_factor)
-                if radiation_factor.is_complex():
-                    radiation_factor = torch.abs(radiation_factor)
+                # Keep complex computation throughout - DO NOT convert to real
+                complex_signal = attenuation_factor * radiation_factor
                 
-                # Check for numerical overflow before conversion
-                product = attenuation_factor * radiation_factor
+                # Check if the complex signal is finite
+                if not torch.isfinite(complex_signal).all():
+                    logger.warning(f"Non-finite complex signal detected: attenuation={attenuation_factor}, radiation={radiation_factor}")
+                    return torch.tensor(0.0 + 0.0j, dtype=torch.complex64, device=complex_signal.device)
                 
-                # Check if the product is finite and within reasonable bounds
-                if not torch.isfinite(product):
-                    logger.warning(f"Non-finite product detected: attenuation={attenuation_factor}, radiation={radiation_factor}")
-                    return 0.0
+                # Check for extreme values that might cause overflow (use magnitude for checking)
+                if torch.abs(complex_signal) > 1e6:
+                    logger.warning(f"Extreme complex signal magnitude detected: {torch.abs(complex_signal)}, clamping to prevent overflow")
+                    # Clamp the magnitude while preserving phase
+                    magnitude = torch.clamp(torch.abs(complex_signal), 0, 1e6)
+                    phase = torch.angle(complex_signal)
+                    complex_signal = magnitude * torch.exp(1j * phase)
                 
-                # Check for extreme values that might cause overflow
-                if torch.abs(product) > 1e6:
-                    logger.warning(f"Extreme product value detected: {product}, clamping to prevent overflow")
-                    product = torch.clamp(product, -1e6, 1e6)
-                
-                # Safe conversion to float
-                signal_strength = float(product)
-                
-                # Final validation
-                if not math.isfinite(signal_strength):
-                    logger.warning(f"Non-finite signal strength after conversion: {signal_strength}")
-                    return 0.0
-                
-                return signal_strength
+                return complex_signal
                 
             except (ValueError, OverflowError, RuntimeError) as e:
-                logger.warning(f"Error converting signal strength to float: {e}")
+                logger.warning(f"Error in complex signal computation: {e}")
                 logger.warning(f"attenuation_factor: {attenuation_factor}, radiation_factor: {radiation_factor}")
-                return 0.0
+                return torch.tensor(0.0 + 0.0j, dtype=torch.complex64, device=spatial_position.device)
             
         except Exception as e:
             logger.warning(f"Failed to compute signal at spatial point: {e}")
-            return 0.0
+            return torch.tensor(0.0 + 0.0j, dtype=torch.complex64, device=spatial_position.device)
     
     def _accumulate_signals_spatial_parallel(self, 
                                            base_station_pos: torch.Tensor,
@@ -1700,9 +1686,7 @@ class CPURayTracer(RayTracer):
             
             # Accumulate direction results
             for (ue_pos, subcarrier), signal_strength in direction_results.items():
-                if (ue_pos, subcarrier) not in accumulated_signals:
-                    accumulated_signals[(ue_pos, subcarrier)] = 0.0
-                accumulated_signals[(ue_pos, subcarrier)] += signal_strength
+                self._ensure_complex_accumulation(accumulated_signals, (ue_pos, subcarrier), signal_strength)
         
         return accumulated_signals
     
@@ -1878,9 +1862,7 @@ class CPURayTracer(RayTracer):
             
             # Accumulate direction results
             for (ue_pos, subcarrier), signal_strength in direction_results.items():
-                if (ue_pos, subcarrier) not in accumulated_signals:
-                    accumulated_signals[(ue_pos, subcarrier)] = 0.0
-                accumulated_signals[(ue_pos, subcarrier)] += signal_strength
+                self._ensure_complex_accumulation(accumulated_signals, (ue_pos, subcarrier), signal_strength)
         
         return accumulated_signals
     
@@ -2087,9 +2069,7 @@ class CPURayTracer(RayTracer):
             
             # Accumulate direction results
             for (ue_pos, subcarrier), signal_strength in direction_results.items():
-                if (ue_pos, subcarrier) not in accumulated_signals:
-                    accumulated_signals[(ue_pos, subcarrier)] = 0.0
-                accumulated_signals[(ue_pos, subcarrier)] += signal_strength
+                self._ensure_complex_accumulation(accumulated_signals, (ue_pos, subcarrier), signal_strength)
         
         return accumulated_signals
     
@@ -2198,9 +2178,7 @@ class CPURayTracer(RayTracer):
             
             # Accumulate direction results
             for (ue_pos, subcarrier), signal_strength in direction_results.items():
-                if (ue_pos, subcarrier) not in accumulated_signals:
-                    accumulated_signals[(ue_pos, subcarrier)] = 0.0
-                accumulated_signals[(ue_pos, subcarrier)] += signal_strength
+                self._ensure_complex_accumulation(accumulated_signals, (ue_pos, subcarrier), signal_strength)
         
         return accumulated_signals
     
@@ -2266,9 +2244,7 @@ class CPURayTracer(RayTracer):
                 signal_strength = results[i]
                 ue_pos_tuple = tuple(ue_pos)
                 
-                if (ue_pos_tuple, subcarrier_idx) not in accumulated_signals:
-                    accumulated_signals[(ue_pos_tuple, subcarrier_idx)] = 0.0
-                accumulated_signals[(ue_pos_tuple, subcarrier_idx)] += signal_strength
+                self._ensure_complex_accumulation(accumulated_signals, (ue_pos_tuple, subcarrier_idx), signal_strength)
                 
         except Exception as e:
             logger.warning(f"Direction+subcarrier parallel processing failed: {e}")

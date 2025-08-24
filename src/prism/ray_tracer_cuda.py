@@ -2062,7 +2062,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                                            attenuation_factors: torch.Tensor,
                                            radiation_factors: torch.Tensor,
                                            subcarrier_idx: int,
-                                           importance_weights: torch.Tensor) -> float:
+                                           importance_weights: torch.Tensor) -> torch.Tensor:
         """
         Integrate signal strength along the ray using importance sampling.
         
@@ -2154,13 +2154,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         # Final sum - single reduction operation
         total_signal_complex = torch.sum(signal_contributions)
         
-        # Handle complex result
-        if torch.is_complex(total_signal_complex):
-            total_signal = torch.abs(total_signal_complex)
-        else:
-            total_signal = total_signal_complex
-        
-        return total_signal.item()
+        # Return complex result - DO NOT convert to real
+        return total_signal_complex
     
     def _simple_distance_model(self, 
                               ray: Ray,
@@ -2195,6 +2190,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         signal_strength = base_attenuation * antenna_factor * frequency_factor
         
         return signal_strength.item()
+    
+    def _ensure_complex_accumulation(self, accumulated_signals: Dict, key: tuple, signal_strength: torch.Tensor):
+        """Helper function to ensure proper complex signal accumulation."""
+        if key not in accumulated_signals:
+            # Initialize with complex zero
+            accumulated_signals[key] = torch.tensor(0.0 + 0.0j, dtype=torch.complex64)
+        
+        # Ensure signal_strength is complex
+        if not torch.is_complex(signal_strength):
+            signal_strength = torch.complex(signal_strength, torch.tensor(0.0))
+        
+        accumulated_signals[key] += signal_strength
     
     def accumulate_signals(self, 
                           base_station_pos: torch.Tensor,
@@ -2397,9 +2404,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                     
                     key = (ue_key, subcarrier)
                     
-                    if key not in accumulated_signals:
-                        accumulated_signals[key] = 0.0
-                    accumulated_signals[key] += signal_strength
+                    self._ensure_complex_accumulation(accumulated_signals, key, signal_strength)
         
         logger.debug(f"Final accumulated signals: {len(accumulated_signals)} results")
         logger.debug(f"Final keys: {list(accumulated_signals.keys())}")
@@ -2432,9 +2437,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                 base_station_pos, direction, ue_positions, selected_subcarriers, antenna_embedding
             )
             for (ue_pos, subcarrier), signal_strength in ray_results.items():
-                if (ue_pos, subcarrier) not in accumulated_signals:
-                    accumulated_signals[(ue_pos, subcarrier)] = 0.0
-                accumulated_signals[(ue_pos, subcarrier)] += signal_strength
+                self._ensure_complex_accumulation(accumulated_signals, (ue_pos, subcarrier), signal_strength)
         
         return accumulated_signals
     
@@ -2496,9 +2499,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             # Convert results to the expected format
             for (ue_pos, subcarrier, direction_idx), signal_strength in results.items():
                 key = (ue_pos, subcarrier)
-                if key not in accumulated_signals:
-                    accumulated_signals[key] = 0.0
-                accumulated_signals[key] += signal_strength
+                self._ensure_complex_accumulation(accumulated_signals, key, signal_strength)
             
             logger.info(f"✅ CUDA ray tracing completed: {len(results)} rays processed")
             
@@ -2579,9 +2580,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                 # Accumulate results for this antenna
                 for (ue_pos, subcarrier, direction_idx), signal_strength in results.items():
                     key = (ue_pos, subcarrier)
-                    if key not in accumulated_signals:
-                        accumulated_signals[key] = 0.0
-                    accumulated_signals[key] += signal_strength
+                    self._ensure_complex_accumulation(accumulated_signals, key, signal_strength)
             
             logger.info(f"✅ CUDA antenna-level ray tracing completed: {len(accumulated_signals)} results")
             
@@ -2640,9 +2639,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             accumulated_signals = {}
             for (ue_pos, subcarrier, direction_idx), signal_strength in results.items():
                 key = (ue_pos, subcarrier)
-                if key not in accumulated_signals:
-                    accumulated_signals[key] = 0.0
-                accumulated_signals[key] += signal_strength
+                self._ensure_complex_accumulation(accumulated_signals, key, signal_strength)
             
             logger.info(f"✅ Ultra-optimized processing completed: {len(accumulated_signals)} results")
             return accumulated_signals

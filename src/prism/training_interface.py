@@ -626,16 +626,16 @@ class PrismTrainingInterface(nn.Module):
     
     def _signal_strength_to_csi(
         self,
-        signal_strength: float,
+        signal_strength: torch.Tensor,
         bs_pos: torch.Tensor,
         ue_pos: torch.Tensor,
         subcarrier_idx: int
     ) -> torch.complex64:
         """
-        Convert ray_tracer signal strength to complex CSI value.
+        Convert ray_tracer complex signal to complex CSI value.
         
         Args:
-            signal_strength: Signal strength from ray_tracer
+            signal_strength: Complex signal from ray_tracer (already contains phase information)
             bs_pos: Base station position
             ue_pos: UE position
             subcarrier_idx: Subcarrier index
@@ -643,18 +643,24 @@ class PrismTrainingInterface(nn.Module):
         Returns:
             Complex CSI value
         """
-        # Calculate distance-based phase
-        distance = torch.norm(ue_pos - bs_pos)
-        phase = 2 * torch.pi * subcarrier_idx * distance / 100.0  # Normalized wavelength
-        
-        # Convert signal strength to complex CSI with phase
-        amplitude = torch.sqrt(torch.as_tensor(signal_strength, dtype=torch.float32, device=bs_pos.device))
-        csi_value = torch.complex(
-            amplitude * torch.cos(phase), 
-            amplitude * torch.sin(phase)
-        )
-        
-        return csi_value.to(torch.complex64)
+        # If signal_strength is already complex, use it directly
+        if torch.is_complex(signal_strength):
+            # Ray tracer already provides complex signal with proper phase
+            return signal_strength.to(torch.complex64)
+        else:
+            # Fallback for backward compatibility: convert real signal to complex
+            # Calculate distance-based phase
+            distance = torch.norm(ue_pos - bs_pos)
+            phase = 2 * torch.pi * subcarrier_idx * distance / 100.0  # Normalized wavelength
+            
+            # Convert signal strength to complex CSI with phase
+            amplitude = torch.sqrt(torch.as_tensor(signal_strength, dtype=torch.float32, device=bs_pos.device))
+            csi_value = torch.complex(
+                amplitude * torch.cos(phase), 
+                amplitude * torch.sin(phase)
+            )
+            
+            return csi_value.to(torch.complex64)
     
 
     

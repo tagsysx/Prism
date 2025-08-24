@@ -4,7 +4,7 @@
 
 This document outlines the design and implementation of the discrete electromagnetic ray tracing system for the Prism project. The system implements an efficient voxel-based ray tracing approach that combines discrete radiance field modeling with advanced optimization strategies to achieve both accuracy and computational efficiency.
 
-The core concept is that the system computes **RF signal strength** $S_{\text{ray}}$ at the base station's antenna from each direction, which includes both amplitude and phase information of the electromagnetic wave. A key architectural advantage is that **ray tracing operations are independent**, enabling efficient parallelization using CUDA or multi-threading for significant performance acceleration.
+The core concept is that the system computes **complex RF signals** $S_{\text{ray}}$ at the base station's antenna from each direction, which includes both amplitude and phase information of the electromagnetic wave. **Critical Design Principle**: All ray tracing computations maintain complex number representation throughout the entire pipeline - from neural network outputs to final signal accumulation. Only during loss computation are complex signals converted to real values for MSE calculation. A key architectural advantage is that **ray tracing operations are independent**, enabling efficient parallelization using CUDA or multi-threading for significant performance acceleration.
 
 ## 1. Core Design
 
@@ -185,9 +185,9 @@ To manage computational complexity, the system implements intelligent subcarrier
 - **Sampling ratio**: $K' = \alpha \cdot K$ where $\alpha \in (0, 1)$ is the sampling factor
 - **Reduced complexity**: Effective ray count becomes $N_{\text{BS}} \times A \times B \times N_{\text{UE}} \times K'$
 
-### 3.3 RF Signal Computation
+### 3.3 Complex RF Signal Computation
 
-The ray tracer computes RF signal strength using the discrete radiance field model as specified in SPECIFICATION.md. For each ray direction, the signal is computed using the precise formula:
+The ray tracer computes **complex RF signals** using the discrete radiance field model as specified in SPECIFICATION.md. **All computations preserve complex number representation** to maintain both amplitude and phase information throughout the ray tracing process. For each ray direction, the complex signal is computed using the precise formula:
 
 ```math
 S(P_{\text{RX}}, \omega) \approx \sum_{k=1}^{K} \exp\!\left(-\sum_{j=1}^{k-1} \rho(P_{\text{v}}(t_j)) \Delta t_j \right) \big(1 - e^{-\rho(P_{\text{v}}(t_k)) \Delta t_k}\big) S(P_{\text{v}}(t_k), -\omega)
@@ -210,7 +210,72 @@ The ray tracing system integrates with four neural networks:
 3. **RadianceNetwork**: $f_\psi(\mathcal{F}(P_v), \text{IPE}(P_{\text{UE}}), \text{IPE}(\omega), C) \to S(P_v, \omega)$ (complex radiance values)
 4. **AntennaNetwork**: $f_\alpha(C) \to M_{ij}$ (directional importance matrix for top-K sampling)
 
-### 3.4 Virtual Link Computation
+### 3.4 Complex Number Preservation Throughout Ray Tracing
+
+**Critical Implementation Requirement**: The ray tracing system maintains complex number representation at every stage of computation to preserve both amplitude and phase information of electromagnetic waves.
+
+#### 3.4.1 Complex Signal Flow
+
+```python
+# ✅ CORRECT: Complex computation throughout
+def _compute_signal_at_spatial_point(spatial_position, ue_pos, subcarrier_idx, antenna_embedding):
+    # Neural networks output complex values
+    attenuation_factor = attenuation_network(spatial_position)  # Complex
+    radiation_factor = radiance_network(ue_pos, view_dir, antenna_embedding)  # Complex
+    
+    # Preserve complex computation - DO NOT convert to real
+    complex_signal = attenuation_factor * radiation_factor  # Complex multiplication
+    
+    return complex_signal  # Return complex tensor
+
+# ✅ CORRECT: Complex signal accumulation
+def accumulate_signals(bs_pos, ue_positions, selected_subcarriers, antenna_embedding):
+    accumulated_signals = {}
+    
+    for (ue_pos, subcarrier), complex_signal in ray_results.items():
+        if (ue_pos, subcarrier) not in accumulated_signals:
+            # Initialize with complex zero
+            accumulated_signals[(ue_pos, subcarrier)] = torch.tensor(0.0 + 0.0j, dtype=torch.complex64)
+        
+        # Complex accumulation preserves phase relationships
+        accumulated_signals[(ue_pos, subcarrier)] += complex_signal
+    
+    return accumulated_signals  # Returns complex signals
+
+# ✅ CORRECT: Only convert to real during loss computation
+def compute_loss(predictions, targets, loss_function):
+    # predictions and targets are complex CSI values
+    # Only here do we convert to real for MSE calculation
+    pred_magnitude = torch.abs(predictions)  # Complex → Real
+    target_magnitude = torch.abs(targets)    # Complex → Real
+    
+    loss = loss_function(pred_magnitude, target_magnitude)
+    return loss
+```
+
+#### 3.4.2 Physical Significance
+
+**Why Complex Numbers Are Essential**:
+- **Amplitude Information**: `|z|` represents signal strength/power
+- **Phase Information**: `arg(z)` represents wave phase/timing
+- **Coherent Superposition**: Complex addition correctly models wave interference
+- **Frequency Domain**: Natural representation for OFDM subcarriers
+- **Channel State Information**: CSI inherently complex-valued in wireless systems
+
+**Incorrect Approaches to Avoid**:
+```python
+# ❌ WRONG: Converting to real during ray tracing
+if complex_signal.is_complex():
+    signal_strength = torch.abs(complex_signal)  # Loses phase information!
+
+# ❌ WRONG: Real-valued accumulation
+accumulated_signals[(ue_pos, subcarrier)] = 0.0  # Should be complex zero
+
+# ❌ WRONG: Real-valued initialization
+results = torch.zeros(shape, dtype=torch.float32)  # Should be complex64
+```
+
+### 3.5 Virtual Link Computation
 
 The ray tracer computes accumulated RF signal strength for the optimized set of virtual links:
 
@@ -274,7 +339,7 @@ Where:
 - Local absorption: $(1 - \exp(\cdot)) \rightarrow (K, N)$
 
 **Output Tensor**:
-- Signal strengths: $(N,)$ - Real (magnitude of complex result)
+- Signal strengths: $(N,)$ - Complex (preserves both magnitude and phase information)
 
 #### 4.1.4 Vectorized Implementation
 
@@ -290,7 +355,7 @@ def vectorized_ray_tracing(attenuation, radiation, delta_t, importance_weights):
         importance_weights: (K,) - Importance sampling weights
     
     Returns:
-        result: (N,) - Signal strength for each subcarrier
+        result: (N,) - Complex signal for each subcarrier (preserves phase)
     """
     K, N = attenuation.shape
     
@@ -324,7 +389,7 @@ def vectorized_ray_tracing(attenuation, radiation, delta_t, importance_weights):
     # Step 8: Final reduction Result = Σ_k Contrib
     result = torch.sum(signal_contributions, dim=0)  # (K,N) → (N,)
     
-    return torch.abs(result)  # Return magnitude for compatibility
+    return result  # Return complex result - DO NOT convert to magnitude
 
 def compute_dynamic_path_lengths(sampled_positions):
     """
@@ -426,10 +491,10 @@ def vectorized_accumulate_signals(base_station_pos, ue_positions, selected_subca
         antenna_embedding: Base station's antenna embedding parameter C
     
     Returns:
-        Accumulated signal strength tensor for all virtual links
+        Accumulated complex signal tensor for all virtual links (preserves phase)
     """
     accumulated_signals = torch.zeros(len(ue_positions), len(selected_subcarriers), 
-                                    dtype=torch.float32, device=antenna_embedding.device)
+                                    dtype=torch.complex64, device=antenna_embedding.device)
     
     # Process all directions with vectorized operations
     for direction_idx, direction in enumerate(all_directions):
@@ -484,7 +549,7 @@ def batch_process_multiple_rays(directions, ue_positions, selected_subcarriers, 
     
     # Pre-allocate result tensor
     results = torch.zeros(num_directions, num_ues, num_subcarriers, 
-                         dtype=torch.float32, device=antenna_embedding.device)
+                         dtype=torch.complex64, device=antenna_embedding.device)
     
     # Batch process all directions simultaneously
     # Shape transformations: (D, U, K, N) where D=directions, U=UEs, K=voxels, N=subcarriers
