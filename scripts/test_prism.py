@@ -27,16 +27,17 @@ from typing import Dict, List, Tuple, Optional
 sys.path.append(str(Path(__file__).parent.parent.parent / "src"))
 
 from prism.networks.prism_network import PrismNetwork
+from prism.config_loader import ConfigLoader
 from prism.ray_tracer_cpu import CPURayTracer
+from prism.ray_tracer_cuda import CUDARayTracer
 from prism.training_interface import PrismTrainingInterface
 
-# Configure logging
+# Configure logging (will be updated after config loading)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('testing.log'),
-        logging.StreamHandler()
+        logging.StreamHandler()  # Only console initially, file handler added after config load
     ]
 )
 logger = logging.getLogger(__name__)
@@ -44,38 +45,189 @@ logger = logging.getLogger(__name__)
 class PrismTester:
     """Main tester class for Prism network using TrainingInterface"""
     
-    def __init__(self, config_path: str, model_path: str, data_path: str, output_dir: str):
-        """Initialize tester with configuration, model, and data paths"""
+    def __init__(self, config_path: str, model_path: str = None, data_path: str = None, output_dir: str = None):
+        """Initialize tester with configuration and optional model/data/output paths (will read from config if not provided)"""
         self.config_path = config_path
-        self.model_path = model_path
-        self.data_path = data_path
-        self.output_dir = Path(output_dir)
+        
+        # Load configuration first using ConfigLoader to process template variables
+        try:
+            config_loader = ConfigLoader(config_path)
+            self.config = config_loader.config
+        except Exception as e:
+            print(f"❌ FATAL ERROR: Failed to load configuration from {config_path}")
+            print(f"   Error details: {str(e)}")
+            print(f"   Please check your configuration file and ensure it exists and is valid.")
+            sys.exit(1)
+        
+        # Setup proper logging after config is loaded
+        try:
+            self._setup_logging()
+        except Exception as e:
+            print(f"❌ FATAL ERROR: Failed to setup logging")
+            print(f"   Error details: {str(e)}")
+            print(f"   Please check your logging configuration.")
+            sys.exit(1)
+        
+        # Set model path, data path and output directory from config if not provided
+        try:
+            self.model_path = model_path or self.config['testing']['model_path']
+            
+            # Import data utilities
+            from src.prism.data_utils import check_dataset_compatibility
+            
+            # Check dataset configuration
+            dataset_path, split_config = check_dataset_compatibility(self.config)
+            
+            # Use single dataset with split
+            self.data_path = data_path or dataset_path
+            self.split_config = split_config
+            logger.info(f"Using single dataset with train/test split: {self.data_path}")
+            logger.info(f"Split configuration: {self.split_config}")
+                
+        except KeyError as e:
+            logger.error(f"❌ FATAL ERROR: Missing required configuration key: {e}")
+            print(f"❌ FATAL ERROR: Configuration is missing required key: {e}")
+            print(f"   Please check your configuration file structure.")
+            sys.exit(1)
+        
+        # Build output directory from base_dir (new simplified structure)
+        if output_dir:
+            self.output_dir = Path(output_dir)
+        else:
+            # Use base_dir + testing to construct output directory
+            base_dir = self.config['output'].get('base_dir', 'results')
+            self.output_dir = Path(base_dir) / 'testing'
+        
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
         
-        # Load configuration
-        self.config = self._load_config()
+        logger.info(f"Loaded configuration from {config_path}")
         
-        # Setup device
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # Setup device with intelligent GPU selection
+        device_config = self.config.get('system', {}).get('device', 'cuda')
+        if device_config == 'cuda' and torch.cuda.is_available():
+            selected_gpu = self._select_best_gpu()
+            self.device = torch.device(f'cuda:{selected_gpu}')
+            logger.info(f"🔍 GPU Auto-Selection for Testing:")
+            logger.info(f"  • Selected GPU: {selected_gpu}")
+            logger.info(f"  • GPU Name: {torch.cuda.get_device_name(selected_gpu)}")
+            logger.info(f"  • GPU Memory: {torch.cuda.get_device_properties(selected_gpu).total_memory / 1024**3:.1f}GB")
+        else:
+            self.device = torch.device('cpu')
+            if device_config == 'cuda':
+                logger.warning("CUDA requested but not available, using CPU")
+            else:
+                logger.info("Using CPU as configured")
+        
         logger.info(f"Using device: {self.device}")
         
         # Load model and data
         self._load_model()
         self._load_data()
+    
+    def _select_best_gpu(self) -> int:
+        """智能选择最佳可用GPU (与训练脚本相同的逻辑)"""
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA not available")
+        
+        num_gpus = torch.cuda.device_count()
+        if num_gpus == 1:
+            return 0
+        
+        logger.info("🔍 Scanning available GPUs for testing...")
+        
+        gpu_info = []
+        for i in range(num_gpus):
+            try:
+                # 获取GPU基本信息
+                props = torch.cuda.get_device_properties(i)
+                name = torch.cuda.get_device_name(i)
+                total_memory = props.total_memory / 1024**3  # GB
+                
+                # 获取当前内存使用情况
+                torch.cuda.set_device(i)
+                allocated_memory = torch.cuda.memory_allocated(i) / 1024**3  # GB
+                reserved_memory = torch.cuda.memory_reserved(i) / 1024**3   # GB
+                free_memory = total_memory - reserved_memory
+                
+                # 计算GPU利用率分数
+                memory_usage_ratio = reserved_memory / total_memory
+                score = total_memory * (1 - memory_usage_ratio)
+                
+                gpu_info.append({
+                    'id': i,
+                    'name': name,
+                    'total_memory': total_memory,
+                    'free_memory': free_memory,
+                    'usage_ratio': memory_usage_ratio,
+                    'score': score
+                })
+                
+                logger.info(f"  GPU {i}: {name} ({total_memory:.1f}GB, {free_memory:.1f}GB free)")
+                
+            except Exception as e:
+                logger.warning(f"  GPU {i}: Error getting info - {e}")
+                gpu_info.append({'id': i, 'score': -1})
+        
+        # 选择得分最高的GPU
+        best_gpu = max(gpu_info, key=lambda x: x['score'])
+        selected_id = best_gpu['id']
+        
+        logger.info(f"✅ Selected GPU {selected_id} for testing")
+        return selected_id
+    
+    def _setup_logging(self):
+        """Setup logging with proper file path from config"""
+        # Get logging configuration from config
+        output_config = self.config.get('output', {})
+        logging_config = output_config.get('logging', {})
+        log_level_str = logging_config.get('log_level', 'INFO')
+        
+        # Get log file path from config (should always be available after ConfigLoader processing)
+        log_file = logging_config.get('log_file')
+        if not log_file:
+            raise ValueError("log_file not found in configuration. Check your config file and ConfigLoader processing.")
+        
+        # Create log directory if it doesn't exist
+        log_dir = os.path.dirname(log_file)
+        if log_dir and not os.path.exists(log_dir):
+            os.makedirs(log_dir, exist_ok=True)
+        
+        # Convert string log level to logging constant
+        log_level = getattr(logging, log_level_str.upper(), logging.INFO)
+        
+        # Add file handler to existing logger
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(log_level)
+        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s'))
+        
+        # Add to root logger
+        root_logger = logging.getLogger()
+        root_logger.addHandler(file_handler)
+        root_logger.setLevel(log_level)
+        
+        logger.info(f"Logging setup complete. Log file: {log_file}")
         
     def _load_config(self):
-        """Load configuration from YAML file"""
-        with open(self.config_path, 'r') as f:
-            config = yaml.safe_load(f)
-        logger.info(f"Loaded configuration from {self.config_path}")
-        return config
+        """Load configuration from YAML file using ConfigLoader"""
+        try:
+            config_loader = ConfigLoader(self.config_path)
+            config = config_loader.config
+            logger.info(f"Loaded configuration from {self.config_path}")
+            return config
+        except Exception as e:
+            logger.error(f"❌ FATAL ERROR: Failed to load configuration from {self.config_path}")
+            logger.error(f"   Error details: {str(e)}")
+            print(f"❌ FATAL ERROR: Configuration loading failed")
+            sys.exit(1)
     
     def _load_model(self):
         """Load trained Prism network model from TrainingInterface checkpoint"""
         logger.info(f"Loading TrainingInterface model from {self.model_path}")
         
         # Check if this is a TrainingInterface checkpoint
-        if 'checkpoint_epoch_' in str(self.model_path) or 'best_model.pt' in str(self.model_path) or 'latest_checkpoint.pt' in str(self.model_path):
+        if ('checkpoint_epoch_' in str(self.model_path) or 'best_model.pt' in str(self.model_path) or 
+            'latest_checkpoint.pt' in str(self.model_path) or 'latest_batch_checkpoint.pt' in str(self.model_path)):
             # This is a TrainingInterface checkpoint
             self._load_training_interface_checkpoint()
         else:
@@ -85,13 +237,17 @@ class PrismTester:
     def _load_training_interface_checkpoint(self):
         """Load TrainingInterface checkpoint"""
         try:
-            # Create PrismNetwork and CPURayTracer first
+            # Create PrismNetwork and ray tracer first
             nn_config = self.config['neural_networks']
-            rt_config = self.config['ray_tracing']
+            ray_tracing_config = self.config['ray_tracing']
+            ue_config = self.config.get('user_equipment', {})
+            
+            # Get angular sampling config
+            angular_sampling = ray_tracing_config.get('angular_sampling', {})
             
             self.prism_network = PrismNetwork(
                 num_subcarriers=nn_config['attenuation_decoder']['output_dim'],
-                num_ue_antennas=nn_config['attenuation_decoder']['num_ue'],
+                num_ue_antennas=ue_config.get('num_ue_antennas', 4),
                 num_bs_antennas=nn_config['antenna_codebook']['num_antennas'],
                 position_dim=nn_config['attenuation_network']['input_dim'],
                 hidden_dim=nn_config['attenuation_network']['hidden_dim'],
@@ -99,32 +255,117 @@ class PrismTester:
                 antenna_embedding_dim=nn_config['antenna_codebook']['embedding_dim'],
                 use_antenna_codebook=nn_config['antenna_codebook']['learnable'],
                 use_ipe_encoding=True,
-                azimuth_divisions=rt_config['azimuth_divisions'],
-                elevation_divisions=rt_config['elevation_divisions'],
-                top_k_directions=32,
+                azimuth_divisions=angular_sampling.get('azimuth_divisions', 18),
+                elevation_divisions=angular_sampling.get('elevation_divisions', 9),
+                top_k_directions=angular_sampling.get('top_k_directions', 32),
                 complex_output=True
             )
             
-            self.ray_tracer = CPURayTracer(
-                scene_bounds=rt_config.get('scene_bounds', None),
-                angular_divisions=(rt_config['azimuth_divisions'], rt_config['elevation_divisions']),
-                spatial_sampling=rt_config.get('spatial_sampling', 64),
-                gpu_acceleration=rt_config.get('gpu_acceleration', True)
-            )
+            # Get configuration sections
+            ray_tracing_config = self.config.get('ray_tracing', {})
+            system_config = self.config.get('system', {})
             
-            # Create TrainingInterface
+            # Get ray tracing execution settings from system config
+            ray_tracing_mode = system_config.get('ray_tracing_mode', 'cuda')
+            fallback_to_cpu = system_config.get('fallback_to_cpu', True)
+            
+            logger.info(f"Ray tracer configuration:")
+            logger.info(f"  - Ray tracing mode: {ray_tracing_mode}")
+            logger.info(f"  - CUDA available: {torch.cuda.is_available()}")
+            logger.info(f"  - Fallback to CPU: {fallback_to_cpu}")
+            
+            # Calculate max ray length from scene bounds
+            def calculate_max_ray_length(scene_bounds):
+                """Calculate maximum ray length from scene bounds"""
+                if 'min' in scene_bounds and 'max' in scene_bounds:
+                    import numpy as np
+                    min_bounds = np.array(scene_bounds['min'])
+                    max_bounds = np.array(scene_bounds['max'])
+                    # Calculate diagonal distance of the scene
+                    diagonal = np.linalg.norm(max_bounds - min_bounds)
+                    # Add some margin for safety
+                    return diagonal * 1.2
+                else:
+                    # Fallback to default if scene bounds not properly configured
+                    return 200.0
+            
+            # Get sampling configurations
+            angular_sampling = ray_tracing_config.get('angular_sampling', {})
+            spatial_sampling = ray_tracing_config.get('spatial_sampling', {})
+            scene_bounds = ray_tracing_config.get('scene_bounds', {})
+            max_ray_length = ray_tracing_config.get('max_ray_length', calculate_max_ray_length(scene_bounds))
+            
+            logger.info(f"📏 Calculated max_ray_length: {max_ray_length:.1f}m from scene bounds")
+            
+            # Create ray tracer based on configuration
+            if ray_tracing_mode == 'cuda' and torch.cuda.is_available():
+                logger.info("🚀 Using CUDA-accelerated ray tracer")
+                mixed_precision_enabled = system_config.get('mixed_precision', {}).get('enabled', True)
+                
+                self.ray_tracer = CUDARayTracer(
+                    azimuth_divisions=angular_sampling.get('azimuth_divisions', 18),
+                    elevation_divisions=angular_sampling.get('elevation_divisions', 9),
+                    max_ray_length=max_ray_length,
+                    prism_network=self.prism_network,
+                    signal_threshold=ray_tracing_config.get('signal_threshold', 1e-6),
+                    enable_early_termination=ray_tracing_config.get('enable_early_termination', True),
+                    uniform_samples=spatial_sampling.get('num_sampling_points', 64),
+                    resampled_points=spatial_sampling.get('resampled_points', 32),
+                    use_mixed_precision=mixed_precision_enabled
+                )
+            else:
+                if ray_tracing_mode == 'cuda' and not torch.cuda.is_available():
+                    if fallback_to_cpu:
+                        logger.warning("⚠️  CUDA ray tracer requested but CUDA not available, falling back to CPU")
+                    else:
+                        raise RuntimeError("CUDA ray tracer requested but CUDA not available and fallback disabled")
+                
+                logger.info("💻 Using CPU ray tracer")
+                cpu_config = system_config.get('cpu', {})
+                
+                self.ray_tracer = CPURayTracer(
+                    azimuth_divisions=angular_sampling.get('azimuth_divisions', 18),
+                    elevation_divisions=angular_sampling.get('elevation_divisions', 9),
+                    max_ray_length=max_ray_length,
+                    scene_bounds=ray_tracing_config.get('scene_bounds'),
+                    prism_network=self.prism_network,
+                    signal_threshold=ray_tracing_config.get('signal_threshold', 1e-6),
+                    enable_early_termination=ray_tracing_config.get('enable_early_termination', True),
+                    top_k_directions=angular_sampling.get('top_k_directions', 32),
+                    max_workers=cpu_config.get('num_workers', 4),
+                    uniform_samples=spatial_sampling.get('num_sampling_points', 64),
+                    resampled_points=spatial_sampling.get('resampled_points', 32)
+                )
+            
+            # Get checkpoint directory from config
+            checkpoint_dir = self.config['output']['training']['checkpoint_dir']
+            
+            # Create TrainingInterface with simplified parameters
             self.model = PrismTrainingInterface(
                 prism_network=self.prism_network,
                 ray_tracer=self.ray_tracer,
-                num_sampling_points=rt_config.get('spatial_sampling', 64),
-                scene_bounds=rt_config.get('scene_bounds', None),
-                subcarrier_sampling_ratio=rt_config.get('subcarrier_sampling_ratio', 0.3),
-                checkpoint_dir=str(self.output_dir / 'temp_checkpoints')
+                ray_tracing_config=ray_tracing_config,
+                system_config=system_config,
+                checkpoint_dir=checkpoint_dir
             )
+            
+            # Pass full config for logging fallback
+            self.model._full_config = self.config
             
             # Load the checkpoint
             self.model.load_checkpoint(self.model_path)
             self.model = self.model.to(self.device)
+            
+            # Ensure ray tracer uses the same device as the model
+            if hasattr(self.ray_tracer, 'device'):
+                self.ray_tracer.device = self.device.type
+                logger.info(f"Set ray tracer device to: {self.device.type}")
+            
+            # Also set CUDA device if available
+            if torch.cuda.is_available():
+                torch.cuda.set_device(self.device)
+                logger.info(f"Set CUDA device to: {self.device}")
+            
             self.model.eval()
             
             # Print model info
@@ -149,7 +390,7 @@ class PrismTester:
         logger.info("Attempting to load legacy checkpoint format...")
         
         # Load checkpoint
-        checkpoint = torch.load(self.model_path, map_location=self.device)
+        checkpoint = torch.load(self.model_path, map_location=self.device, weights_only=False)
         
         # Extract configuration from checkpoint
         if 'config' in checkpoint:
@@ -159,11 +400,12 @@ class PrismTester:
             checkpoint_config = self.config
             logger.info("Using configuration from YAML file")
         
-        # Create model with same configuration
+        # Create model with updated configuration mapping
         nn_config = checkpoint_config['neural_networks']
         self.model = PrismNetwork(
             num_subcarriers=nn_config['attenuation_decoder']['output_dim'],
-            num_ue_antennas=nn_config['attenuation_decoder']['num_ue'],
+            num_ue_antennas=nn_config['attenuation_decoder'].get('num_ue_antennas', 
+                           nn_config['attenuation_decoder'].get('num_ue', 4)),  # Handle both old and new names
             num_bs_antennas=nn_config['antenna_codebook']['num_antennas'],
             position_dim=nn_config['attenuation_network']['input_dim'],
             hidden_dim=nn_config['attenuation_network']['hidden_dim'],
@@ -171,14 +413,30 @@ class PrismTester:
             antenna_embedding_dim=nn_config['antenna_codebook']['embedding_dim'],
             use_antenna_codebook=nn_config['antenna_codebook']['learnable'],
             use_ipe_encoding=True,
-            azimuth_divisions=checkpoint_config['ray_tracing']['azimuth_divisions'],
-            elevation_divisions=checkpoint_config['ray_tracing']['elevation_divisions'],
-            top_k_directions=32,
+            azimuth_divisions=checkpoint_config['ray_tracing']['angular_sampling']['azimuth_divisions'],
+            elevation_divisions=checkpoint_config['ray_tracing']['angular_sampling']['elevation_divisions'],
+            top_k_directions=checkpoint_config['ray_tracing']['angular_sampling']['top_k_directions'],
             complex_output=True
         )
         
         # Load model weights
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        # Load model state dict - handle potential prefix mismatch
+        model_state_dict = checkpoint['model_state_dict']
+        
+        # Check if the checkpoint has 'prism_network.' prefix but our model doesn't
+        if any(key.startswith('prism_network.') for key in model_state_dict.keys()):
+            logger.info("Detected 'prism_network.' prefix in checkpoint, removing prefix...")
+            # Remove 'prism_network.' prefix from all keys
+            new_state_dict = {}
+            for key, value in model_state_dict.items():
+                if key.startswith('prism_network.'):
+                    new_key = key[len('prism_network.'):]  # Remove the prefix
+                    new_state_dict[new_key] = value
+                else:
+                    new_state_dict[key] = value
+            model_state_dict = new_state_dict
+        
+        self.model.load_state_dict(model_state_dict)
         self.model = self.model.to(self.device)
         self.model.eval()
         
@@ -198,32 +456,30 @@ class PrismTester:
         """Load test data from HDF5 file"""
         logger.info(f"Loading test data from {self.data_path}")
         
-        with h5py.File(self.data_path, 'r') as f:
-            # Load UE positions
-            self.ue_positions = torch.tensor(f['ue_positions'][:], dtype=torch.float32)
-            logger.info(f"Loaded {len(self.ue_positions)} UE positions")
-            
-            # Load channel responses (CSI)
-            self.csi_target = torch.tensor(f['channel_responses'][:], dtype=torch.complex64)
-            logger.info(f"Loaded CSI data with shape: {self.csi_target.shape}")
-            
-            # Load BS position
-            self.bs_position = torch.tensor(f['bs_position'][:], dtype=torch.float32)
-            logger.info(f"BS position: {self.bs_position}")
-            
-            # Load antenna indices if available
-            if 'antenna_indices' in f:
-                self.antenna_indices = torch.tensor(f['antenna_indices'][:], dtype=torch.long)
-                logger.info(f"Loaded antenna indices with shape: {self.antenna_indices.shape}")
-            else:
-                # Create default antenna indices if not available
-                num_bs_antennas = self.csi_target.shape[1] if len(self.csi_target.shape) > 1 else 1
-                self.antenna_indices = torch.arange(num_bs_antennas)
-                logger.info(f"Created default antenna indices: {self.antenna_indices}")
-            
-            # Load simulation parameters
-            self.sim_params = dict(f['simulation_params'].attrs)
-            logger.info(f"Simulation parameters: {self.sim_params}")
+        # Use split-based data loading
+        from src.prism.data_utils import load_and_split_data
+        
+        self.ue_positions, self.csi_target, self.bs_position, self.antenna_indices, metadata = load_and_split_data(
+            dataset_path=self.data_path,
+            train_ratio=self.split_config['train_ratio'],
+            test_ratio=self.split_config['test_ratio'],
+            random_seed=self.split_config['random_seed'],
+            mode='test'
+        )
+        
+        # Log split information
+        logger.info(f"Using train/test split mode")
+        logger.info(f"Random seed: {self.split_config['random_seed']}")
+        logger.info(f"Train ratio: {self.split_config['train_ratio']}")
+        logger.info(f"Test ratio: {self.split_config['test_ratio']}")
+        logger.info(f"UE positions: {self.ue_positions.shape[0]} samples (testing split)")
+        logger.info(f"CSI data: {self.csi_target.shape}")
+        logger.info(f"BS position: {self.bs_position.shape}")
+        logger.info(f"Antenna indices: {len(self.antenna_indices)}")
+        
+        # Store metadata
+        self.split_metadata = metadata
+        self.sim_params = metadata.get('simulation_params', {})
         
         # Move to device
         self.ue_positions = self.ue_positions.to(self.device)
@@ -239,8 +495,8 @@ class PrismTester:
         predictions = []
         losses = []
         
-        # Process in batches to avoid memory issues
-        batch_size = 64
+        # Process in batches to avoid memory issues (use config setting)
+        batch_size = self.config['testing']['batch_size']
         num_samples = len(self.ue_positions)
         
         with torch.no_grad():
@@ -392,6 +648,12 @@ class PrismTester:
             pred_mag = np.abs(self.predictions[idx].numpy())
             target_mag = np.abs(self.csi_target[idx].cpu().numpy())
             
+            # Handle multi-dimensional data by averaging over UE and BS antennas
+            if pred_mag.ndim > 1:
+                pred_mag = np.mean(pred_mag, axis=tuple(range(1, pred_mag.ndim)))
+            if target_mag.ndim > 1:
+                target_mag = np.mean(target_mag, axis=tuple(range(1, target_mag.ndim)))
+            
             subcarriers = range(len(pred_mag))
             ax.plot(subcarriers, target_mag, 'b-', label='Target', linewidth=2)
             ax.plot(subcarriers, pred_mag, 'r--', label='Prediction', linewidth=2)
@@ -403,7 +665,9 @@ class PrismTester:
             ax.grid(True, alpha=0.3)
         
         plt.tight_layout()
-        plot_path = self.output_dir / 'csi_magnitude_comparison.png'
+        plots_dir = Path(self.config['output']['testing']['plots_dir'])
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        plot_path = plots_dir / 'csi_magnitude_comparison.png'
         plt.savefig(plot_path, dpi=300, bbox_inches='tight')
         plt.close()
         
@@ -422,6 +686,12 @@ class PrismTester:
             pred_phase = np.angle(self.predictions[idx].numpy())
             target_phase = np.angle(self.csi_target[idx].cpu().numpy())
             
+            # Handle multi-dimensional data by averaging over UE and BS antennas
+            if pred_phase.ndim > 1:
+                pred_phase = np.mean(pred_phase, axis=tuple(range(1, pred_phase.ndim)))
+            if target_phase.ndim > 1:
+                target_phase = np.mean(target_phase, axis=tuple(range(1, target_phase.ndim)))
+            
             subcarriers = range(len(pred_phase))
             ax.plot(subcarriers, target_phase, 'b-', label='Target', linewidth=2)
             ax.plot(subcarriers, pred_phase, 'r--', label='Prediction', linewidth=2)
@@ -433,7 +703,9 @@ class PrismTester:
             ax.grid(True, alpha=0.3)
         
         plt.tight_layout()
-        plot_path = self.output_dir / 'csi_phase_comparison.png'
+        plots_dir = Path(self.config['output']['testing']['plots_dir'])
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        plot_path = plots_dir / 'csi_phase_comparison.png'
         plt.savefig(plot_path, dpi=300, bbox_inches='tight')
         plt.close()
         
@@ -467,7 +739,9 @@ class PrismTester:
         axes[1].grid(True, alpha=0.3)
         
         plt.tight_layout()
-        plot_path = self.output_dir / 'error_distribution.png'
+        plots_dir = Path(self.config['output']['testing']['plots_dir'])
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        plot_path = plots_dir / 'error_distribution.png'
         plt.savefig(plot_path, dpi=300, bbox_inches='tight')
         plt.close()
         
@@ -513,7 +787,9 @@ class PrismTester:
         plt.colorbar(scatter2, ax=axes[1], label='Phase Error (radians)')
         
         plt.tight_layout()
-        plot_path = self.output_dir / 'spatial_performance.png'
+        plots_dir = Path(self.config['output']['testing']['plots_dir'])
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        plot_path = plots_dir / 'spatial_performance.png'
         plt.savefig(plot_path, dpi=300, bbox_inches='tight')
         plt.close()
         
@@ -547,7 +823,9 @@ class PrismTester:
         axes[1].grid(True, alpha=0.3)
         
         plt.tight_layout()
-        plot_path = self.output_dir / 'subcarrier_performance.png'
+        plots_dir = Path(self.config['output']['testing']['plots_dir'])
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        plot_path = plots_dir / 'subcarrier_performance.png'
         plt.savefig(plot_path, dpi=300, bbox_inches='tight')
         plt.close()
         
@@ -567,12 +845,17 @@ class PrismTester:
             'simulation_parameters': self.sim_params
         }
         
-        results_path = self.output_dir / 'test_results.json'
+        # Save results
+        results_dir = Path(self.config['output']['testing']['results_dir'])
+        results_dir.mkdir(parents=True, exist_ok=True)
+        results_path = results_dir / 'test_results.json'
         with open(results_path, 'w') as f:
             json.dump(results, f, indent=2)
         
         # Save predictions
-        predictions_path = self.output_dir / 'predictions.npz'
+        predictions_dir = Path(self.config['output']['testing']['predictions_dir'])
+        predictions_dir.mkdir(parents=True, exist_ok=True)
+        predictions_path = predictions_dir / 'predictions.npz'
         np.savez_compressed(
             predictions_path,
             ue_positions=self.ue_positions.cpu().numpy(),
@@ -610,17 +893,15 @@ def main():
     parser = argparse.ArgumentParser(description='Test Prism Network')
     parser.add_argument('--config', type=str, default='configs/ofdm-5g-sionna.yml',
                        help='Path to configuration file')
-    parser.add_argument('--model', type=str, required=True,
-                       help='Path to trained model checkpoint')
-    parser.add_argument('--data', type=str, required=True,
-                       help='Path to test data HDF5 file')
-    parser.add_argument('--output', type=str, default='results/testing',
-                       help='Output directory for results')
+    parser.add_argument('--model', type=str, default=None,
+                       help='Path to trained model checkpoint (optional, will read from config if not provided)')
+
+
     
     args = parser.parse_args()
     
-    # Create tester and start testing
-    tester = PrismTester(args.config, args.model, args.data, args.output)
+    # Create tester and start testing (model path, data path and output directory from config if not provided)
+    tester = PrismTester(args.config, args.model, None, None)
     tester.test()
 
 if __name__ == '__main__':

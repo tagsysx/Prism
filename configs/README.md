@@ -1,24 +1,22 @@
 # Prism Configuration Guide
 
 ## Overview
-This document explains the configuration parameters for the Prism neural network-based electromagnetic ray tracing system.
+This document explains the configuration parameters for the Prism neural network-based electromagnetic ray tracing system. The configuration has been reorganized for better clarity and maintainability.
 
 ## Table of Contents
 1. [Key Concepts Clarification](#key-concepts-clarification)
-2. [Core Ray Tracing Configuration](#core-ray-tracing-configuration)
-3. [Neural Network Configuration](#neural-network-configuration)
-4. [Base Station Configuration](#base-station-configuration)
-5. [User Equipment Configuration](#user-equipment-configuration)
-6. [Importance Sampling Configuration](#importance-sampling-configuration)
-7. [Performance Configuration](#performance-configuration)
-8. [Training Interface Configuration](#training-interface-configuration)
-9. [Ray Tracer Integration Configuration](#ray-tracer-integration-configuration)
-10. [Training Configuration](#training-configuration)
-11. [Output Configuration](#output-configuration)
-12. [Performance Optimization Guide](#performance-optimization-guide)
-13. [Top-K Directions Configuration](#top-k-directions-configuration)
-14. [CUDA Acceleration Guide](#cuda-acceleration-guide)
-15. [Configuration Examples](#configuration-examples)
+2. [Neural Network Configuration](#neural-network-configuration)
+3. [Base Station Configuration](#base-station-configuration)
+4. [User Equipment Configuration](#user-equipment-configuration)
+5. [Ray Tracing Configuration](#ray-tracing-configuration)
+6. [System Configuration](#system-configuration)
+7. [Training Configuration](#training-configuration)
+8. [Testing Configuration](#testing-configuration)
+9. [Input Configuration](#input-configuration)
+10. [Output Configuration](#output-configuration)
+11. [Performance Optimization Guide](#performance-optimization-guide)
+12. [CUDA Acceleration Guide](#cuda-acceleration-guide)
+13. [Configuration Examples](#configuration-examples)
 
 ## Key Concepts Clarification
 
@@ -43,18 +41,24 @@ Our simulation data represents:
 ### Neural Networks Section
 ```yaml
 neural_networks:
+  enabled: true                       # Enable neural network-based processing
+  
   attenuation_decoder:
-    num_ue_antennas: 4    # Number of antennas per UE device (NOT number of UE devices)
+    num_ue_antennas: 4                # Number of antennas per UE device (NOT number of UE devices)
+    output_dim: 408                   # Number of subcarriers
   
   radiance_network:
-    num_ue_antennas: 4    # Number of antennas per UE device (NOT number of UE devices)
+    num_ue_antennas: 4                # Number of antennas per UE device (NOT number of UE devices)
+    output_dim: 408                   # Number of subcarriers
 ```
 
 ### User Equipment Section
 ```yaml
 user_equipment:
-  num_ue_antennas: 4      # Number of antennas per UE device
-  antenna_config: '4x64'  # 4 UE antennas × 64 BS antennas
+  num_ue_antennas: 4                  # Number of antennas per UE device
+  antenna_config: '4x64'              # 4 UE antennas × 64 BS antennas
+  position_range: [-150.0, 150.0]     # UE position range in meters
+  height_range: [1.0, 2.0]            # UE height range in meters
   # Note: Number of UE positions is determined from actual training data
 ```
 
@@ -87,14 +91,36 @@ Training Data: (batch_size, 408, 4, 64)
 
 ---
 
-## Core Ray Tracing Configuration
+## Ray Tracing Configuration
+
+### Physical Parameters
+```yaml
+ray_tracing:
+  max_ray_length: 200.0              # Maximum ray length in meters
+  signal_threshold: 1e-6             # Signal strength threshold for early termination
+  enable_early_termination: true     # Enable early termination optimization
+```
+
+**Description**: Defines the physical boundaries and signal processing parameters for ray tracing.
+
+### Scene Configuration
+```yaml
+ray_tracing:
+  scene_bounds:
+    min: [-100.0, -100.0, 0.0]       # Scene minimum bounds [x, y, z]
+    max: [100.0, 100.0, 30.0]        # Scene maximum bounds [x, y, z]
+```
+
+**Description**: Defines the 3D simulation environment boundaries.
 
 ### Angular Sampling
 ```yaml
 ray_tracing:
-  azimuth_divisions: 18           # Number of azimuth divisions A (0° to 360°)
-  elevation_divisions: 9          # Number of elevation divisions B (-90° to +90°)
-  total_directions: 162           # A × B = 18 × 9 = 162 angle combinations
+  angular_sampling:
+    azimuth_divisions: 18            # Number of azimuth divisions (0° to 360°)
+    elevation_divisions: 9           # Number of elevation divisions (-90° to +90°)
+    total_directions: 162            # 18 × 9 = 162 angle combinations
+    top_k_directions: 32             # Number of top-K directions to select
 ```
 
 **Description**: Controls the angular resolution of ray tracing. Higher values provide more accurate direction sampling but increase computation time.
@@ -102,30 +128,22 @@ ray_tracing:
 ### Spatial Sampling
 ```yaml
 ray_tracing:
-  uniform_samples: 64             # First stage: uniform sampling points per ray
-  resampled_points: 32            # Second stage: importance-based resampled points
-  total_spatial_points: 10368     # 162 × 32 = 10,368 spatial samples
+  spatial_sampling:
+    num_sampling_points: 64          # Number of sampling points per ray (uniform_samples)
+    resampled_points: 32             # Second stage: importance-based resampled points
 ```
 
 **Description**: Two-stage importance sampling for efficient spatial point selection along rays.
 
-### Physical Parameters
+### Subcarrier Sampling
 ```yaml
 ray_tracing:
-  max_ray_length: 200.0           # Maximum ray length in meters
-  scene_size: 200.0               # Scene size D (cubic environment)
+  subcarrier_sampling:
+    sampling_ratio: 0.1              # Ratio of subcarriers to select (10%)
+    antenna_specific_selection: true  # Enable antenna-specific subcarrier selection
 ```
 
-**Description**: Defines the physical boundaries and maximum ray length for the simulation environment.
-
-### Performance Options
-```yaml
-ray_tracing:
-  gpu_acceleration: true          # Enable GPU acceleration
-  enable_early_termination: true  # Enable early termination optimization
-  signal_threshold: 1e-6          # Signal strength threshold for early termination
-  top_k_directions: 32            # Number of top-K directions to select
-```
+**Description**: Controls subcarrier selection for efficient OFDM processing.
 
 ---
 
@@ -205,6 +223,7 @@ neural_networks:
 
 ## Base Station Configuration
 
+### Basic Configuration
 ```yaml
 base_station:
   default_position: [0.0, 0.0, 0.0]  # Base station at origin
@@ -215,6 +234,33 @@ base_station:
 ```
 
 **Description**: Configures base station properties including position, number of antennas, and antenna characteristics.
+
+### OFDM System Parameters
+```yaml
+base_station:
+  ofdm:
+    center_frequency: 3.5e9          # Center frequency in Hz (3.5 GHz - mid-band 5G)
+    bandwidth: 100.0e6               # Bandwidth in Hz (100 MHz - 5G NR standard)
+    num_subcarriers: 408             # Total number of subcarriers
+    subcarrier_spacing: 245.1e3      # Subcarrier spacing in Hz (100MHz/408 ≈ 245.1 kHz)
+    guard_band_ratio: 0.1            # Guard band ratio (10% of bandwidth)
+    fft_size: 512                    # OFDM FFT size
+    num_guard_carriers: 52           # Number of guard carriers ((512-408)/2)
+```
+
+**Description**: 5G NR OFDM system parameters for realistic wireless communication simulation.
+
+### Antenna Array Configuration
+```yaml
+base_station:
+  antenna_array:
+    configuration: '8x8'              # Antenna array configuration (M x N)
+    element_spacing: 'half_wavelength' # Element spacing type
+    custom_spacing: null              # Custom spacing in meters (if not half_wavelength)
+    beamforming_enabled: true         # Enable beamforming capabilities
+```
+
+**Description**: Configures the physical antenna array layout and beamforming capabilities.
 
 ---
 
@@ -232,332 +278,300 @@ user_equipment:
 
 ---
 
-## Importance Sampling Configuration
-
-```yaml
-importance_sampling:
-  enabled: true                      # Enable importance-based sampling
-  power_factor: 2.0                  # Power factor for weight calculation
-  min_weights: 1e-6                  # Minimum weight threshold
-  normalize_weights: true            # Normalize importance weights
-  resampling_method: 'multinomial'   # Resampling method
-  replacement: true                  # Allow replacement during resampling
-```
-
-**Description**: Controls the importance sampling strategy for efficient spatial point selection.
-
----
-
-## Performance Configuration
+## System Configuration
 
 ### Computational Settings
 ```yaml
-performance:
-  device: 'cuda'                     # Device for computation ('cuda' or 'cpu')
-  batch_size: 32                     # Batch size for processing
-  max_concurrent_rays: 1000          # Maximum concurrent rays
+system:
+  device: 'cuda'                     # Primary device for computation ('cuda' or 'cpu')
+  batch_size: 2                      # Global batch size for all operations
+  gpu_memory_fraction: 0.8           # GPU memory usage fraction
 ```
+
+**Description**: Core system settings for device selection and memory management.
+
+### Ray Tracing Execution Mode
+```yaml
+system:
+  ray_tracing_mode: 'cuda'           # Ray tracing mode: 'cuda', 'cpu', or 'hybrid'
+  # - 'cuda': Pure CUDA acceleration (fastest, neural networks + ray tracing on GPU)
+  # - 'cpu': Pure CPU with multiprocessing (stable, reliable)
+  # - 'hybrid': Neural networks on CUDA, ray tracing on CPU (balanced)
+  fallback_to_cpu: true              # Fallback to CPU if CUDA not available
+```
+
+**Description**: Controls the execution mode for ray tracing operations with automatic fallback capabilities.
 
 ### CUDA-Specific Settings
 ```yaml
-performance:
-  cuda_device_id: 0                  # CUDA device ID to use (0 for first GPU)
-  cuda_optimization_level: 'O2'      # CUDA optimization level ('O0', 'O1', 'O2', 'O3')
-  cuda_benchmark_mode: true          # Enable CUDA benchmark mode for optimal performance
-  cuda_deterministic: false          # Disable deterministic mode for better performance
+system:
+  cuda:
+    device_id: 0                     # CUDA device ID to use (0 for first GPU)
+    optimization_level: 'O2'         # CUDA optimization level ('O0', 'O1', 'O2', 'O3')
+    benchmark_mode: true             # Enable CUDA benchmark mode for optimal performance
+    deterministic: false             # Disable deterministic mode for better performance
+    multi_gpu: false                 # Disable multi-GPU CUDA operations
+    gpu_ids: [0]                     # Use only GPU 0
+    memory_pool: true                # Enable CUDA memory pool for better memory management
 ```
 
 **Description**: Advanced CUDA configuration options for optimal performance and control.
 
-### Memory Management
+### CPU-Specific Settings
 ```yaml
-performance:
-  gpu_memory_fraction: 0.8           # GPU memory usage fraction
-  enable_mixed_precision: true        # Enable mixed precision for efficiency
-  cuda_memory_pool: true             # Enable CUDA memory pool for better memory management
+system:
+  cpu:
+    num_workers: 4                   # Number of worker processes for CPU ray tracer
 ```
 
-### Parallel Processing
-```yaml
-performance:
-  enable_parallel_processing: true    # Enable parallel processing for ray tracing
-  num_workers: 24                     # Number of parallel workers (optimized for 32-core system)
+**Description**: CPU-specific configuration for multiprocessing ray tracing.
 
-  enable_distributed: false           # Enable distributed processing
+### Mixed Precision Configuration
+```yaml
+system:
+  mixed_precision:
+    enabled: true                    # Enable/disable mixed precision globally
+    autocast_enabled: true           # Enable autocast for forward pass
+    grad_scaler_enabled: true        # Enable gradient scaler for training
+    loss_scale: "dynamic"            # "dynamic" or fixed number (e.g., 2048)
 ```
 
----
+**Description**: Mixed precision training configuration for improved performance and memory efficiency.
 
-## Training Interface Configuration
-
+### Spatial Spectrum Configuration
 ```yaml
-training_interface:
-  enabled: true                       # Enable integrated training interface
-  
-  # Ray tracing mode selection
-  ray_tracing_mode: 'cuda'            # Ray tracing mode: 'cuda', 'cpu', or 'hybrid'
-  # - 'cuda': Pure CUDA acceleration (fastest, no CPU fallback)
-  # - 'cpu': Pure CPU with multiprocessing (stable, reliable)  
-  # - 'hybrid': Neural networks on CUDA, ray tracing on CPU (balanced)
-  
-  num_sampling_points: 64             # Number of sampling points per ray
-  subcarrier_sampling_ratio: 0.3      # Ratio of subcarriers to select (30%)
-  antenna_specific_selection: true    # Enable antenna-specific subcarrier selection
-  checkpoint_dir: "checkpoints"        # Directory for saving checkpoints
-  auto_checkpoint: true               # Enable automatic checkpointing
-  checkpoint_frequency: 100           # Save checkpoint every N batches
+system:
+  spatial_spectrum:
+    enabled: true                    # Enable spatial spectrum calculation
+    default_algorithm: 'bartlett'    # Default spatial spectrum algorithm
+    default_fusion_method: 'average' # Default subcarrier fusion method
+    angle_resolution:
+      theta_points: 60               # Number of elevation angle points
+      phi_points: 120                # Number of azimuth angle points
+      theta_range: [-60, 60]         # Elevation angle range in degrees
+      phi_range: [0, 360]            # Azimuth angle range in degrees
+    peak_detection:
+      num_peaks: 3                   # Number of peaks to detect
+      min_distance: 5                # Minimum distance between peaks (pixels)
+    subcarrier_selection:
+      enabled: true                  # Enable subcarrier selection for spatial spectrum
+      selection_method: 'uniform'    # 'uniform', 'weighted', or 'custom'
+      num_selected: 64               # Number of subcarriers to use (64 out of 408)
+      frequency_weighting: true      # Apply frequency-dependent weighting
 ```
 
-### Scene Configuration
-```yaml
-training_interface:
-  scene_bounds:
-    min: [-150.0, -150.0, 0.0]       # Scene minimum bounds [x, y, z]
-    max: [150.0, 150.0, 30.0]        # Scene maximum bounds [x, y, z]
-```
+**Description**: 5G NR specific spatial spectrum analysis configuration for beamforming and direction finding.
 
-### Curriculum Learning
-```yaml
-training_interface:
-  curriculum_learning:
-    enabled: true                     # Enable curriculum learning
-    phases:
-      - phase: 0
-        azimuth_divisions: 8          # Coarse angular resolution
-        elevation_divisions: 4
-        top_k_directions: 16          # Fewer directions for initial training
-      - phase: 1
-        azimuth_divisions: 16         # Medium angular resolution
-        elevation_divisions: 8
-        top_k_directions: 32
-      - phase: 2
-        azimuth_divisions: 36         # Fine angular resolution
-        elevation_divisions: 18
-        top_k_directions: 64          # More directions for final training
-```
 
-**Description**: Progressive training strategy that starts with coarse resolution and gradually increases accuracy.
-
-### Ray Tracing Mode Selection
-
-The training interface now supports three distinct ray tracing modes to balance performance and stability:
-
-#### CUDA Mode (`ray_tracing_mode: 'cuda'`)
-```yaml
-training_interface:
-  ray_tracing_mode: 'cuda'            # Pure CUDA acceleration
-```
-
-**Features**:
-- ✅ **Maximum Performance**: Full GPU acceleration for ray tracing
-- ✅ **No Device Conflicts**: Automatically disables parallel processing to prevent hanging
-- ✅ **Pure GPU Operations**: All computations run on CUDA
-- ⚠️ **Experimental**: May have stability issues on some systems
-
-**Use Cases**:
-- High-performance training on stable CUDA systems
-- When maximum speed is required
-- Development and testing environments
-
-#### CPU Mode (`ray_tracing_mode: 'cpu'`)
-```yaml
-training_interface:
-  ray_tracing_mode: 'cpu'             # Pure CPU with multiprocessing
-```
-
-**Features**:
-- ✅ **Maximum Stability**: No hanging issues, reliable execution
-- ✅ **Parallel Processing**: Full CPU multiprocessing enabled
-- ✅ **Cross-Platform**: Works on all systems
-- ⚠️ **Slower Performance**: CPU-based ray tracing
-
-**Use Cases**:
-- Production training environments
-- When stability is critical
-- Systems without CUDA support
-
-#### Hybrid Mode (`ray_tracing_mode: 'hybrid'`)
-```yaml
-training_interface:
-  ray_tracing_mode: 'hybrid'          # Neural nets on CUDA, ray tracing on CPU
-```
-
-**Features**:
-- ✅ **Balanced Performance**: Neural networks on GPU, ray tracing on CPU
-- ✅ **Automatic Fallback**: Tries CUDA first, falls back to CPU if needed
-- ✅ **Flexible Configuration**: Uses configured parallel processing settings
-- ✅ **Best of Both Worlds**: GPU acceleration where possible, CPU stability where needed
-
-**Use Cases**:
-- Default recommended mode
-- Balanced performance and stability
-- Mixed GPU/CPU workloads
-
-### Automatic Parallel Processing Configuration
-
-The system automatically configures parallel processing based on the selected mode:
-
-| Mode | Parallel Processing | Reason |
-|------|-------------------|---------|
-| **CUDA** | ❌ **Disabled** | Prevents device conflicts and hanging |
-| **CPU** | ✅ **Enabled** | Maximizes CPU performance |
-| **Hybrid** | ⚖️ **Configurable** | Uses configuration file settings |
-
-### Mode Comparison Table
-
-Here's a comprehensive comparison of the three ray tracing modes:
-
-| Mode | Description | Parallel Processing | Performance | Stability |
-|------|-------------|-------------------|-------------|-----------|
-| **cuda** | Pure CUDA acceleration | ❌ Disabled | 🚀 Fastest | ⚠️ Experimental |
-| **cpu** | Pure CPU with multiprocessing | ✅ Enabled | 🐌 Slower | ✅ Stable |
-| **hybrid** | Neural nets on CUDA, ray tracing on CPU | ⚖️ Configurable | 🚀 Balanced | ✅ Reliable |
-
-### CSI Computation
-```yaml
-training_interface:
-  csi_computation:
-    signal_to_csi_conversion: true    # Enable signal strength to CSI conversion
-    phase_calculation_method: 'distance_based'  # Method for phase calculation
-    wavelength_normalization: 100.0   # Normalization factor for wavelength
-    complex_output: true              # Output complex CSI values
-```
-
----
-
-## Ray Tracer Integration Configuration
-
-### Integration Settings
-```yaml
-ray_tracer_integration:
-  enabled: true                       # Enable ray_tracer integration
-  fallback_mode: 'prism_network'      # Fallback when ray_tracer fails
-```
-
-### CUDA Acceleration Configuration
-```yaml
-ray_tracer_integration:
-  use_cuda_ray_tracer: true           # Enable CUDA-accelerated ray tracer for maximum performance
-  cuda_fallback_to_cpu: true          # Fallback to CPU if CUDA not available
-  cuda_memory_fraction: 0.8           # GPU memory usage fraction for CUDA operations
-```
-
-**Description**: Controls whether to use CUDA-accelerated ray tracing for maximum performance.
-
-### Ray Tracer Parameters
-```yaml
-ray_tracer_integration:
-  azimuth_divisions: 36               # Initial angular divisions (curriculum learning)
-  elevation_divisions: 18             # Initial angular divisions (curriculum learning)
-  max_ray_length: 100.0               # Maximum ray length for training
-  scene_size: 100.0                   # Scene size for training
-  signal_threshold: 1e-6              # Signal strength threshold
-  enable_early_termination: true      # Enable early ray termination
-```
-
-### AntennaNetwork Integration
-```yaml
-ray_tracer_integration:
-  use_antenna_network_directions: true # Use AntennaNetwork for direction selection
-  direction_selection_method: 'top_k'  # Method for selecting directions
-  adaptive_direction_count: true       # Adapt direction count based on training phase
-```
-
-### Performance Optimization
-```yaml
-ray_tracer_integration:
-  batch_processing: true               # Enable batch processing for efficiency
-  cpu_offload: true                    # Offload ray_tracer computation to CPU
-  parallel_antenna_processing: true    # Process antennas in parallel (enabled for performance)
-  num_workers: 24                      # Number of workers for parallel processing (optimized for 32-core system)
-```
 
 ---
 
 ## Training Configuration
 
+### Basic Training Parameters
 ```yaml
 training:
-  batch_size: 32                       # Training batch size
-  learning_rate: 1e-4                  # Initial learning rate
-  num_epochs: 100                      # Number of training epochs
-  loss_function: 'mse'                 # Loss function type
-  optimizer: 'adam'                    # Optimizer type
+  learning_rate: 1e-4                # Initial learning rate
+  num_epochs: 1                      # Number of training epochs
+  batches_per_epoch: 50              # Number of batches per epoch
 ```
 
-### Loss Function Weights
+**Description**: Core training parameters for model optimization.
+
+### Checkpoint and Recovery
 ```yaml
 training:
+  auto_checkpoint: true              # Enable automatic checkpointing
+  checkpoint_frequency: 10           # Save checkpoint every N batches (every 10 batches)
+```
+
+**Description**: Automatic checkpointing for training recovery and model saving.
+
+### Loss Function Configuration
+```yaml
+training:
+  loss_function: 'mse'               # Loss function type
   loss_weights:
-    csi_loss: 1.0                      # Weight for CSI prediction loss
-    regularization: 0.01               # Weight for regularization terms
+    csi_loss: 1.0                    # Weight for CSI prediction loss
+    regularization: 0.01             # Weight for regularization terms
 ```
 
-### Optimizer Parameters
+**Description**: Loss function selection and weighting for multi-objective training.
+
+### Optimizer Configuration
 ```yaml
 training:
+  optimizer: 'adam'                  # Optimizer type
   optimizer_params:
-    beta1: 0.9                         # Adam beta1 parameter
-    beta2: 0.999                       # Adam beta2 parameter
-    weight_decay: 1e-5                 # Weight decay for regularization
+    beta1: 0.9                       # Adam beta1 parameter
+    beta2: 0.999                     # Adam beta2 parameter
+    weight_decay: 1e-5               # Weight decay for regularization
 ```
+
+**Description**: Optimizer selection and hyperparameter configuration.
 
 ### Learning Rate Scheduling
 ```yaml
 training:
   lr_scheduler:
-    enabled: true                      # Enable learning rate scheduling
-    type: 'step'                       # Scheduler type
-    step_size: 30                      # Step size for StepLR
-    gamma: 0.1                         # Multiplicative factor for LR decay
+    enabled: true                    # Enable learning rate scheduling
+    type: 'step'                     # Scheduler type
+    step_size: 30                    # Step size for StepLR
+    gamma: 0.1                       # Multiplicative factor for LR decay
 ```
+
+**Description**: Learning rate scheduling for improved training convergence.
 
 ### Early Stopping
 ```yaml
 training:
   early_stopping:
-    enabled: true                      # Enable early stopping
-    patience: 10                       # Number of epochs to wait for improvement
-    min_delta: 1e-6                    # Minimum change to qualify as improvement
-    restore_best_weights: true         # Restore best weights on early stopping
+    enabled: true                    # Enable early stopping
+    patience: 10                     # Number of epochs to wait for improvement
+    min_delta: 1e-6                  # Minimum change to qualify as improvement
+    restore_best_weights: true       # Restore best weights on early stopping
 ```
+
+**Description**: Early stopping mechanism to prevent overfitting and save training time.
+
+---
+
+## Testing Configuration
+
+### Basic Testing Parameters
+```yaml
+testing:
+  batch_size: 1                      # Testing batch size (can be different from training)
+```
+
+**Description**: Core testing parameters for model evaluation.
+
+### Model Configuration
+```yaml
+testing:
+  model_path: "results/training-sionna/checkpoints/latest/latest_batch_checkpoint.pt"    # Path to trained model for testing
+  # Alternative model paths (uncomment to use):
+  # model_path: "results/training-sionna/checkpoints/models/checkpoint_epoch_1_batch_30.pt"  # Specific epoch/batch
+  # model_path: "results/training-sionna/backup_old_checkpoints/latest_batch_checkpoint.pt"  # Backup checkpoint
+```
+
+**Description**: Configuration for loading trained models for testing and evaluation.
+
+### Evaluation Metrics
+```yaml
+testing:
+  metrics:
+    - 'mse'                          # Mean Squared Error
+    - 'mae'                          # Mean Absolute Error
+    - 'rmse'                         # Root Mean Squared Error
+    - 'complex_correlation'          # Complex correlation coefficient
+```
+
+**Description**: Metrics to compute during model evaluation.
+
+### Output Configuration
+```yaml
+testing:
+  save_predictions: true             # Save model predictions
+  save_intermediate_results: true    # Save intermediate ray tracing results
+  save_visualizations: true          # Save result visualizations
+```
+
+**Description**: Controls what outputs to save during testing.
+
+---
+
+## Input Configuration
+
+### Data Paths
+```yaml
+input:
+  # Input data paths (all paths relative to project root)
+  training_data: "data/sionna/sionna_5g_training.h5"     # Training data HDF5 file (80 positions)
+  testing_data: "data/sionna/sionna_5g_testing.h5"       # Testing data HDF5 file (20 positions)
+```
+
+**Description**: Paths to training and testing datasets. All paths are relative to the project root directory.
 
 ---
 
 ## Output Configuration
 
-### Results Storage
+### Base Directories
 ```yaml
 output:
-  save_results: true                   # Save ray tracing results
-  output_format: 'hdf5'                # Output file format
-  compression_level: 6                 # Compression level for output files
+  base_dir: "results"                           # Base results directory
 ```
 
-### Training Outputs
+**Description**: Base directory for all output files, relative to project root.
+
+### Training Output Directories
 ```yaml
 output:
-  save_training_outputs: true          # Save training interface outputs
-  save_ray_tracer_results: true        # Save ray_tracer intermediate results
-  save_csi_predictions: true           # Save CSI predictions
+  training:
+    output_dir: "results/training-sionna"                    # Main training output directory
+    checkpoint_dir: "results/training-sionna/checkpoints"    # Directory for saving checkpoints
+    tensorboard_dir: "results/training-sionna/tensorboard"   # TensorBoard logs directory
+    models_dir: "results/training-sionna/models"             # Saved models directory
+    logs_dir: "results/training-sionna/logs"                 # Training logs directory
 ```
 
-### Checkpoint Outputs
+**Description**: Organized directory structure for training outputs.
+
+### Testing Output Directories
 ```yaml
 output:
-  checkpoint_format: 'pytorch'         # Checkpoint file format
-  save_optimizer_state: true           # Save optimizer state in checkpoints
-  save_training_history: true          # Save training history
+  testing:
+    output_dir: "results/testing-sionna"                     # Main testing output directory
+    results_dir: "results/testing-sionna/results"            # Test results and metrics
+    plots_dir: "results/testing-sionna/plots"                # Visualization plots
+    predictions_dir: "results/testing-sionna/predictions"    # Model predictions
+    reports_dir: "results/testing-sionna/reports"            # Test reports directory
 ```
 
-### Logging
+**Description**: Organized directory structure for testing outputs.
+
+### File Formats and Compression
 ```yaml
 output:
-  log_level: 'INFO'                    # Logging level
-  enable_progress_bar: true            # Enable progress bars
-  log_ray_tracer_stats: true           # Log ray_tracer statistics
-  log_training_metrics: true           # Log training metrics
+  format: 'hdf5'                     # Output file format
+  compression_level: 6               # Compression level for output files
 ```
+
+**Description**: File format and compression settings for efficient storage.
+
+### What to Save
+```yaml
+output:
+  save_results: true                 # Save ray tracing results
+  save_training_outputs: true        # Save training interface outputs
+  save_ray_tracer_results: true      # Save ray tracer intermediate results
+  save_csi_predictions: true         # Save CSI predictions
+```
+
+**Description**: Controls which intermediate and final results to save.
+
+### Checkpoint Configuration
+```yaml
+output:
+  checkpoint_format: 'pytorch'       # Checkpoint file format
+  save_optimizer_state: true         # Save optimizer state in checkpoints
+  save_training_history: true        # Save training history
+```
+
+**Description**: Checkpoint saving configuration for training recovery.
+
+### Logging Configuration
+```yaml
+output:
+  log_level: 'INFO'                  # Logging level
+  log_file: "training.log"           # Main log file (in project root)
+  enable_progress_bar: true          # Enable progress bars
+  log_ray_tracer_stats: true         # Log ray tracer statistics
+  log_training_metrics: true         # Log training metrics
+```
+
+**Description**: Logging configuration for monitoring training progress and debugging.
 
 ---
 
@@ -734,46 +748,32 @@ curriculum_learning:
 
 ---
 
-## Recent Fixes and Improvements
+## Recent Updates and Improvements
 
-### Training Interface Stability Fixes
+### Configuration Reorganization
 
-The training interface has been significantly improved to resolve hanging issues and provide better stability:
+The configuration file has been completely reorganized for better clarity and maintainability:
 
-#### ✅ **Fixed Issues**
-1. **Selection Variables Initialization**: Proper initialization of training state variables
-2. **Device Consistency**: Automatic CUDA/CPU device management
-3. **Timeout Protection**: Added timeout mechanisms to prevent hanging
-4. **Fallback Mechanisms**: Robust fallback when ray tracing fails
-5. **Parallel Processing Conflicts**: Automatic resolution of CUDA vs CPU conflicts
+#### ✅ **Key Improvements**
+1. **Cleaner Structure**: Logical grouping of related parameters
+2. **New System Section**: Centralized system-wide settings
+3. **Enhanced OFDM Support**: Comprehensive 5G NR OFDM parameters
+4. **Spatial Spectrum Analysis**: Built-in beamforming and direction finding
+5. **Mixed Precision Training**: Improved performance and memory efficiency
+6. **Organized Output Directories**: Structured output organization
 
-#### 🔧 **Technical Improvements**
-- **Dynamic Selection Variable Sizing**: Automatically adjusts for different batch sizes
-- **Timeout Wrappers**: Prevents infinite loops in ray tracing operations
-- **Error Recovery**: Graceful fallback to simple calculations when needed
-- **Device Management**: Automatic tensor device placement and consistency
+#### 🔧 **New Features**
+- **Ray Tracing Modes**: Clear selection between 'cuda', 'cpu', and 'hybrid' modes
+- **OFDM System Parameters**: Realistic 5G NR configuration
+- **Spatial Spectrum Configuration**: Advanced beamforming capabilities
+- **Mixed Precision Support**: Automatic mixed precision training
+- **Comprehensive Testing**: Dedicated testing configuration section
 
-#### 📊 **Performance Improvements**
-- **No More Hanging**: Training completes reliably without getting stuck
-- **Faster Initialization**: Proper variable initialization prevents delays
-- **Better Error Handling**: Clear error messages and recovery strategies
-- **Mode-Specific Optimization**: Each ray tracing mode optimized for its use case
-
-### Configuration Migration
-
-**Old Configuration** (deprecated):
-```yaml
-# This approach is no longer recommended
-training_interface:
-  use_simple_ray_tracing: true        # ❌ Confusing boolean flag
-```
-
-**New Configuration** (recommended):
-```yaml
-# Clear mode selection
-training_interface:
-  ray_tracing_mode: 'hybrid'          # ✅ Clear mode selection
-```
+#### 📊 **Configuration Benefits**
+- **Better Organization**: Easier to find and modify parameters
+- **Clear Documentation**: Each section thoroughly documented
+- **Realistic Parameters**: 5G NR compliant OFDM settings
+- **Flexible Deployment**: Support for various hardware configurations
 
 ## CUDA Acceleration Guide
 
@@ -843,66 +843,170 @@ The system will automatically:
 
 ## Configuration Examples
 
-### Example 1: Enable CUDA Acceleration with Default Settings
+### Example 1: High-Performance CUDA Configuration
 ```yaml
-ray_tracer_integration:
-  use_cuda_ray_tracer: true          # Enable CUDA
-  cuda_fallback_to_cpu: true         # Fallback to CPU if needed
-  cuda_memory_fraction: 0.8          # Use 80% of GPU memory
+# System configuration for maximum performance
+system:
+  device: 'cuda'
+  batch_size: 4
+  ray_tracing_mode: 'cuda'
+  fallback_to_cpu: false
+  gpu_memory_fraction: 0.9
+  
+  cuda:
+    device_id: 0
+    optimization_level: 'O3'
+    benchmark_mode: true
+    deterministic: false
+    memory_pool: true
+
+# Ray tracing with high resolution
+ray_tracing:
+  angular_sampling:
+    azimuth_divisions: 36
+    elevation_divisions: 18
+    top_k_directions: 64
+  
+  spatial_sampling:
+    num_sampling_points: 128
+    resampled_points: 64
 ```
 
-### Example 2: High-Performance CUDA Configuration
+### Example 2: Balanced Performance Configuration
 ```yaml
-ray_tracer_integration:
-  use_cuda_ray_tracer: true
-  cuda_fallback_to_cpu: false        # Require CUDA
-  cuda_memory_fraction: 0.9          # Use 90% of GPU memory
+# System configuration for balanced performance and stability
+system:
+  device: 'cuda'
+  batch_size: 2
+  ray_tracing_mode: 'hybrid'
+  fallback_to_cpu: true
+  gpu_memory_fraction: 0.8
+  
+  cuda:
+    device_id: 0
+    optimization_level: 'O2'
+    benchmark_mode: true
+    deterministic: false
+  
+  cpu:
+    num_workers: 4
 
-performance:
-  cuda_optimization_level: 'O3'      # Maximum optimization
-  cuda_benchmark_mode: true          # Enable benchmarking
-  cuda_deterministic: false          # Allow non-deterministic optimizations
+# Ray tracing with medium resolution
+ray_tracing:
+  angular_sampling:
+    azimuth_divisions: 18
+    elevation_divisions: 9
+    top_k_directions: 32
+  
+  spatial_sampling:
+    num_sampling_points: 64
+    resampled_points: 32
 ```
 
-### Example 3: Multi-GPU Configuration
+### Example 3: CPU-Only Configuration
 ```yaml
-performance:
-  cuda_device_id: 1                  # Use second GPU
-  cuda_memory_fraction: 0.7          # Leave more memory for other operations
+# System configuration for CPU-only execution
+system:
+  device: 'cpu'
+  batch_size: 1
+  ray_tracing_mode: 'cpu'
+  fallback_to_cpu: true
+  
+  cpu:
+    num_workers: 8
+
+# Ray tracing with lower resolution for CPU efficiency
+ray_tracing:
+  angular_sampling:
+    azimuth_divisions: 12
+    elevation_divisions: 6
+    top_k_directions: 16
+  
+  spatial_sampling:
+    num_sampling_points: 32
+    resampled_points: 16
 ```
 
-### Example 4: Disable CUDA (CPU-Only Mode)
+### Example 4: Development/Testing Configuration
 ```yaml
-ray_tracer_integration:
-  use_cuda_ray_tracer: false         # Use CPU ray tracer
+# System configuration for development and testing
+system:
+  device: 'cuda'
+  batch_size: 1
+  ray_tracing_mode: 'hybrid'
+  fallback_to_cpu: true
+  gpu_memory_fraction: 0.6
+  
+  cuda:
+    device_id: 0
+    optimization_level: 'O1'
+    benchmark_mode: true
+    deterministic: true  # Reproducible results for testing
+  
+  mixed_precision:
+    enabled: false  # Disable for debugging
+
+# Training configuration for quick testing
+training:
+  learning_rate: 1e-3
+  num_epochs: 1
+  batches_per_epoch: 10
+  auto_checkpoint: true
+  checkpoint_frequency: 5
 ```
 
-### Example 5: Balanced Performance Configuration
+### Example 5: Production Training Configuration
 ```yaml
-ray_tracer_integration:
-  use_cuda_ray_tracer: true
-  cuda_fallback_to_cpu: true
-  cuda_memory_fraction: 0.8
+# System configuration for production training
+system:
+  device: 'cuda'
+  batch_size: 8
+  ray_tracing_mode: 'cuda'
+  fallback_to_cpu: true
+  gpu_memory_fraction: 0.85
+  
+  cuda:
+    device_id: 0
+    optimization_level: 'O2'
+    benchmark_mode: false
+    deterministic: false
+    memory_pool: true
+  
+  mixed_precision:
+    enabled: true
+    autocast_enabled: true
+    grad_scaler_enabled: true
+    loss_scale: "dynamic"
 
-performance:
-  cuda_optimization_level: 'O2'      # Balanced optimization
-  cuda_benchmark_mode: false         # Disable benchmarking for production
-  cuda_deterministic: false          # Better performance
-  enable_parallel_processing: true   # Enable CPU parallel processing as backup
-  num_workers: 16                    # Moderate number of workers
+# Training configuration for production
+training:
+  learning_rate: 1e-4
+  num_epochs: 100
+  batches_per_epoch: 200
+  auto_checkpoint: true
+  checkpoint_frequency: 50
+  
+  early_stopping:
+    enabled: true
+    patience: 20
+    min_delta: 1e-7
 ```
 
-### Example 6: Development/Testing Configuration
+### Example 6: Multi-GPU Configuration
 ```yaml
-ray_tracer_integration:
-  use_cuda_ray_tracer: true
-  cuda_fallback_to_cpu: true
-  cuda_memory_fraction: 0.6          # Leave more memory for development tools
-
-performance:
-  cuda_optimization_level: 'O1'      # Fast compilation
-  cuda_benchmark_mode: true          # Enable benchmarking for development
-  cuda_deterministic: true           # Reproducible results for testing
-  enable_parallel_processing: true
-  num_workers: 8                     # Fewer workers for development
+# System configuration for multi-GPU setup
+system:
+  device: 'cuda'
+  batch_size: 16
+  ray_tracing_mode: 'cuda'
+  fallback_to_cpu: true
+  gpu_memory_fraction: 0.8
+  
+  cuda:
+    device_id: 0  # Primary GPU
+    multi_gpu: true
+    gpu_ids: [0, 1]  # Use first two GPUs
+    optimization_level: 'O2'
+    benchmark_mode: true
+    memory_pool: true
 ```

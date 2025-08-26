@@ -47,7 +47,6 @@ class PrismNetwork(nn.Module):
         top_k_directions: int = 32,
         complex_output: bool = True,
         use_mixed_precision: bool = False,
-        config_loader = None,
         **kwargs
     ):
         super().__init__()
@@ -67,20 +66,11 @@ class PrismNetwork(nn.Module):
         self.top_k_directions = top_k_directions
         self.complex_output = complex_output
         
-        # Configure mixed precision from config loader or parameter
-        self.config_loader = config_loader
-        if config_loader is not None:
-            # Get mixed precision settings from config
-            self.use_mixed_precision = config_loader.get_network_mixed_precision_config('prism_network')
-            self.attenuation_use_mixed_precision = config_loader.get_network_mixed_precision_config('attenuation_network')
-            self.antenna_use_mixed_precision = config_loader.get_network_mixed_precision_config('antenna_network')
-            self.radiance_use_mixed_precision = config_loader.get_network_mixed_precision_config('radiance_network')
-        else:
-            # Use parameter or default
-            self.use_mixed_precision = use_mixed_precision
-            self.attenuation_use_mixed_precision = use_mixed_precision
-            self.antenna_use_mixed_precision = use_mixed_precision
-            self.radiance_use_mixed_precision = use_mixed_precision
+        # Configure mixed precision from parameter
+        self.use_mixed_precision = use_mixed_precision
+        self.attenuation_use_mixed_precision = use_mixed_precision
+        self.antenna_use_mixed_precision = use_mixed_precision
+        self.radiance_use_mixed_precision = use_mixed_precision
         
         # Initialize positional encoders
         if use_ipe_encoding:

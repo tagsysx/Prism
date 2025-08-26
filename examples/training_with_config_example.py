@@ -191,7 +191,7 @@ def main():
         
         # Save checkpoint
         checkpoint_config = config_loader.get_checkpoint_config()
-        checkpoint_dir = checkpoint_config.get('checkpoint_dir', 'checkpoints')
+        checkpoint_dir = checkpoint_config.get('checkpoint_dir', 'results/checkpoints')
         os.makedirs(checkpoint_dir, exist_ok=True)
         
         checkpoint_file = "example_checkpoint.pt"

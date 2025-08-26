@@ -21,7 +21,26 @@ from .ray_tracer_cuda import (
     CUDARayTracer
 )
 
+from .spatial_spectrum import (
+    csi_to_spatial_spectrum,
+    calculate_spatial_spectrum,
+    calculate_bartlett_spectrum,
+    calculate_capon_spectrum,
+    calculate_music_spectrum,
+    plot_spatial_spectrum,
+    find_peak_directions,
+    generate_steering_vector,
+    fuse_subcarrier_spectrums
+)
 
+from .loss_functions import (
+    PrismLossFunction,
+    CSILoss,
+    SpatialSpectrumLoss,
+    compute_csi_metrics,
+    compute_spectrum_metrics,
+    DEFAULT_LOSS_CONFIG
+)
 
 from .networks import (
     AttenuationNetwork,
@@ -42,11 +61,7 @@ from .training_interface import (
     PrismTrainingInterface
 )
 
-from .loss_functions import (
-    PrismLoss,
-    FrequencyAwareLoss,
-    CSIVirtualLinkLoss
-)
+
 
 __all__ = [
     # Core ray tracing
@@ -56,7 +71,24 @@ __all__ = [
     # CUDA-accelerated ray tracing
     'CUDARayTracer',
     
-
+    # Spatial spectrum estimation
+    'csi_to_spatial_spectrum',
+    'calculate_spatial_spectrum',
+    'calculate_bartlett_spectrum',
+    'calculate_capon_spectrum',
+    'calculate_music_spectrum',
+    'plot_spatial_spectrum',
+    'find_peak_directions',
+    'generate_steering_vector',
+    'fuse_subcarrier_spectrums',
+    
+    # Loss functions
+    'PrismLossFunction',
+    'CSILoss',
+    'SpatialSpectrumLoss',
+    'compute_csi_metrics',
+    'compute_spectrum_metrics',
+    'DEFAULT_LOSS_CONFIG',
     
     # Neural networks
     'AttenuationNetwork',
@@ -75,10 +107,7 @@ __all__ = [
     # Training interface
     'PrismTrainingInterface',
     
-    # Loss functions
-    'PrismLoss',
-    'FrequencyAwareLoss',
-    'CSIVirtualLinkLoss',
+
     
     # Version info
     '__version__',

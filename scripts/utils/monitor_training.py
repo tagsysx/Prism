@@ -59,7 +59,7 @@ def monitor_training(interval=30):
                         pass
                     
                     # 检查训练进度
-                    checkpoint_dir = Path('../../checkpoints/sionna_5g')
+                    checkpoint_dir = Path('../../results/training-sionna/checkpoints')
                     if checkpoint_dir.exists():
                         # 检查最佳模型文件
                         best_model = checkpoint_dir / 'best_model.pth'

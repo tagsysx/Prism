@@ -47,13 +47,19 @@ class RayTracer(ABC):
     """
     
     def __init__(self, 
-                 azimuth_divisions: int,
-                 elevation_divisions: int,
-                 max_ray_length: float,
-                 scene_size: float,
+                 azimuth_divisions: int = 18,
+                 elevation_divisions: int = 9,
+                 max_ray_length: float = 200.0,
+                 scene_bounds: Optional[Dict[str, List[float]]] = None,
                  device: str = 'cpu',
-                 uniform_samples: int = 128,
-                 resampled_points: int = 64):
+                 prism_network = None,
+                 signal_threshold: float = 1e-6,
+                 enable_early_termination: bool = True,
+                 top_k_directions: int = 32,
+                 uniform_samples: int = 64,
+                 resampled_points: int = 32,
+                 # Backward compatibility
+                 scene_size: Optional[float] = None):
         """
         Initialize the ray tracer with common parameters.
         
@@ -61,33 +67,70 @@ class RayTracer(ABC):
             azimuth_divisions: Number of azimuth divisions (0° to 360°)
             elevation_divisions: Number of elevation divisions (-90° to +90°)
             max_ray_length: Maximum ray length in meters
-            scene_size: Scene size in meters (cubic environment)
+            scene_bounds: Scene boundaries as {'min': [x,y,z], 'max': [x,y,z]}
             device: Device to run computations on
+            prism_network: PrismNetwork instance for getting attenuation and radiance properties
+            signal_threshold: Minimum signal strength threshold for early termination
+            enable_early_termination: Enable early termination optimization
+            top_k_directions: Number of top-K directions to select for MLP-based sampling
             uniform_samples: Number of uniform samples per ray
             resampled_points: Number of resampled points per ray
+            scene_size: [DEPRECATED] Use scene_bounds instead
         """
+        # Basic ray tracing parameters
         self.azimuth_divisions = azimuth_divisions
         self.elevation_divisions = elevation_divisions
         self.max_ray_length = max_ray_length
-        self.scene_size = scene_size
         self.device = device
         self.uniform_samples = uniform_samples
         self.resampled_points = resampled_points
+        
+        # Neural network and signal processing parameters
+        self.prism_network = prism_network
+        self.signal_threshold = signal_threshold
+        self.enable_early_termination = enable_early_termination
+        self.top_k_directions = top_k_directions
+        
+        # Handle scene_bounds vs scene_size (backward compatibility)
+        if scene_bounds is not None:
+            self.scene_bounds = scene_bounds
+            self.scene_min = torch.tensor(scene_bounds['min'], dtype=torch.float32)
+            self.scene_max = torch.tensor(scene_bounds['max'], dtype=torch.float32)
+            # Calculate equivalent scene_size for backward compatibility
+            scene_dimensions = self.scene_max - self.scene_min
+            self.scene_size = torch.max(scene_dimensions).item()
+        elif scene_size is not None:
+            # Convert scene_size to scene_bounds (deprecated path)
+            logger.warning("scene_size parameter is deprecated, use scene_bounds instead")
+            half_size = scene_size / 2.0
+            self.scene_bounds = {
+                'min': [-half_size, -half_size, -half_size],
+                'max': [half_size, half_size, half_size]
+            }
+            self.scene_min = torch.tensor([-half_size, -half_size, -half_size], dtype=torch.float32)
+            self.scene_max = torch.tensor([half_size, half_size, half_size], dtype=torch.float32)
+            self.scene_size = scene_size
+        else:
+            # Default scene bounds from config
+            self.scene_bounds = {
+                'min': [-100.0, -100.0, 0.0],
+                'max': [100.0, 100.0, 30.0]
+            }
+            self.scene_min = torch.tensor([-100.0, -100.0, 0.0], dtype=torch.float32)
+            self.scene_max = torch.tensor([100.0, 100.0, 30.0], dtype=torch.float32)
+            scene_dimensions = self.scene_max - self.scene_min
+            self.scene_size = torch.max(scene_dimensions).item()
         
         # Calculate derived parameters
         self.azimuth_resolution = 2 * 3.14159 / azimuth_divisions  # 0° to 360°
         self.elevation_resolution = 3.14159 / elevation_divisions   # -90° to +90° (π range)
         self.total_directions = azimuth_divisions * elevation_divisions
         
-        # Scene boundaries
-        self.scene_min = -scene_size / 2.0
-        self.scene_max = scene_size / 2.0
-        
         # Validate configuration
         self._validate_config()
         
         logger.info(f"RayTracer initialized: {azimuth_divisions}×{elevation_divisions} = {self.total_directions} directions")
-        logger.info(f"Scene: {scene_size}m, Max ray length: {max_ray_length}m")
+        logger.info(f"Scene: {self.scene_size}m, Max ray length: {max_ray_length}m")
     
     def _validate_config(self):
         """Validate configuration parameters."""
@@ -179,23 +222,127 @@ class RayTracer(ABC):
         if position.dim() == 1:
             position = position.unsqueeze(0)
         
-        # Check if all coordinates are within bounds
-        scene_bounds = self.scene_size / 2.0
+        # Check if all coordinates are within bounds using scene_bounds
         in_bounds = torch.all(
-            (position >= -scene_bounds) & (position <= scene_bounds), 
+            (position >= self.scene_min) & (position <= self.scene_max), 
             dim=1
         )
         
         return in_bounds.all().item()
     
-    def get_scene_bounds(self) -> Tuple[float, float]:
+    def get_scene_bounds(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """Get scene boundaries."""
-        scene_bounds = self.scene_size / 2.0
-        return -scene_bounds, scene_bounds
+        return self.scene_min, self.scene_max
     
     def get_scene_size(self) -> float:
         """Get scene size."""
         return self.scene_size
+    
+    def update_scene_bounds(self, new_scene_bounds: Dict[str, List[float]]):
+        """
+        Update scene bounds and related parameters.
+        
+        Args:
+            new_scene_bounds: New scene bounds as {'min': [x,y,z], 'max': [x,y,z]}
+        """
+        self.scene_bounds = new_scene_bounds
+        self.scene_min = torch.tensor(new_scene_bounds['min'], dtype=torch.float32)
+        self.scene_max = torch.tensor(new_scene_bounds['max'], dtype=torch.float32)
+        
+        # Update scene_size for backward compatibility
+        scene_dimensions = self.scene_max - self.scene_min
+        self.scene_size = torch.max(scene_dimensions).item()
+        
+        # Adjust max ray length if necessary
+        scene_diagonal = torch.norm(scene_dimensions).item()
+        if self.max_ray_length > scene_diagonal:
+            self.max_ray_length = scene_diagonal
+            logger.info(f"Adjusted max ray length to {self.max_ray_length}m")
+        
+        logger.info(f"Updated scene bounds: min={new_scene_bounds['min']}, max={new_scene_bounds['max']}")
+    
+    def get_scene_config(self) -> Dict:
+        """Get complete scene configuration."""
+        return {
+            'scene_bounds': self.scene_bounds,
+            'scene_min': self.scene_min.tolist() if hasattr(self.scene_min, 'tolist') else self.scene_min,
+            'scene_max': self.scene_max.tolist() if hasattr(self.scene_max, 'tolist') else self.scene_max,
+            'max_ray_length': self.max_ray_length,
+            'azimuth_divisions': self.azimuth_divisions,
+            'elevation_divisions': self.elevation_divisions,
+            'total_directions': self.total_directions,
+            # Backward compatibility
+            'scene_size': self.scene_size
+        }
+    
+    def calculate_max_ray_length_from_bounds(self, scene_bounds: Dict[str, List[float]], margin: float = 1.2) -> float:
+        """
+        Calculate maximum ray length from scene bounds with safety margin.
+        
+        Args:
+            scene_bounds: Scene bounds dictionary
+            margin: Safety margin multiplier (default 1.2 = 20% margin)
+            
+        Returns:
+            Calculated max ray length
+        """
+        if 'min' in scene_bounds and 'max' in scene_bounds:
+            import numpy as np
+            min_bounds = np.array(scene_bounds['min'])
+            max_bounds = np.array(scene_bounds['max'])
+            # Calculate diagonal distance of the scene
+            diagonal = np.linalg.norm(max_bounds - min_bounds)
+            # Add safety margin
+            return diagonal * margin
+        else:
+            # Fallback to default if scene bounds not properly configured
+            return 200.0
+    
+    def generate_direction_vectors(self) -> torch.Tensor:
+        """
+        Generate unit direction vectors for all azimuth×elevation directions.
+        
+        Returns:
+            Tensor of shape [total_directions, 3] containing unit direction vectors
+        """
+        directions = []
+        
+        for phi_idx in range(self.azimuth_divisions):
+            for theta_idx in range(self.elevation_divisions):
+                # Convert indices to angles
+                phi = phi_idx * self.azimuth_resolution  # 0 to 2π
+                theta = (theta_idx * self.elevation_resolution) - (math.pi / 2)  # -π/2 to π/2
+                
+                # Convert spherical to Cartesian coordinates
+                x = math.cos(theta) * math.cos(phi)
+                y = math.cos(theta) * math.sin(phi)
+                z = math.sin(theta)
+                
+                directions.append([x, y, z])
+        
+        return torch.tensor(directions, dtype=torch.float32, device=self.device)
+    
+    def get_ray_tracer_stats(self) -> Dict:
+        """
+        Get basic ray tracer statistics.
+        
+        Returns:
+            Dictionary with ray tracer statistics
+        """
+        return {
+            'device': self.device,
+            'total_directions': self.total_directions,
+            'azimuth_divisions': self.azimuth_divisions,
+            'elevation_divisions': self.elevation_divisions,
+            'top_k_directions': self.top_k_directions,
+            'max_ray_length': self.max_ray_length,
+            'uniform_samples': self.uniform_samples,
+            'resampled_points': self.resampled_points,
+            'signal_threshold': self.signal_threshold,
+            'enable_early_termination': self.enable_early_termination,
+            'scene_bounds': self.scene_bounds,
+            'scene_size': self.scene_size
+        }
     
     def update_scene_size(self, new_scene_size: float):
         """
@@ -273,85 +420,7 @@ class RayTracer(ABC):
         
         return torch.tensor(direction_vectors, dtype=torch.float32, device=self.device)
     
-    def _compute_importance_weights(self, attenuation_factors: torch.Tensor, delta_t: float = None) -> torch.Tensor:
-        """
-        Compute importance weights based on attenuation factors using the formula from SPECIFICATION.md 8.1.2:
-        w_k = (1 - e^(-β_k * Δt)) * exp(-Σ_{j<k} β_j * Δt)
-        
-        Args:
-            attenuation_factors: Complex attenuation factors from uniform sampling (num_samples,)
-            delta_t: Step size along the ray (if None, use default based on max_ray_length)
-        
-        Returns:
-            Importance weights for resampling (num_samples,)
-        """
-        if delta_t is None:
-            delta_t = self.max_ray_length / len(attenuation_factors)
-        
-        # Extract real part β_k = Re(ρ(P_v(t_k))) for importance weight calculation
-        beta_k = torch.real(attenuation_factors)  # (num_samples,)
-        
-        # Ensure non-negative values for physical validity
-        beta_k = torch.clamp(beta_k, min=0.0)
-        
-        # Calculate importance weights using the correct formula:
-        # w_k = (1 - e^(-β_k * Δt)) * exp(-Σ_{j<k} β_j * Δt)
-        
-        # Term 1: (1 - e^(-β_k * Δt)) - local absorption probability
-        local_absorption = 1.0 - torch.exp(-beta_k * delta_t)  # (num_samples,)
-        
-        # Term 2: exp(-Σ_{j<k} β_j * Δt) - cumulative transmission up to point k
-        # Calculate cumulative sum of β_j for j < k
-        cumulative_beta = torch.cumsum(beta_k, dim=0)  # (num_samples,)
-        # Shift to get sum for j < k (exclude current k)
-        cumulative_beta_prev = torch.cat([torch.zeros(1, device=beta_k.device), cumulative_beta[:-1]])
-        cumulative_transmission = torch.exp(-cumulative_beta_prev * delta_t)  # (num_samples,)
-        
-        # Combine terms: w_k = local_absorption * cumulative_transmission
-        importance_weights = local_absorption * cumulative_transmission  # (num_samples,)
-        
-        # Add small epsilon to avoid zero weights and numerical issues
-        importance_weights = importance_weights + 1e-8
-        
-        # Normalize weights to sum to 1 for proper probability distribution
-        total_weight = torch.sum(importance_weights)
-        if total_weight > 1e-8:
-            importance_weights = importance_weights / total_weight
-        else:
-            # Fallback to uniform weights if all weights are near zero
-            importance_weights = torch.ones_like(importance_weights) / len(importance_weights)
-        
-        return importance_weights
-    
-    def _importance_based_resampling(self, 
-                                   uniform_positions: torch.Tensor,
-                                   importance_weights: torch.Tensor,
-                                   num_samples: int) -> torch.Tensor:
-        """
-        Perform importance-based resampling based on computed weights.
-        
-        Args:
-            uniform_positions: Uniformly sampled positions (num_uniform_samples, 3)
-            importance_weights: Importance weights for each position (num_uniform_samples,)
-            num_samples: Number of samples to select
-        
-        Returns:
-            Resampled positions based on importance (num_samples, 3)
-        """
-        num_uniform_samples = uniform_positions.shape[0]
-        
-        if num_samples >= num_uniform_samples:
-            # If we want more samples than available, return all with repetition
-            return uniform_positions
-        
-        # Use importance sampling to select positions
-        # Higher weight positions have higher probability of being selected
-        selected_indices = torch.multinomial(importance_weights, num_samples, replacement=True)
-        
-        # Get resampled positions
-        resampled_positions = uniform_positions[selected_indices]
-        
-        return resampled_positions
+
     
     def _ensure_complex_accumulation(self, accumulated_signals: Dict, key: tuple, signal_strength):
         """Helper function to ensure proper complex signal accumulation."""
@@ -369,119 +438,9 @@ class RayTracer(ABC):
         
         accumulated_signals[key] += signal_strength
     
-    def _sample_ray_points(self, ray: Ray, ue_pos: torch.Tensor, num_samples: int) -> torch.Tensor:
-        """
-        Sample points along the ray for discrete radiance field computation.
-        Ray tracing is from BS antenna (ray.origin) in the given direction.
-        UE position is only used as input to RadianceNetwork, not for ray length calculation.
-        
-        Args:
-            ray: Ray object (from BS antenna)
-            ue_pos: UE position (used only for RadianceNetwork input)
-            num_samples: Number of sample points
-        
-        Returns:
-            Sampled positions along the ray
-        """
-        # Sample points along the ray from BS antenna up to max_ray_length
-        # No need to consider UE position for ray length calculation
-        ray_length = self.max_ray_length
-        
-        # Sample points along the ray from BS antenna
-        t_values = torch.linspace(0, ray_length, num_samples, device=self.device)
-        sampled_positions = ray.origin.unsqueeze(0) + t_values.unsqueeze(1) * ray.direction.unsqueeze(0)
-        
-        # Filter out points outside scene boundaries
-        scene_bounds = self.scene_size / 2.0
-        valid_mask = torch.all(
-            (sampled_positions >= -scene_bounds) & (sampled_positions <= scene_bounds), 
-            dim=1
-        )
-        if not valid_mask.any():
-            # If no valid positions, return empty tensor
-            return torch.empty(0, 3, device=self.device)
-        
-        # Return only valid positions
-        valid_positions = sampled_positions[valid_mask]
-        
-        # Ensure we have at least some samples
-        if len(valid_positions) < num_samples // 2:
-            logger.warning(f"Only {len(valid_positions)} valid positions out of {num_samples} requested")
-        
-        return valid_positions
+
     
-    def _simple_distance_model(self, 
-                              ray: Ray,
-                              ue_pos: torch.Tensor,
-                              subcarrier_idx: int,
-                              antenna_embedding: torch.Tensor) -> float:
-        """
-        Simple distance-based model as fallback when neural network is not available.
-        This model simulates ray tracing by sampling points along the ray and computing
-        signal contributions from sampling points to BS antenna.
-        
-        Args:
-            ray: Ray object (from BS antenna)
-            ue_pos: UE position (used for radiation direction calculation)
-            subcarrier_idx: Subcarrier index
-            antenna_embedding: Antenna embedding parameter
-        
-        Returns:
-            Computed signal strength using simple model
-        """
-        # Sample points along the ray from BS antenna
-        num_samples = 32  # Simple model uses fewer samples
-        ray_length = self.max_ray_length
-        t_values = torch.linspace(0, ray_length, num_samples, device=self.device)
-        sampled_positions = ray.origin.unsqueeze(0) + t_values.unsqueeze(1) * ray.direction.unsqueeze(0)
-        
-        # Filter points within scene boundaries
-        valid_mask = self.is_position_in_scene(sampled_positions)
-        if not valid_mask.any():
-            return 0.0
-        
-        valid_positions = sampled_positions[valid_mask]
-        valid_t_values = t_values[valid_mask]
-        
-        # Calculate signal contributions from each sampling point
-        total_signal = 0.0
-        step_size = ray_length / num_samples
-        cumulative_attenuation = 1.0
-        
-        for i, (pos, t) in enumerate(zip(valid_positions, valid_t_values)):
-            # Distance from sampling point to BS antenna (ray origin)
-            distance_to_bs = t.item()  # Distance along ray from BS antenna
-            
-            # Distance from sampling point to UE (for radiation calculation)
-            distance_to_ue = torch.norm(pos - ue_pos).item()
-            
-            # Local attenuation based on distance from BS antenna
-            local_attenuation = 0.1 * torch.exp(-distance_to_bs / 30.0)  # Attenuation coefficient
-            
-            # Radiation factor based on distance to UE (closer UE = stronger radiation)
-            radiation_factor = torch.exp(-distance_to_ue / 40.0)  # Radiation strength
-            
-            # Apply antenna embedding influence
-            antenna_factor = torch.norm(antenna_embedding) / math.sqrt(128)  # Normalize to [0, 1]
-            
-            # Apply frequency-dependent effects
-            frequency_factor = 1.0 / (1.0 + 0.1 * subcarrier_idx)
-            
-            # Local signal contribution: (1 - e^(-ρΔt)) × S
-            local_absorption = 1.0 - torch.exp(-local_attenuation * step_size)
-            local_contribution = local_absorption * radiation_factor * antenna_factor * frequency_factor
-            
-            # Apply cumulative attenuation and accumulate
-            total_signal += cumulative_attenuation * local_contribution
-            
-            # Update cumulative attenuation for next sample
-            cumulative_attenuation *= torch.exp(-local_attenuation * step_size)
-            
-            # Early termination if signal becomes negligible
-            if cumulative_attenuation < 1e-6:
-                break
-        
-        return float(total_signal)
+
     
     def _compute_view_directions(self, 
                                sampled_positions: torch.Tensor,
@@ -513,32 +472,3 @@ class RayTracer(ABC):
         
         return view_directions
     
-    def compute_dynamic_path_lengths(self, sampled_positions: torch.Tensor) -> torch.Tensor:
-        """
-        Compute dynamic path lengths Δt_k = ||P_k - P_{k-1}|| for each voxel.
-        
-        This function calculates the distance between consecutive sampling points
-        along a ray, which is used in the discrete radiance field integration.
-        
-        Args:
-            sampled_positions: (K, 3) - 3D positions of sampled voxels along the ray
-        
-        Returns:
-            delta_t: (K,) - Dynamic path lengths for each voxel
-        """
-        if len(sampled_positions) <= 1:
-            # Single point or empty - use default step size
-            return torch.tensor([1.0], device=sampled_positions.device, dtype=sampled_positions.dtype)
-        
-        # Compute distances between consecutive points: ||P_k - P_{k-1}||
-        distances = torch.norm(sampled_positions[1:] - sampled_positions[:-1], dim=1)
-        
-        # For the first voxel, use distance from first to second point
-        # This represents the step size for the first segment
-        first_distance = torch.norm(sampled_positions[1] - sampled_positions[0], dim=0).unsqueeze(0)
-        
-        # Concatenate: [first_distance, distances]
-        # This gives us delta_t for each voxel position
-        delta_t = torch.cat([first_distance, distances], dim=0)
-        
-        return delta_t

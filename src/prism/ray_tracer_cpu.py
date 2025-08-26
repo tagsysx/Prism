@@ -22,6 +22,7 @@ import torch
 import logging
 import math
 import time
+import multiprocessing as mp
 from typing import Dict, List, Tuple, Optional, Union
 from functools import partial
 from .ray_tracer_base import RayTracer, Ray
@@ -35,101 +36,82 @@ class CPURayTracer(RayTracer):
     """CPU-based discrete electromagnetic ray tracer implementing the design document specifications."""
     
     def __init__(self, 
-                 azimuth_divisions: int = 36,
-                 elevation_divisions: int = 18,
-                 max_ray_length: float = 100.0,
-                 scene_size: float = 200.0,
-                 device: str = 'cpu',
+                 # CPU-specific parameters
+                 max_workers: int = 4,
+                 # Common parameters (passed to base class)
+                 azimuth_divisions: int = 18,
+                 elevation_divisions: int = 9,
+                 max_ray_length: float = 200.0,
+                 scene_bounds: Optional[Dict[str, List[float]]] = None,
                  prism_network=None,
                  signal_threshold: float = 1e-6,
                  enable_early_termination: bool = True,
-                 top_k_directions: int = None,
-                 enable_parallel_processing: bool = True,
-                 max_workers: int = None,
-                 uniform_samples: int = 128,
-                 resampled_points: int = 64,
-                 config_loader = None,
-                 use_mixed_precision: bool = None):
+                 top_k_directions: int = 32,
+                 uniform_samples: int = 64,
+                 resampled_points: int = 32):
         """
         Initialize CPU ray tracer.
         
-        Args:
-            azimuth_divisions: Number of azimuth divisions A (0° to 360°)
-            elevation_divisions: Number of elevation divisions B (-90° to +90°)
+        CPU-specific Args:
+            max_workers: Maximum number of parallel workers for multiprocessing
+            
+        Common Args (passed to base class):
+            azimuth_divisions: Number of azimuth divisions (0° to 360°)
+            elevation_divisions: Number of elevation divisions (-90° to +90°)
             max_ray_length: Maximum ray length in meters
-            scene_size: Scene size D in meters (cubic environment: [-D/2, D/2]³)
-            device: Device to run computations on
+            scene_bounds: Scene boundaries as {'min': [x,y,z], 'max': [x,y,z]}
             prism_network: PrismNetwork instance for getting attenuation and radiance properties
             signal_threshold: Minimum signal strength threshold for early termination
             enable_early_termination: Enable early termination optimization
-            top_k_directions: Number of top-K directions to select for MLP-based sampling (if None, uses default formula)
-            enable_parallel_processing: Enable parallel processing for ray tracing
-            max_workers: Maximum number of parallel workers (if None, uses CPU count)
+            top_k_directions: Number of top-K directions to select for MLP-based sampling
             uniform_samples: Number of uniform samples per ray
             resampled_points: Number of resampled points per ray
         """
         # Log initialization
         logger.info("🖥️ Initializing CPURayTracer - CPU-based ray tracing implementation")
         
-        # Call parent constructor
+        # Call parent constructor with all common parameters
         super().__init__(
             azimuth_divisions=azimuth_divisions,
             elevation_divisions=elevation_divisions,
             max_ray_length=max_ray_length,
-            scene_size=scene_size,
-            device=device,
+            scene_bounds=scene_bounds,
+            device='cpu',  # CPURayTracer always uses CPU
+            prism_network=prism_network,
+            signal_threshold=signal_threshold,
+            enable_early_termination=enable_early_termination,
+            top_k_directions=top_k_directions,
             uniform_samples=uniform_samples,
             resampled_points=resampled_points
         )
         
-        self.prism_network = prism_network
-        self.signal_threshold = signal_threshold
-        self.enable_early_termination = enable_early_termination
+        # CPU-specific configuration
+        self.max_workers = max_workers
         
-        # Set top-K directions for MLP-based sampling
-        if top_k_directions is not None:
-            self.top_k_directions = top_k_directions
-            logger.info(f"Using configured top-K directions: {self.top_k_directions}")
-        else:
-            # Default formula: min(32, total_directions // 4)
-            self.top_k_directions = min(32, (azimuth_divisions * elevation_divisions) // 4)
-            logger.info(f"Using default top-K formula: min(32, {azimuth_divisions * elevation_divisions} // 4) = {self.top_k_directions}")
+        logger.info(f"Using top-K directions: {self.top_k_directions}")
         
-        # Configure mixed precision from config loader or parameter
-        self.config_loader = config_loader
-        if config_loader is not None:
-            self.use_mixed_precision = config_loader.get_ray_tracer_mixed_precision_config('cpu')
-        elif use_mixed_precision is not None:
-            self.use_mixed_precision = use_mixed_precision
-        else:
-            # Default: enable if CUDA available for mixed precision support
-            self.use_mixed_precision = torch.cuda.is_available()
-        
+        # CPU ray tracer uses limited mixed precision (only for MLP operations when CUDA available)
+        self.use_mixed_precision = torch.cuda.is_available()
         if self.use_mixed_precision:
             logger.info("   ✓ Mixed precision enabled for MLP direction selection")
-        
-        # Parallel processing configuration
-        self.enable_parallel_processing = enable_parallel_processing
-        
-        if max_workers is None:
-            import multiprocessing as mp
-            self.max_workers = mp.cpu_count()
-        else:
-            self.max_workers = max_workers
             
         logger.info(f"💻 CPU Ray Tracer initialized with {azimuth_divisions}×{elevation_divisions} = {self.total_directions} directions")
-        logger.info(f"Parallel processing: {'enabled' if enable_parallel_processing else 'disabled'}")
+        logger.info(f"Parallel processing: enabled")
         logger.info(f"Max workers: {self.max_workers} (multiprocessing)")
     
     def _validate_scene_config(self):
         """Validate scene configuration parameters."""
-        if self.scene_size <= 0:
-            raise ValueError(f"Scene size must be positive, got {self.scene_size}")
+        # Validate scene bounds
+        scene_dimensions = self.scene_max - self.scene_min
+        if torch.any(scene_dimensions <= 0):
+            raise ValueError(f"Scene dimensions must be positive, got {scene_dimensions}")
         
-        if self.max_ray_length > self.scene_size:
-            logger.warning(f"Max ray length ({self.max_ray_length}m) exceeds scene size ({self.scene_size}m)")
-            # Adjust max ray length to scene size
-            self.max_ray_length = min(self.max_ray_length, self.scene_size)
+        # Calculate scene diagonal for max ray length validation
+        scene_diagonal = torch.norm(scene_dimensions).item()
+        if self.max_ray_length > scene_diagonal:
+            logger.warning(f"Max ray length ({self.max_ray_length}m) exceeds scene diagonal ({scene_diagonal:.1f}m)")
+            # Adjust max ray length to scene diagonal
+            self.max_ray_length = min(self.max_ray_length, scene_diagonal)
             logger.info(f"Adjusted max ray length to {self.max_ray_length}m")
         
         if self.azimuth_divisions <= 0 or self.elevation_divisions <= 0:
@@ -164,36 +146,43 @@ class CPURayTracer(RayTracer):
         """Get scene size D."""
         return self.scene_size
     
-    def update_scene_size(self, new_scene_size: float):
+    def update_scene_bounds(self, new_scene_bounds: Dict[str, List[float]]):
         """
-        Update scene size and related parameters.
+        Update scene bounds and related parameters.
         
         Args:
-            new_scene_size: New scene size in meters
+            new_scene_bounds: New scene bounds as {'min': [x,y,z], 'max': [x,y,z]}
         """
-        if new_scene_size <= 0:
-            raise ValueError(f"Scene size must be positive, got {new_scene_size}")
+        self.scene_bounds = new_scene_bounds
+        self.scene_min = torch.tensor(new_scene_bounds['min'], dtype=torch.float32)
+        self.scene_max = torch.tensor(new_scene_bounds['max'], dtype=torch.float32)
         
-        self.scene_size = new_scene_size
-        self.scene_min = -new_scene_size / 2.0
-        self.scene_max = new_scene_size / 2.0
+        # Update parent class scene_size for compatibility
+        scene_dimensions = self.scene_max - self.scene_min
+        self.scene_size = torch.max(scene_dimensions).item()
         
         # Adjust max ray length if necessary
-        if self.max_ray_length > new_scene_size:
-            self.max_ray_length = new_scene_size
+        scene_diagonal = torch.norm(scene_dimensions).item()
+        if self.max_ray_length > scene_diagonal:
+            self.max_ray_length = scene_diagonal
             logger.info(f"Adjusted max ray length to {self.max_ray_length}m")
         
-        logger.info(f"Updated scene size to {new_scene_size}m, boundaries: [{self.scene_min:.1f}, {self.scene_max:.1f}]³")
+        logger.info(f"Updated scene bounds: min={new_scene_bounds['min']}, max={new_scene_bounds['max']}")
     
-    def get_scene_config(self) -> Dict[str, float]:
+
+    
+    def get_scene_config(self) -> Dict:
         """Get complete scene configuration."""
         return {
-            'scene_size': self.scene_size,
-            'scene_min': self.scene_min,
-            'scene_max': self.scene_max,
+            'scene_bounds': self.scene_bounds,
+            'scene_min': self.scene_min.tolist() if hasattr(self.scene_min, 'tolist') else self.scene_min,
+            'scene_max': self.scene_max.tolist() if hasattr(self.scene_max, 'tolist') else self.scene_max,
             'max_ray_length': self.max_ray_length,
             'azimuth_divisions': self.azimuth_divisions,
-            'elevation_divisions': self.elevation_divisions
+            'elevation_divisions': self.elevation_divisions,
+            'total_directions': self.total_directions,
+            # Backward compatibility
+            'scene_size': self.scene_size
         }
     
     def generate_direction_vectors(self) -> torch.Tensor:
@@ -460,12 +449,12 @@ class CPURayTracer(RayTracer):
             Computed signal strength using discrete radiance field model
         """
         if self.prism_network is None:
-            # Fallback to simple distance-based model if no network is provided
-            return self._simple_distance_model(ray, ue_pos, subcarrier_idx, antenna_embedding)
+            logger.error("🚨 CRITICAL ERROR: PrismNetwork is not available but is required for ray tracing!")
+            raise RuntimeError("PrismNetwork is required for ray tracing but is not available. Cannot proceed without neural network.")
         
         # Stage 1: Uniform sampling with weight computation
         num_uniform_samples = 128  # Higher initial sampling for better weight estimation
-        uniform_positions = self._sample_ray_points(ray, ue_pos, num_uniform_samples)
+        uniform_positions = self._cpu_sample_ray_points(ray, ue_pos, num_uniform_samples)
         
         if len(uniform_positions) == 0:
             return 0.0
@@ -496,8 +485,8 @@ class CPURayTracer(RayTracer):
             uniform_attenuation = uniform_attenuation_factors[0, :, 0, subcarrier_idx]  # (num_uniform_samples,)
             
             # Stage 2: Importance-based resampling
-            importance_weights = self._compute_importance_weights(uniform_attenuation)
-            resampled_positions = self._importance_based_resampling(
+            importance_weights = self._cpu_compute_importance_weights(uniform_attenuation)
+            resampled_positions = self._cpu_importance_based_resampling(
                 uniform_positions, importance_weights, num_samples=64
             )
             
@@ -526,15 +515,149 @@ class CPURayTracer(RayTracer):
             return signal_strength
             
         except Exception as e:
-            logger.warning(f"Neural network computation failed: {e}. Using fallback model.")
-            return self._simple_distance_model(ray, ue_pos, subcarrier_idx, antenna_embedding)
+            logger.error(f"🚨 CRITICAL ERROR: Neural network computation failed: {e}")
+            raise RuntimeError(f"Neural network computation failed: {e}. Cannot proceed without working neural network.")
     
-    # Common functions moved to base class:
-    # - _sample_ray_points
-    # - _compute_importance_weights  
-    # - _importance_based_resampling
-    # - _ensure_complex_accumulation
-    # - _simple_distance_model
+    def _cpu_sample_ray_points(self, ray: Ray, ue_pos: torch.Tensor, num_samples: int) -> torch.Tensor:
+        """
+        CPU-optimized ray point sampling.
+        
+        Args:
+            ray: Ray object (from BS antenna)
+            ue_pos: UE position (used only for RadianceNetwork input)
+            num_samples: Number of sample points
+        
+        Returns:
+            Sampled positions along the ray
+        """
+        # Sample points along the ray from BS antenna up to max_ray_length
+        ray_length = self.max_ray_length
+        
+        # Sample points along the ray from BS antenna
+        t_values = torch.linspace(0, ray_length, num_samples, device=self.device)
+        sampled_positions = ray.origin.unsqueeze(0) + t_values.unsqueeze(1) * ray.direction.unsqueeze(0)
+        
+        # Filter out points outside scene boundaries
+        scene_bounds = self.scene_size / 2.0
+        valid_mask = torch.all(
+            (sampled_positions >= -scene_bounds) & (sampled_positions <= scene_bounds), 
+            dim=1
+        )
+        if not valid_mask.any():
+            # If no valid positions, return empty tensor
+            return torch.empty(0, 3, device=self.device)
+        
+        # Return only valid positions
+        valid_positions = sampled_positions[valid_mask]
+        
+        # Ensure we have at least some samples
+        if len(valid_positions) < num_samples // 2:
+            logger.warning(f"Only {len(valid_positions)} valid positions out of {num_samples} requested")
+        
+        return valid_positions
+    
+    def _cpu_compute_importance_weights(self, attenuation_factors: torch.Tensor, delta_t: float = None) -> torch.Tensor:
+        """
+        CPU-optimized importance weights computation.
+        
+        Args:
+            attenuation_factors: Complex attenuation factors from uniform sampling (num_samples,)
+            delta_t: Step size along the ray (if None, use default based on max_ray_length)
+        
+        Returns:
+            Importance weights for resampling (num_samples,)
+        """
+        if delta_t is None:
+            delta_t = self.max_ray_length / len(attenuation_factors)
+        
+        # Extract real part β_k = Re(ρ(P_v(t_k))) for importance weight calculation
+        beta_k = torch.real(attenuation_factors)  # (num_samples,)
+        
+        # Ensure non-negative values for physical validity
+        beta_k = torch.clamp(beta_k, min=0.0)
+        
+        # CPU-optimized computation
+        # w_k = (1 - e^(-β_k * Δt)) * exp(-Σ_{j<k} β_j * Δt)
+        
+        # Term 1: (1 - e^(-β_k * Δt)) - local absorption probability
+        local_absorption = 1.0 - torch.exp(-beta_k * delta_t)  # (num_samples,)
+        
+        # Term 2: exp(-Σ_{j<k} β_j * Δt) - cumulative transmission up to point k
+        cumulative_beta = torch.cumsum(beta_k, dim=0)  # (num_samples,)
+        # Shift to get sum for j < k (exclude current k)
+        cumulative_beta_prev = torch.cat([torch.zeros(1, device=beta_k.device), cumulative_beta[:-1]])
+        cumulative_transmission = torch.exp(-cumulative_beta_prev * delta_t)  # (num_samples,)
+        
+        # Combine terms
+        importance_weights = local_absorption * cumulative_transmission  # (num_samples,)
+        
+        # Add small epsilon to avoid zero weights and numerical issues
+        importance_weights = importance_weights + 1e-8
+        
+        # Normalize weights to sum to 1 for proper probability distribution
+        total_weight = torch.sum(importance_weights)
+        if total_weight > 1e-8:
+            importance_weights = importance_weights / total_weight
+        else:
+            # Fallback to uniform weights if all weights are near zero
+            importance_weights = torch.ones_like(importance_weights) / len(importance_weights)
+        
+        return importance_weights
+    
+    def _cpu_importance_based_resampling(self, 
+                                       uniform_positions: torch.Tensor,
+                                       importance_weights: torch.Tensor,
+                                       num_samples: int) -> torch.Tensor:
+        """
+        CPU-optimized importance-based resampling.
+        
+        Args:
+            uniform_positions: Uniformly sampled positions (num_uniform_samples, 3)
+            importance_weights: Importance weights for each position (num_uniform_samples,)
+            num_samples: Number of samples to select
+        
+        Returns:
+            Resampled positions based on importance (num_samples, 3)
+        """
+        num_uniform_samples = uniform_positions.shape[0]
+        
+        if num_samples >= num_uniform_samples:
+            # If we want more samples than available, return all with repetition
+            return uniform_positions
+        
+        # Use importance sampling to select positions
+        # Higher weight positions have higher probability of being selected
+        selected_indices = torch.multinomial(importance_weights, num_samples, replacement=True)
+        
+        # Get resampled positions
+        resampled_positions = uniform_positions[selected_indices]
+        
+        return resampled_positions
+    
+    def _cpu_compute_dynamic_path_lengths(self, sampled_positions: torch.Tensor) -> torch.Tensor:
+        """
+        CPU-optimized dynamic path lengths computation.
+        
+        Args:
+            sampled_positions: (K, 3) - 3D positions of sampled voxels along the ray
+        
+        Returns:
+            delta_t: (K,) - Dynamic path lengths for each voxel
+        """
+        if len(sampled_positions) <= 1:
+            # Single point or empty - use default step size
+            return torch.tensor([1.0], device=sampled_positions.device, dtype=sampled_positions.dtype)
+        
+        # Compute distances between consecutive points: ||P_k - P_{k-1}||
+        distances = torch.norm(sampled_positions[1:] - sampled_positions[:-1], dim=1)
+        
+        # For the first voxel, use distance from first to second point
+        first_distance = torch.norm(sampled_positions[1] - sampled_positions[0], dim=0).unsqueeze(0)
+        
+        # Concatenate: [first_distance, distances]
+        delta_t = torch.cat([first_distance, distances], dim=0)
+        
+        return delta_t
     
     def _integrate_along_ray_with_importance(self,
                                            sampled_positions: torch.Tensor,
@@ -800,7 +923,7 @@ class CPURayTracer(RayTracer):
                 directions_list.append((phi_idx, theta_idx))
             
             # Use intelligent parallel processing selection for ray tracing
-            if self.enable_parallel_processing and len(directions_list) > 1:
+            if len(directions_list) > 1:
                 # Determine the best parallelization strategy based on workload size
                 num_antennas = antenna_embedding.shape[0] if len(antenna_embedding.shape) > 1 else 64
                 num_spatial_points = 32  # Default spatial sampling points
@@ -879,7 +1002,7 @@ class CPURayTracer(RayTracer):
                 all_directions.append((phi, theta))
         
         # Use parallel processing for fallback method
-        if self.enable_parallel_processing and len(all_directions) > 1:
+        if len(all_directions) > 1:
             logger.debug(f"Using parallel processing for fallback method with {len(all_directions)} directions")
             accumulated_signals = self._accumulate_signals_parallel(
                 base_station_pos, ue_positions, selected_subcarriers, antenna_embedding, all_directions
@@ -1111,7 +1234,7 @@ class CPURayTracer(RayTracer):
         """
         accumulated_signals = {}
         
-        if not self.enable_parallel_processing or len(directions) < 2:
+        if len(directions) < 2:
             # Fall back to sequential processing for small numbers of directions
             for direction in directions:
                 ray_results = self.trace_ray(
@@ -1182,13 +1305,12 @@ class CPURayTracer(RayTracer):
         Returns:
             Dictionary with parallelization statistics
         """
-        import multiprocessing as mp
         return {
-            'parallel_processing_enabled': self.enable_parallel_processing,
+            'parallel_processing_enabled': True,  # Always enabled for CPU ray tracer
             'max_workers': self.max_workers,
             'processing_mode': 'multiprocessing',
             'cpu_count': mp.cpu_count(),
-            'device': self.device,
+            'device': 'cpu',  # Always CPU for CPURayTracer
             'total_directions': self.total_directions,
             'top_k_directions': self.top_k_directions
         }
@@ -1250,7 +1372,7 @@ class CPURayTracer(RayTracer):
         """
         accumulated_signals = {}
         
-        if not self.enable_parallel_processing or num_antennas < 2:
+        if num_antennas < 2:
             # Fall back to direction-level parallelization
             return self._accumulate_signals_parallel(
                 base_station_pos, ue_positions, selected_subcarriers, antenna_embedding, directions
@@ -1300,11 +1422,21 @@ class CPURayTracer(RayTracer):
         """
         spatial_point_idx, ray, ue_pos, subcarrier_idx, antenna_embedding = args
         try:
+            # Ensure all tensors are on CPU and detached to avoid serialization issues
+            if hasattr(ue_pos, 'detach'):
+                ue_pos = ue_pos.detach().cpu()
+            if hasattr(antenna_embedding, 'detach'):
+                antenna_embedding = antenna_embedding.detach().cpu()
+            
             # Sample specific spatial point along the ray
             spatial_position = self._sample_ray_point_at_index(ray, ue_pos, spatial_point_idx)
             
             if spatial_position is None:
                 return 0.0
+            
+            # Ensure spatial_position is also on CPU
+            if hasattr(spatial_position, 'detach'):
+                spatial_position = spatial_position.detach().cpu()
             
             # Compute signal strength at this spatial point
             signal_strength = self._compute_signal_at_spatial_point(
@@ -1367,11 +1499,17 @@ class CPURayTracer(RayTracer):
             Computed signal strength
         """
         try:
+            # Ensure all tensors are on CPU and detached
+            spatial_position = spatial_position.detach().cpu() if hasattr(spatial_position, 'detach') else spatial_position
+            ue_pos = ue_pos.detach().cpu() if hasattr(ue_pos, 'detach') else ue_pos
+            antenna_embedding = antenna_embedding.detach().cpu() if hasattr(antenna_embedding, 'detach') else antenna_embedding
+            bs_position = bs_position.detach().cpu() if hasattr(bs_position, 'detach') else bs_position
+            
             # Compute viewing direction from spatial point to BS antenna (consistent with unified approach)
             view_direction = self._compute_view_directions(spatial_position.unsqueeze(0), bs_position).squeeze(0)
             
-            # Create antenna indices
-            antenna_indices = torch.zeros(1, dtype=torch.long, device=self.device)
+            # Create antenna indices on CPU
+            antenna_indices = torch.zeros(1, dtype=torch.long, device='cpu')
             
             # Get network properties for this spatial point
             with torch.no_grad():
@@ -1488,7 +1626,7 @@ class CPURayTracer(RayTracer):
         """
         accumulated_signals = {}
         
-        if not self.enable_parallel_processing or num_spatial_points < 2:
+        if num_spatial_points < 2:
             # Fall back to direction-level parallelization
             return self._accumulate_signals_parallel(
                 base_station_pos, ue_positions, selected_subcarriers, antenna_embedding, directions
@@ -1616,11 +1754,11 @@ class CPURayTracer(RayTracer):
             Dictionary with comprehensive parallelization statistics
         """
         return {
-            'parallel_processing_enabled': self.enable_parallel_processing,
+            'parallel_processing_enabled': True,  # Always enabled for CPU ray tracer
             'max_workers': self.max_workers,
             'processing_mode': 'multiprocessing',
             'cpu_count': mp.cpu_count(),
-            'device': self.device,
+            'device': 'cpu',  # Always CPU for CPURayTracer
             'total_directions': self.total_directions,
             'top_k_directions': self.top_k_directions,
             'parallelization_levels': {
@@ -1662,11 +1800,11 @@ class CPURayTracer(RayTracer):
         """
         accumulated_signals = {}
         
-        if not self.enable_parallel_processing:
-            # Fall back to direction-level parallelization
-            return self._accumulate_signals_parallel(
-                base_station_pos, ue_positions, selected_subcarriers, antenna_embedding, directions
-            )
+        # CPU ray tracer always uses parallel processing, but check for minimum workload
+        # Fall back to direction-level parallelization
+        return self._accumulate_signals_parallel(
+            base_station_pos, ue_positions, selected_subcarriers, antenna_embedding, directions
+        )
         
         # Process each direction
         for direction in directions:
@@ -1802,11 +1940,11 @@ class CPURayTracer(RayTracer):
         """
         accumulated_signals = {}
         
-        if not self.enable_parallel_processing:
-            # Fall back to sequential processing
-            return self._accumulate_signals_sequential(
-                base_station_pos, ue_positions, selected_subcarriers, antenna_embedding, directions
-            )
+        # CPU ray tracer always uses parallel processing, but check for minimum workload
+        # Fall back to sequential processing
+        return self._accumulate_signals_sequential(
+            base_station_pos, ue_positions, selected_subcarriers, antenna_embedding, directions
+        )
         
         # Intelligent parallelization strategy selection
         num_directions = len(directions)

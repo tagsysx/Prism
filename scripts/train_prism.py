@@ -41,12 +41,13 @@ from datetime import datetime
 import traceback
 
 # Add src to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from prism.networks.prism_network import PrismNetwork
 from prism.ray_tracer_cpu import CPURayTracer
 from prism.ray_tracer_cuda import CUDARayTracer
 from prism.training_interface import PrismTrainingInterface
+from prism.config_loader import ConfigLoader
 
 class TrainingProgressMonitor:
     """Real-time training progress monitor with GPU utilization tracking"""
@@ -89,9 +90,8 @@ class TrainingProgressMonitor:
         self.current_batch = batch_idx
         self.batch_start_time = time.time()
         
-        # Show simple status indicator for first few batches
-        if batch_idx < 3:
-            print(f"  🚀 Processing batch {batch_idx+1}...")
+        # Show status indicator for all batches
+        print(f"  🚀 Processing training batch {batch_idx+1}...")
         
     def update_batch_progress(self, batch_idx, loss, total_batches_in_epoch):
         """Update batch progress with real-time information"""
@@ -235,21 +235,52 @@ class TrainingProgressMonitor:
 class PrismTrainer:
     """Main trainer class for Prism network using TrainingInterface"""
     
-    def __init__(self, config_path: str, data_path: str, output_dir: str, resume_from: str = None):
-        """Initialize trainer with configuration and data paths"""
-        # Configure logging first
+    def __init__(self, config_path: str, data_path: str = None, output_dir: str = None, resume_from: str = None):
+        """Initialize trainer with configuration and optional data/output paths (will read from config if not provided)"""
+        # Load config first to get logging configuration
+        self.config_path = config_path
+        
+        try:
+            config_loader = ConfigLoader(config_path)
+            temp_config = config_loader.config
+        except Exception as e:
+            print(f"❌ FATAL ERROR: Failed to load configuration from {config_path}")
+            print(f"   Error details: {str(e)}")
+            print(f"   Please check your configuration file and ensure it exists and is valid.")
+            sys.exit(1)
+        
+        # Get logging configuration from config file (under output section)
+        output_config = temp_config.get('output', {})
+        logging_config = output_config.get('logging', {})
+        log_level_str = logging_config.get('log_level', 'INFO')
+        
+        # Get log file path from config (should always be available after ConfigLoader processing)
+        log_file = logging_config.get('log_file')
+        if not log_file:
+            raise ValueError("log_file not found in configuration. Check your config file and ConfigLoader processing.")
+        
+        # Create log directory if it doesn't exist
+        import os
+        log_dir = os.path.dirname(log_file)
+        if log_dir and not os.path.exists(log_dir):
+            os.makedirs(log_dir, exist_ok=True)
+        
+        # Convert string log level to logging constant
+        log_level = getattr(logging, log_level_str.upper(), logging.INFO)
+        
+        # Configure logging with config file settings
         logging.basicConfig(
-            level=logging.WARNING,  # Changed from INFO to WARNING to show more important messages
+            level=log_level,
             format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
             handlers=[
-                logging.FileHandler('training.log'),
+                logging.FileHandler(log_file),
                 logging.StreamHandler()
             ]
         )
         self.logger = logging.getLogger(__name__)
         
         # Set specific logger levels for more detailed output
-        self.logger.setLevel(logging.INFO)  # Set this logger to INFO level
+        self.logger.setLevel(log_level)
         
         # Also enable warnings from other libraries
         logging.getLogger('torch').setLevel(logging.WARNING)
@@ -268,33 +299,95 @@ class PrismTrainer:
         # Display current logging configuration
         self._display_logging_config()
         
+        # Store config path and load configuration first
         self.config_path = config_path
-        self.data_path = data_path
-        self.output_dir = Path(output_dir)
+        
+        # Load configuration using ConfigLoader to process template variables
+        try:
+            config_loader = ConfigLoader(config_path)
+            self.config = config_loader.config
+        except Exception as e:
+            self.logger.error(f"❌ FATAL ERROR: Failed to reload configuration from {config_path}")
+            self.logger.error(f"   Error details: {str(e)}")
+            print(f"❌ FATAL ERROR: Configuration loading failed during trainer initialization")
+            sys.exit(1)
+        
+        # Set data path and output directory from config if not provided
+        try:
+            # Import data utilities
+            from src.prism.data_utils import check_dataset_compatibility
+            
+            # Check dataset configuration
+            dataset_path, split_config = check_dataset_compatibility(self.config)
+            
+            # Use single dataset with split
+            self.data_path = data_path or dataset_path
+            self.split_config = split_config
+            self.logger.info(f"Using single dataset with train/test split: {self.data_path}")
+            self.logger.info(f"Split configuration: {self.split_config}")
+                
+        except KeyError as e:
+            self.logger.error(f"❌ FATAL ERROR: Missing required configuration key: {e}")
+            print(f"❌ FATAL ERROR: Configuration is missing required key: {e}")
+            print(f"   Please check your configuration file structure.")
+            sys.exit(1)
+        
+        # Build output directory from base_dir (new simplified structure)
+        if output_dir:
+            self.output_dir = Path(output_dir)
+        else:
+            # Use base_dir + training to construct output directory
+            base_dir = self.config['output'].get('base_dir', 'results')
+            self.output_dir = Path(base_dir) / 'training'
+        
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.resume_from = resume_from
         
-        # Load configuration
-        self.config = self._load_config()
+
         
-        # Setup device and multi-GPU configuration
-        if torch.cuda.is_available():
-            self.device = torch.device('cuda')
+        # Setup device and multi-GPU configuration with intelligent GPU selection
+        device_config = self.config.get('system', {}).get('device', 'cuda')
+        cuda_config = self.config.get('system', {}).get('cuda', {})
+        
+        if device_config == 'cuda' and torch.cuda.is_available():
+            # Intelligent GPU selection
             self.num_gpus = torch.cuda.device_count()
-            self.logger.info(f"CUDA available: {self.num_gpus} GPUs detected")
+            selected_device_id = self._select_best_gpu()
+            self.device = torch.device(f'cuda:{selected_device_id}')
+            
+            self.logger.info(f"🔍 GPU Auto-Selection Results:")
+            self.logger.info(f"  • Total GPUs detected: {self.num_gpus}")
+            self.logger.info(f"  • Selected GPU: {selected_device_id}")
+            self.logger.info(f"  • GPU Name: {torch.cuda.get_device_name(selected_device_id)}")
+            self.logger.info(f"  • GPU Memory: {torch.cuda.get_device_properties(selected_device_id).total_memory / 1024**3:.1f}GB")
+            
+            # Configure CUDA settings
+            if cuda_config.get('benchmark_mode', True):
+                torch.backends.cudnn.benchmark = True
+                self.logger.info("CUDA benchmark mode enabled")
+            
+            if cuda_config.get('deterministic', False):
+                torch.backends.cudnn.deterministic = True
+                self.logger.info("CUDA deterministic mode enabled")
             
             # Check if multi-GPU is enabled in config
-            if self.config.get('performance', {}).get('enable_distributed', False):
+            if cuda_config.get('multi_gpu', False) and self.num_gpus > 1:
                 self.use_multi_gpu = True
-                self.logger.info(f"Multi-GPU training enabled with {self.num_gpus} GPUs")
+                self.available_gpus = self._get_available_gpus()
+                self.logger.info(f"Multi-GPU training enabled with GPUs: {self.available_gpus}")
             else:
                 self.use_multi_gpu = False
-                self.logger.info(f"Single GPU training on GPU 0")
+                self.available_gpus = [selected_device_id]
+                self.logger.info(f"Single GPU training on GPU {selected_device_id}")
         else:
             self.device = torch.device('cpu')
             self.num_gpus = 0
             self.use_multi_gpu = False
-            self.logger.info("CUDA not available, using CPU")
+            self.available_gpus = []
+            if device_config == 'cuda':
+                self.logger.warning("CUDA requested but not available, using CPU")
+            else:
+                self.logger.info("Using CPU as configured")
         
         self.logger.info(f"Using device: {self.device}")
         
@@ -319,7 +412,8 @@ class PrismTrainer:
         self.progress_monitor = None
         
         # Setup tensorboard
-        self.writer = SummaryWriter(log_dir=self.output_dir / 'tensorboard')
+        tensorboard_dir = self.config['output']['training']['tensorboard_dir']
+        self.writer = SummaryWriter(log_dir=tensorboard_dir)
         
         # Display ray tracer information
         self._display_ray_tracer_info()
@@ -365,49 +459,115 @@ class PrismTrainer:
         return total_loss
     
     def _load_config(self):
-        """Load configuration from YAML file"""
-        with open(self.config_path, 'r') as f:
-            config = yaml.safe_load(f)
-        
-        # Set logging level from config
-        log_level = config.get('logging', {}).get('log_level', 'INFO')
-        numeric_level = getattr(logging, log_level.upper(), logging.INFO)
-        logging.getLogger().setLevel(numeric_level)
+        """Load configuration from YAML file using ConfigLoader"""
+        config_loader = ConfigLoader(self.config_path)
+        config = config_loader.config
         
         self.logger.info(f"Loaded configuration from {self.config_path}")
-        self.logger.info(f"Logging level set to: {log_level}")
+        # Logging level was already set in __init__ from config file
         return config
     
     def _setup_model(self):
-        """Initialize Prism network model and TrainingInterface"""
-        nn_config = self.config['neural_networks']
-        rt_config = self.config['ray_tracing']
+        """
+        Initialize Prism network model and TrainingInterface using the cleaned configuration structure.
+        """
+        # Load configuration sections from the new cleaned structure
+        nn_config = self.config.get('neural_networks', {})
+        ray_tracing_config = self.config.get('ray_tracing', {})
+        system_config = self.config.get('system', {})
         
-        # Create PrismNetwork with configuration from YAML
-        self.logger.info(f"Creating PrismNetwork with:")
-        self.logger.info(f"  num_subcarriers: {nn_config['attenuation_decoder']['output_dim']}")
-        self.logger.info(f"  num_ue_antennas: {nn_config['attenuation_decoder']['num_ue_antennas']}")
-        self.logger.info(f"  num_bs_antennas: {nn_config['antenna_codebook']['num_antennas']}")
-        self.logger.info(f"  position_dim: {nn_config['attenuation_network']['input_dim']}")
-        self.logger.info(f"  hidden_dim: {nn_config['attenuation_network']['hidden_dim']}")
-        self.logger.info(f"  feature_dim: {nn_config['attenuation_network']['feature_dim']}")
-        self.logger.info(f"  antenna_embedding_dim: {nn_config['antenna_codebook']['embedding_dim']}")
+        # Include logging configuration in system_config for TrainingInterface
+        output_config = self.config.get('output', {})
+        system_config['logging'] = output_config.get('logging', {})
         
+        # Extract neural network sub-configurations
+        attenuation_network = nn_config.get('attenuation_network', {})
+        attenuation_decoder = nn_config.get('attenuation_decoder', {})
+        antenna_codebook = nn_config.get('antenna_codebook', {})
+        antenna_network = nn_config.get('antenna_network', {})
+        radiance_network = nn_config.get('radiance_network', {})
+        
+        # Extract ray tracing sub-configurations
+        angular_sampling = ray_tracing_config.get('angular_sampling', {})
+        spatial_sampling = ray_tracing_config.get('spatial_sampling', {})
+        subcarrier_sampling = ray_tracing_config.get('subcarrier_sampling', {})
+        scene_bounds = ray_tracing_config.get('scene_bounds', {})
+
+        # Log neural network configuration
+        self.logger.info("🧠 Creating PrismNetwork with the following parameters:")
+        self.logger.info(f"  📊 num_subcarriers: {attenuation_decoder.get('output_dim', 408)}")
+        self.logger.info(f"  📡 num_bs_antennas: {antenna_codebook.get('num_antennas', 64)}")
+        self.logger.info(f"  📱 position_dim: {attenuation_network.get('input_dim', 3)}")
+        self.logger.info(f"  🔧 hidden_dim: {attenuation_network.get('hidden_dim', 256)}")
+        self.logger.info(f"  ✨ feature_dim: {attenuation_network.get('feature_dim', 128)}")
+        self.logger.info(f"  🎯 antenna_embedding_dim: {antenna_codebook.get('embedding_dim', 64)}")
+        self.logger.info(f"  🔄 azimuth_divisions: {angular_sampling.get('azimuth_divisions', 18)}")
+        self.logger.info(f"  📐 elevation_divisions: {angular_sampling.get('elevation_divisions', 9)}")
+
+        # Get configuration sections
+        base_station_config = self.config.get('base_station', {})
+        ofdm_config = base_station_config.get('ofdm', {})
+        user_equipment_config = self.config.get('user_equipment', {})
+        
+        # Create PrismNetwork instance using the cleaned configuration structure
         self.prism_network = PrismNetwork(
-            num_subcarriers=nn_config['attenuation_decoder']['output_dim'],
-            num_ue_antennas=nn_config['attenuation_decoder']['num_ue_antennas'],
-            num_bs_antennas=nn_config['antenna_codebook']['num_antennas'],
-            position_dim=nn_config['attenuation_network']['input_dim'],
-            hidden_dim=nn_config['attenuation_network']['hidden_dim'],
-            feature_dim=nn_config['attenuation_network']['feature_dim'],
-            antenna_embedding_dim=nn_config['antenna_codebook']['embedding_dim'],
-            use_antenna_codebook=nn_config['antenna_codebook']['learnable'],
+            num_subcarriers=ofdm_config.get('num_subcarriers', attenuation_decoder.get('output_dim', 408)),
+            num_ue_antennas=user_equipment_config.get('num_ue_antennas', 4),
+            num_bs_antennas=base_station_config.get('num_antennas', antenna_codebook.get('num_antennas', 64)),
+            position_dim=attenuation_network.get('input_dim', 3),
+            hidden_dim=attenuation_network.get('hidden_dim', 256),
+            feature_dim=attenuation_network.get('feature_dim', 128),
+            antenna_embedding_dim=base_station_config.get('antenna_embedding_dim', antenna_codebook.get('embedding_dim', 64)),
+            use_antenna_codebook=antenna_codebook.get('learnable', True),
             use_ipe_encoding=True,  # Enable IPE encoding for better performance
-            azimuth_divisions=rt_config['azimuth_divisions'],
-            elevation_divisions=rt_config['elevation_divisions'],
-            top_k_directions=32,  # Top-K directions for importance sampling
-            complex_output=True
+            azimuth_divisions=angular_sampling.get('azimuth_divisions', 18),
+            elevation_divisions=angular_sampling.get('elevation_divisions', 9),
+            top_k_directions=angular_sampling.get('top_k_directions', 32),
+            complex_output=True  # Enable complex output for CSI
         )
+        
+        # Log OFDM configuration usage
+        self.logger.info(f"  📡 OFDM Configuration:")
+        center_freq = float(ofdm_config.get('center_frequency', 3.5e9))
+        bandwidth = float(ofdm_config.get('bandwidth', 100e6))
+        num_subcarriers = int(ofdm_config.get('num_subcarriers', 408))
+        subcarrier_spacing = float(ofdm_config.get('subcarrier_spacing', 245.1e3))
+        
+        self.logger.info(f"    • Center frequency: {center_freq/1e9:.1f} GHz")
+        self.logger.info(f"    • Bandwidth: {bandwidth/1e6:.0f} MHz")
+        self.logger.info(f"    • Subcarriers: {num_subcarriers}")
+        self.logger.info(f"    • Subcarrier spacing: {subcarrier_spacing/1e3:.1f} kHz")
+        self.logger.info(f"    • FFT size: {ofdm_config.get('fft_size', 512)}")
+        self.logger.info(f"    • Guard carriers: {ofdm_config.get('num_guard_carriers', 52)}")
+
+        self.logger.info("✅ PrismNetwork created successfully")
+        self.logger.info(f"  📊 num_subcarriers: {self.prism_network.num_subcarriers}")
+        self.logger.info(f"  📱 num_ue_antennas: {self.prism_network.num_ue_antennas}")
+        self.logger.info(f"  📡 num_bs_antennas: {self.prism_network.num_bs_antennas}")
+
+        # Create PrismTrainingInterface with the cleaned configuration structure
+        checkpoint_dir = self.config['output']['training']['checkpoint_dir']
+        self.logger.info(f"🔍 TRAIN_PRISM DEBUG: About to create TrainingInterface")
+        self.logger.info(f"🔍 TRAIN_PRISM DEBUG: checkpoint_dir = {repr(checkpoint_dir)}")
+        self.logger.info(f"🔍 TRAIN_PRISM DEBUG: checkpoint_dir type = {type(checkpoint_dir)}")
+        print(f"🔍 TRAIN_PRISM DEBUG: checkpoint_dir = {repr(checkpoint_dir)}")
+        
+        self.model = PrismTrainingInterface(
+            prism_network=self.prism_network,
+            ray_tracer=None,  # Let the interface create the appropriate ray tracer
+            ray_tracing_config=ray_tracing_config,
+            system_config=system_config,
+            user_equipment_config=user_equipment_config,
+            checkpoint_dir=checkpoint_dir
+        )
+        
+        self.logger.info(f"🔍 TRAIN_PRISM DEBUG: TrainingInterface created")
+        self.logger.info(f"🔍 TRAIN_PRISM DEBUG: self.model.checkpoint_dir = {repr(self.model.checkpoint_dir)}")
+        print(f"🔍 TRAIN_PRISM DEBUG: self.model.checkpoint_dir = {repr(self.model.checkpoint_dir)}")
+        
+        # This section is redundant - the PrismNetwork was already created above
+        # Just log the final configuration
+        self.logger.info(f"PrismNetwork configuration completed:")
         
         self.logger.info(f"PrismNetwork created successfully")
         self.logger.info(f"  num_subcarriers: {self.prism_network.num_subcarriers}")
@@ -416,19 +576,19 @@ class PrismTrainer:
         
         # Create Ray Tracer with PrismNetwork for MLP-based direction selection
         # Read parallel processing configuration from config file
-        parallel_config = self.config.get('performance', {})
+        parallel_config = self.config.get('system', {})
         ray_tracer_config = self.config.get('ray_tracer_integration', {})
         
-        # Check if CUDA ray tracer should be used
-        use_cuda_ray_tracer = ray_tracer_config.get('use_cuda_ray_tracer', False)
+        # Get ray tracing mode from system configuration
+        system_config = self.config.get('system', {})
+        ray_tracing_mode = system_config.get('ray_tracing_mode', 'hybrid')
+        
+        # Check if CUDA ray tracer should be used (from ray_tracing_mode or legacy setting)
+        use_cuda_ray_tracer = (ray_tracing_mode == 'cuda') or ray_tracer_config.get('use_cuda_ray_tracer', False)
         
         # Parallel processing settings with fallback to config values
         enable_parallel = parallel_config.get('enable_parallel_processing', True)
         max_workers = parallel_config.get('num_workers', 4)
-        
-        # Get ray tracing mode from training interface configuration
-        training_interface_config = self.config.get('training_interface', {})
-        ray_tracing_mode = training_interface_config.get('ray_tracing_mode', 'hybrid')
         
         # Configure parallel processing based on ray tracing mode
         if ray_tracing_mode == 'cuda':
@@ -437,12 +597,12 @@ class PrismTrainer:
             self.logger.info("🔒 CUDA mode: parallel processing disabled to avoid device conflicts")
         elif ray_tracing_mode == 'cpu':
             # CPU mode: enable parallel processing for performance
-            enable_parallel = ray_tracer_config.get('parallel_antenna_processing', True)
+            enable_parallel = True
             self.logger.info("🚀 CPU mode: parallel processing enabled for performance")
         else:  # hybrid mode
             # Hybrid mode: use configured parallel processing
-            enable_parallel = ray_tracer_config.get('parallel_antenna_processing', True)
-            self.logger.info("⚖️  Hybrid mode: using configured parallel processing")
+            enable_parallel = True
+            self.logger.info("⚖️  Hybrid mode: parallel processing enabled")
         
         # Override with ray_tracer_integration settings if available
         if 'parallel_antenna_processing' in ray_tracer_config:
@@ -456,62 +616,113 @@ class PrismTrainer:
         self.logger.info(f"  - Parallel processing: {enable_parallel}")
         self.logger.info(f"  - Max workers: {max_workers}")
         
+        # Calculate max ray length from scene bounds
+        def calculate_max_ray_length(scene_bounds):
+            """Calculate maximum ray length from scene bounds"""
+            if 'min' in scene_bounds and 'max' in scene_bounds:
+                import numpy as np
+                min_bounds = np.array(scene_bounds['min'])
+                max_bounds = np.array(scene_bounds['max'])
+                # Calculate diagonal distance of the scene
+                diagonal = np.linalg.norm(max_bounds - min_bounds)
+                # Add some margin for safety
+                return diagonal * 1.2
+            else:
+                # Fallback to default if scene bounds not properly configured
+                return 200.0
+        
+        scene_bounds = ray_tracing_config.get('scene_bounds', {})
+        max_ray_length = ray_tracing_config.get('max_ray_length', calculate_max_ray_length(scene_bounds))
+        
         # Create ray tracer based on configuration
         if use_cuda_ray_tracer and torch.cuda.is_available():
             self.logger.info("🚀 Using CUDA-accelerated ray tracer for maximum performance")
+            # Get sampling configurations from new structure
+            angular_sampling = ray_tracing_config.get('angular_sampling', {})
+            spatial_sampling = ray_tracing_config.get('spatial_sampling', {})
+            mixed_precision = system_config.get('mixed_precision', {})
+            
+            self.logger.info(f"📏 Calculated max_ray_length: {max_ray_length:.1f}m from scene bounds")
+            
             self.ray_tracer = CUDARayTracer(
-                azimuth_divisions=rt_config['azimuth_divisions'],
-                elevation_divisions=rt_config['elevation_divisions'],
-                max_ray_length=rt_config.get('max_ray_length', 100.0),
-                scene_size=rt_config.get('scene_size', 200.0),
-                device=self.device.type,
-                prism_network=self.prism_network,  # Enable MLP-based direction selection
-                signal_threshold=rt_config.get('signal_threshold', 1e-6),
-                enable_early_termination=rt_config.get('enable_early_termination', True),
-                uniform_samples=rt_config.get('uniform_samples', 128),
-                resampled_points=rt_config.get('resampled_points', 64),
-                enable_parallel_processing=enable_parallel,  # Configured based on mode
-                max_workers=max_workers  # Read from config
+                azimuth_divisions=angular_sampling.get('azimuth_divisions', 18),
+                elevation_divisions=angular_sampling.get('elevation_divisions', 9),
+                max_ray_length=max_ray_length,
+                prism_network=self.prism_network,
+                signal_threshold=ray_tracing_config.get('signal_threshold', 1e-6),
+                enable_early_termination=ray_tracing_config.get('enable_early_termination', True),
+                uniform_samples=spatial_sampling.get('num_sampling_points', 64),
+                resampled_points=spatial_sampling.get('resampled_points', 32),
+                use_mixed_precision=mixed_precision.get('enabled', True)
             )
         else:
             if use_cuda_ray_tracer and not torch.cuda.is_available():
                 self.logger.warning("⚠️  CUDA ray tracer requested but CUDA not available, falling back to CPU version")
             self.logger.info("💻 Using CPU ray tracer")
+            # Get sampling configurations from new structure
+            angular_sampling = ray_tracing_config.get('angular_sampling', {})
+            spatial_sampling = ray_tracing_config.get('spatial_sampling', {})
+            cpu_config = system_config.get('cpu', {})
+            
+            self.logger.info(f"📏 Using max_ray_length: {max_ray_length:.1f}m from scene bounds")
+            
             self.ray_tracer = CPURayTracer(
-                azimuth_divisions=rt_config['azimuth_divisions'],
-                elevation_divisions=rt_config['elevation_divisions'],
-                max_ray_length=rt_config.get('max_ray_length', 100.0),
-                scene_size=rt_config.get('scene_size', 200.0),
-                device=self.device.type,
-                prism_network=self.prism_network,  # Enable MLP-based direction selection
-                signal_threshold=rt_config.get('signal_threshold', 1e-6),
-                enable_early_termination=rt_config.get('enable_early_termination', True),
-                top_k_directions=rt_config.get('top_k_directions', None),  # Use configured K value
-                enable_parallel_processing=enable_parallel,  # Configured based on mode
-                max_workers=max_workers  # Read from config
+                azimuth_divisions=angular_sampling.get('azimuth_divisions', 18),
+                elevation_divisions=angular_sampling.get('elevation_divisions', 9),
+                max_ray_length=max_ray_length,
+                prism_network=self.prism_network,
+                signal_threshold=ray_tracing_config.get('signal_threshold', 1e-6),
+                enable_early_termination=ray_tracing_config.get('enable_early_termination', True),
+                top_k_directions=angular_sampling.get('top_k_directions', 32),
+                max_workers=cpu_config.get('num_workers', 4)
             )
         
-        # Get ray tracing mode from training interface configuration
-        training_interface_config = self.config.get('training_interface', {})
-        ray_tracing_mode = training_interface_config.get('ray_tracing_mode', 'hybrid')
+        # Get configuration sections for new structure
+        ray_tracing_config = self.config.get('ray_tracing', {})
+        system_config = self.config.get('system', {})
         
-        # Create PrismTrainingInterface with ray tracing mode
+        # Get ray tracing mode from system config (new structure)
+        ray_tracing_mode = system_config.get('ray_tracing_mode', 'hybrid')
+        
+        # Set PyTorch's current CUDA device to match training device
+        if self.device.type == 'cuda':
+            torch.cuda.set_device(self.device)
+            self.logger.info(f"🔧 Set PyTorch CUDA device to {self.device}")
+        
+        # Get checkpoint directory from config
+        output_config = self.config.get('output', {})
+        training_config = output_config.get('training', {})
+        checkpoint_dir = training_config.get('checkpoint_dir')
+        
+        # Create PrismTrainingInterface with new simplified parameters
         self.model = PrismTrainingInterface(
             prism_network=self.prism_network,
             ray_tracer=self.ray_tracer,
-            num_sampling_points=rt_config.get('spatial_sampling', 64),
-            scene_bounds=rt_config.get('scene_bounds', None),
-            subcarrier_sampling_ratio=training_interface_config.get('subcarrier_sampling_ratio', 0.3),
-            checkpoint_dir=str(self.output_dir / 'checkpoints'),
-            ray_tracing_mode=ray_tracing_mode
+            ray_tracing_config=ray_tracing_config,
+            system_config=system_config,
+            checkpoint_dir=checkpoint_dir
         )
         
+        # Pass config to the training interface
+        self.model.config = self.config
+        
+        # Ensure ray tracer uses the same device as training
+        if hasattr(self.ray_tracer, 'device') and self.ray_tracer.device != self.device:
+            self.logger.info(f"🔧 Updating ray tracer device from {self.ray_tracer.device} to {self.device}")
+            self.ray_tracer.device = self.device
+            # Also update the device string for CUDA ray tracer
+            if hasattr(self.ray_tracer, '_setup_cuda'):
+                self.ray_tracer._setup_cuda()
+        
         # Log configuration details
-        subcarrier_ratio = training_interface_config.get('subcarrier_sampling_ratio', 0.3)
+        subcarrier_sampling = ray_tracing_config.get('subcarrier_sampling', {})
+        subcarrier_ratio = subcarrier_sampling.get('sampling_ratio', 0.1)
         total_subcarriers = self.prism_network.num_subcarriers
         selected_subcarriers = int(total_subcarriers * subcarrier_ratio)
         
         self.logger.info(f"Training interface created with ray_tracing_mode: {ray_tracing_mode}")
+        self.logger.info(f"Ray tracing config: {ray_tracing_config.keys()}")
+        self.logger.info(f"System config: {system_config.keys()}")
         self.logger.info(f"Subcarrier sampling: {subcarrier_ratio} ({subcarrier_ratio*100}%) = {selected_subcarriers}/{total_subcarriers} subcarriers")
         
         # Enable multi-GPU training if configured
@@ -535,7 +746,7 @@ class PrismTrainer:
     def _setup_training(self):
         """Setup training hyperparameters and optimizers"""
         # Training hyperparameters
-        self.batch_size = self.config['performance']['batch_size']
+        self.batch_size = self.config.get('system', {}).get('batch_size', 2)
         
         # Scale batch size for multi-GPU training
         if self.use_multi_gpu and self.num_gpus > 1:
@@ -543,13 +754,24 @@ class PrismTrainer:
             self.batch_size = self.batch_size * self.num_gpus
             self.logger.info(f"Multi-GPU batch size scaling: {original_batch_size} × {self.num_gpus} = {self.batch_size}")
         
-        self.learning_rate = 1e-4
+        self.learning_rate = float(self.config['training'].get('learning_rate', 1e-4))  # Read from config and convert to float
         self.num_epochs = self.config['training']['num_epochs']  # Read from config
-        self.save_interval = 10
+        self.save_interval = self.config['training'].get('epoch_save_interval', 10)  # Read from config
         
         # Batch-level checkpoint settings
-        self.batch_save_interval = 10  # Save checkpoint every 10 batches
-        self.enable_batch_checkpoints = True  # Enable batch-level checkpointing
+        self.batch_save_interval = self.config['training'].get('checkpoint_frequency', 10)  # Read from config
+        self.enable_batch_checkpoints = self.config['training'].get('auto_checkpoint', True)  # Read from config
+        
+        # Debug logging for checkpoint configuration
+        self.logger.info(f"Checkpoint configuration:")
+        self.logger.info(f"  Batch checkpoints:")
+        self.logger.info(f"    enable_batch_checkpoints: {self.enable_batch_checkpoints}")
+        self.logger.info(f"    batch_save_interval: {self.batch_save_interval}")
+        self.logger.info(f"    checkpoint_frequency from config: {self.config['training'].get('checkpoint_frequency', 'NOT SET')}")
+        self.logger.info(f"    auto_checkpoint from config: {self.config['training'].get('auto_checkpoint', 'NOT SET')}")
+        self.logger.info(f"  Epoch checkpoints:")
+        self.logger.info(f"    epoch_save_interval: {self.save_interval}")
+        self.logger.info(f"    epoch_save_interval from config: {self.config['training'].get('epoch_save_interval', 'NOT SET')}")
         
         # Deadlock detection settings
         self.batch_timeout = 600  # 10 minutes per batch
@@ -558,27 +780,153 @@ class PrismTrainer:
         # Loss function for complex-valued outputs - ensure it returns tensors
         self.criterion = self._complex_mse_loss
         
+        # Setup mixed precision training
+        mixed_precision_config = self.config.get('system', {}).get('mixed_precision', {})
+        self.use_mixed_precision = mixed_precision_config.get('enabled', True)
+        if self.use_mixed_precision and self.device.type == 'cuda':
+            from torch.amp import GradScaler
+            self.scaler = GradScaler('cuda', enabled=mixed_precision_config.get('grad_scaler_enabled', True))
+            self.logger.info("Mixed precision training enabled")
+        else:
+            self.scaler = None
+            if self.use_mixed_precision:
+                self.logger.info("Mixed precision requested but not available (CPU mode)")
+            else:
+                self.logger.info("Mixed precision training disabled")
+        
         # Optimizer - now optimizing the TrainingInterface
         self.optimizer = optim.AdamW(
             self.model.parameters(),
             lr=self.learning_rate,
-            weight_decay=1e-4
+            weight_decay=float(self.config['training'].get('optimizer_params', {}).get('weight_decay', 1e-4))
         )
         
         # Learning rate scheduler
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer,
-            mode='min',
-            factor=0.5,
-            patience=5,
-            verbose=True
-        )
+        lr_scheduler_config = self.config.get('training', {}).get('lr_scheduler', {})
+        if lr_scheduler_config.get('enabled', True):
+            scheduler_type = lr_scheduler_config.get('type', 'step')
+            if scheduler_type == 'step':
+                self.scheduler = optim.lr_scheduler.StepLR(
+                    self.optimizer,
+                    step_size=lr_scheduler_config.get('step_size', 30),
+                    gamma=lr_scheduler_config.get('gamma', 0.1)
+                )
+                self.logger.info(f"StepLR scheduler enabled: step_size={lr_scheduler_config.get('step_size', 30)}, gamma={lr_scheduler_config.get('gamma', 0.1)}")
+            elif scheduler_type == 'plateau':
+                self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                    self.optimizer,
+                    mode='min',
+                    factor=lr_scheduler_config.get('gamma', 0.5),
+                    patience=lr_scheduler_config.get('patience', 5),
+                    verbose=True
+                )
+                self.logger.info(f"ReduceLROnPlateau scheduler enabled: factor={lr_scheduler_config.get('gamma', 0.5)}, patience={lr_scheduler_config.get('patience', 5)}")
+            else:
+                self.scheduler = None
+                self.logger.warning(f"Unknown scheduler type: {scheduler_type}, disabling scheduler")
+        else:
+            self.scheduler = None
+            self.logger.info("Learning rate scheduler disabled")
+        
+        # Early stopping configuration
+        early_stopping_config = self.config.get('training', {}).get('early_stopping', {})
+        self.early_stopping_enabled = early_stopping_config.get('enabled', True)
+        if self.early_stopping_enabled:
+            self.early_stopping_patience = early_stopping_config.get('patience', 10)
+            self.early_stopping_min_delta = early_stopping_config.get('min_delta', 1e-6)
+            self.early_stopping_restore_best = early_stopping_config.get('restore_best_weights', True)
+            self.early_stopping_counter = 0
+            self.best_val_loss = float('inf')
+            self.logger.info(f"Early stopping enabled: patience={self.early_stopping_patience}, min_delta={self.early_stopping_min_delta}")
+        else:
+            self.logger.info("Early stopping disabled")
         
         self.logger.info(f"Training setup: batch_size={self.batch_size}, lr={self.learning_rate}")
         
         # GPU monitoring setup
         self.gpu_monitoring_active = False
         self.gpu_monitor_thread = None
+    
+    def _select_best_gpu(self) -> int:
+        """智能选择最佳可用GPU"""
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA not available")
+        
+        num_gpus = torch.cuda.device_count()
+        if num_gpus == 1:
+            return 0
+        
+        self.logger.info("🔍 Scanning available GPUs...")
+        
+        gpu_info = []
+        for i in range(num_gpus):
+            try:
+                # 获取GPU基本信息
+                props = torch.cuda.get_device_properties(i)
+                name = torch.cuda.get_device_name(i)
+                total_memory = props.total_memory / 1024**3  # GB
+                
+                # 获取当前内存使用情况
+                torch.cuda.set_device(i)
+                allocated_memory = torch.cuda.memory_allocated(i) / 1024**3  # GB
+                reserved_memory = torch.cuda.memory_reserved(i) / 1024**3   # GB
+                free_memory = total_memory - reserved_memory
+                
+                # 计算GPU利用率分数 (内存越多，使用率越低越好)
+                memory_usage_ratio = reserved_memory / total_memory
+                score = total_memory * (1 - memory_usage_ratio)  # 优先选择内存大且使用率低的GPU
+                
+                gpu_info.append({
+                    'id': i,
+                    'name': name,
+                    'total_memory': total_memory,
+                    'allocated_memory': allocated_memory,
+                    'reserved_memory': reserved_memory,
+                    'free_memory': free_memory,
+                    'usage_ratio': memory_usage_ratio,
+                    'score': score
+                })
+                
+                self.logger.info(f"  GPU {i}: {name}")
+                self.logger.info(f"    • Total Memory: {total_memory:.1f}GB")
+                self.logger.info(f"    • Free Memory: {free_memory:.1f}GB")
+                self.logger.info(f"    • Usage: {memory_usage_ratio*100:.1f}%")
+                self.logger.info(f"    • Score: {score:.1f}")
+                
+            except Exception as e:
+                self.logger.warning(f"  GPU {i}: Error getting info - {e}")
+                gpu_info.append({
+                    'id': i,
+                    'score': -1  # 标记为不可用
+                })
+        
+        # 选择得分最高的GPU
+        best_gpu = max(gpu_info, key=lambda x: x['score'])
+        selected_id = best_gpu['id']
+        
+        self.logger.info(f"✅ Selected GPU {selected_id} as the best option")
+        return selected_id
+    
+    def _get_available_gpus(self) -> list:
+        """获取所有可用GPU列表"""
+        if not torch.cuda.is_available():
+            return []
+        
+        available_gpus = []
+        num_gpus = torch.cuda.device_count()
+        
+        for i in range(num_gpus):
+            try:
+                # 测试GPU是否可用
+                torch.cuda.set_device(i)
+                # 尝试分配一小块内存来测试GPU是否正常工作
+                test_tensor = torch.zeros(1, device=f'cuda:{i}')
+                del test_tensor
+                available_gpus.append(i)
+            except Exception as e:
+                self.logger.warning(f"GPU {i} not available: {e}")
+        
+        return available_gpus
         
     def _get_gpu_utilization(self) -> str:
         """Get current GPU utilization and memory usage"""
@@ -732,54 +1080,29 @@ class PrismTrainer:
         self.logger.info(f"Loading training data from {self.data_path}")
         print(f"📂 Loading data from: {self.data_path}")
         
-        with h5py.File(self.data_path, 'r') as f:
-            # Load UE positions from nested group
-            ue_positions = f['positions']['ue_positions'][:]
-            self.logger.info(f"Loaded {len(ue_positions)} UE positions")
-            print(f"   📍 UE positions: {len(ue_positions)} samples")
-            
-            # Load channel responses (CSI) from nested group
-            csi_data = f['channel_data']['channel_responses'][:]
-            self.logger.info(f"Loaded CSI data with shape: {csi_data.shape}")
-            print(f"   📡 CSI data: {csi_data.shape}")
-            
-            # Load BS position from nested group
-            bs_position = f['positions']['bs_position'][:]
-            self.logger.info(f"BS position: {bs_position}")
-            print(f"   🏢 BS position: {bs_position}")
-            
-            # Load antenna indices if available
-            if 'antenna_indices' in f:
-                antenna_indices = f['antenna_indices'][:]
-                self.logger.info(f"Loaded antenna indices with shape: {antenna_indices.shape}")
-                print(f"   📡 Antenna indices: {len(antenna_indices)}")
-            else:
-                # Create default antenna indices if not available
-                num_bs_antennas = csi_data.shape[3] if len(csi_data.shape) > 3 else 64  # Shape is (100, 408, 4, 64)
-                antenna_indices = np.arange(num_bs_antennas)
-                self.logger.info(f"Created default antenna indices: {len(antenna_indices)}")
-                print(f"   📡 Created default antenna indices: {len(antenna_indices)}")
-            
-            # Load simulation parameters if available
-            if 'simulation_config' in f and hasattr(f['simulation_config'], 'attrs'):
-                params = dict(f['simulation_config'].attrs)
-                self.logger.info(f"Simulation parameters: {params}")
-                print(f"   ⚙️  Simulation parameters loaded")
-            else:
-                self.logger.info("No simulation parameters found")
-                print(f"   ⚙️  No simulation parameters found")
-            
-            # Check if this is split data
-            if 'split_type' in f.attrs:
-                split_info = dict(f.attrs)
-                self.logger.info(f"Data split info: {split_info}")
-                print(f"   📊 Data split: {split_info.get('split_type', 'unknown')} ({split_info.get('num_samples', 'unknown')} samples)")
+        # Use split-based data loading
+        from src.prism.data_utils import load_and_split_data
         
-        # Convert to tensors with proper data types
-        self.ue_positions = torch.tensor(ue_positions, dtype=torch.float32)
-        self.csi_data = torch.tensor(csi_data, dtype=torch.complex64)
-        self.bs_position = torch.tensor(bs_position, dtype=torch.float32)
-        self.antenna_indices = torch.tensor(antenna_indices, dtype=torch.long)
+        self.ue_positions, self.csi_data, self.bs_position, self.antenna_indices, metadata = load_and_split_data(
+            dataset_path=self.data_path,
+            train_ratio=self.split_config['train_ratio'],
+            test_ratio=self.split_config['test_ratio'],
+            random_seed=self.split_config['random_seed'],
+            mode='train'
+        )
+        
+        # Log split information
+        print(f"   📊 Using train/test split mode")
+        print(f"   🎲 Random seed: {self.split_config['random_seed']}")
+        print(f"   📈 Train ratio: {self.split_config['train_ratio']}")
+        print(f"   📉 Test ratio: {self.split_config['test_ratio']}")
+        print(f"   📍 UE positions: {self.ue_positions.shape[0]} samples (training split)")
+        print(f"   📡 CSI data: {self.csi_data.shape}")
+        print(f"   🏢 BS position: {self.bs_position.shape}")
+        print(f"   📡 Antenna indices: {len(self.antenna_indices)}")
+        
+        # Store metadata
+        self.split_metadata = metadata
         
         # Validate data shapes
         self.logger.info(f"Data validation:")
@@ -797,8 +1120,8 @@ class PrismTrainer:
         # Create dataset with all required data
         self.dataset = TensorDataset(
             self.ue_positions, 
-            self.bs_position.expand(len(ue_positions), -1),
-            self.antenna_indices.expand(len(ue_positions), -1),
+            self.bs_position.expand(len(self.ue_positions), -1),
+            self.antenna_indices.expand(len(self.ue_positions), -1),
             self.csi_data
         )
         
@@ -808,15 +1131,31 @@ class PrismTrainer:
             self.batch_size = len(self.dataset)
             self.logger.info(f"Adjusted batch size to: {self.batch_size}")
         
+        # Get CPU configuration - use safer DataLoader settings to avoid "Broken pipe" errors
+        cpu_config = self.config.get('system', {}).get('cpu', {})
+        
+        # Use num_workers=0 for CUDA to avoid multiprocessing issues that cause "Broken pipe"
+        if self.device.type == 'cuda':
+            num_workers = 0  # Single-threaded for CUDA to avoid process communication issues
+            pin_memory = True
+            persistent_workers = False
+        else:
+            num_workers = min(cpu_config.get('num_workers', 2), 2)  # Limit workers for stability
+            pin_memory = False
+            persistent_workers = False
+        
         self.dataloader = DataLoader(
             self.dataset,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=2,  # Reduced from 4 to prevent StopIteration errors
-            pin_memory=True,
-            persistent_workers=True,  # Keep workers alive between epochs
-            drop_last=False  # Don't drop incomplete batches
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers,
+            drop_last=False,  # Don't drop incomplete batches
+            timeout=30 if num_workers > 0 else 0,  # Add timeout for worker processes
+            multiprocessing_context='spawn' if num_workers > 0 else None  # Use spawn for better stability
         )
+        self.logger.info(f"DataLoader created with {num_workers} workers (device: {self.device.type})")
         
         self.logger.info(f"Training data loaded: {len(self.dataset)} samples, batch_size={self.batch_size}")
         print(f"✅ Data loaded successfully!")
@@ -825,12 +1164,16 @@ class PrismTrainer:
         print(f"   📦 Number of batches: {len(self.dataloader)}")
         print(f"   💾 Data types: UE (float32), CSI (complex64), BS (float32), Antenna (long)")
         
+        # Get batches per epoch from config or use dataloader length
+        self.batches_per_epoch = self.config['training'].get('batches_per_epoch', len(self.dataloader))
+        
         # Initialize progress monitor AFTER dataloader is created
         self.progress_monitor = TrainingProgressMonitor(
             total_epochs=self.config['training']['num_epochs'],
-            total_batches_per_epoch=len(self.dataloader)
+            total_batches_per_epoch=self.batches_per_epoch
         )
-        print(f"   📊 Progress monitor initialized for {len(self.dataloader)} batches per epoch")
+        print(f"   📊 Progress monitor initialized for {self.batches_per_epoch} batches per epoch")
+        print(f"   🔧 Configured batches per epoch: {self.batches_per_epoch} (dataloader has {len(self.dataloader)} batches)")
         
     def _train_epoch(self, epoch: int):
         """Train for one epoch using TrainingInterface"""
@@ -846,12 +1189,27 @@ class PrismTrainer:
         epoch_start_time = time.time()
         
         try:
-            for batch_idx, (ue_pos, bs_pos, antenna_idx, csi_target) in enumerate(self.dataloader):
+            # Create an iterator that can cycle through the dataloader if needed
+            dataloader_iter = iter(self.dataloader)
+            
+            for batch_idx in range(self.batches_per_epoch):
+                # Log batch start with clear progress information
+                print(f"\n📦 BATCH {batch_idx + 1}/{self.batches_per_epoch} (Epoch {epoch})")
+                print(f"{'='*60}")
+                self.logger.info(f"Starting batch {batch_idx + 1}/{self.batches_per_epoch} in epoch {epoch}")
+                
+                try:
+                    # Get next batch, cycling through dataloader if necessary
+                    ue_pos, bs_pos, antenna_idx, csi_target = next(dataloader_iter)
+                except StopIteration:
+                    # If we've exhausted the dataloader, create a new iterator
+                    dataloader_iter = iter(self.dataloader)
+                    ue_pos, bs_pos, antenna_idx, csi_target = next(dataloader_iter)
                 # Start batch monitoring if progress monitor is available
                 if hasattr(self, 'progress_monitor') and self.progress_monitor is not None:
                     self.progress_monitor.start_batch(batch_idx)
                 
-                self.logger.debug(f"Processing batch {batch_idx}:")
+                self.logger.debug(f"Processing training batch {batch_idx}:")
                 self.logger.debug(f"  ue_pos shape: {ue_pos.shape}, dtype: {ue_pos.dtype}")
                 self.logger.debug(f"  bs_pos shape: {bs_pos.shape}, dtype: {bs_pos.dtype}")
                 self.logger.debug(f"  antenna_idx shape: {antenna_idx.shape}, dtype: {antenna_idx.dtype}")
@@ -875,89 +1233,153 @@ class PrismTrainer:
                 self.optimizer.zero_grad()
                 
                 try:
-                    # Use TrainingInterface forward pass
-                    outputs = self.model(
-                        ue_positions=ue_pos,
-                        bs_position=bs_pos,
-                        antenna_indices=antenna_idx
-                    )
+                    print(f"    🧠 Forward pass for training batch {batch_idx+1}...")
                     
-                    # Extract CSI predictions
-                    csi_pred = outputs['csi_predictions']
-                    
-                    # Compute loss using TrainingInterface's loss computation
-                    try:
+                    # Use mixed precision if enabled
+                    if self.use_mixed_precision and self.scaler is not None:
+                        with torch.amp.autocast('cuda', enabled=self.config.get('system', {}).get('mixed_precision', {}).get('autocast_enabled', True)):
+                            outputs = self.model(
+                                ue_positions=ue_pos,
+                                bs_position=bs_pos,
+                                antenna_indices=antenna_idx
+                            )
+                            # Extract CSI predictions
+                            csi_pred = outputs['csi_predictions']
+                            
+                            print(f"    🎯 Computing loss for batch {batch_idx+1}...")
+                            loss = self.model.compute_loss(csi_pred, csi_target, self.criterion)
+                    else:
+                        # Regular forward pass
+                        outputs = self.model(
+                            ue_positions=ue_pos,
+                            bs_position=bs_pos,
+                            antenna_indices=antenna_idx
+                        )
+                        # Extract CSI predictions
+                        csi_pred = outputs['csi_predictions']
+                        
+                        print(f"    🎯 Computing loss for batch {batch_idx+1}...")
                         loss = self.model.compute_loss(csi_pred, csi_target, self.criterion)
-                        
-                        # Validate loss is a tensor
-                        if not isinstance(loss, torch.Tensor):
-                            self.logger.error(f"Loss computation returned non-tensor: {type(loss)} = {loss}")
-                            raise ValueError(f"Loss must be a torch.Tensor, got {type(loss)}")
-                        
-                        # Ensure loss has requires_grad for backward pass
-                        if not loss.requires_grad:
-                            self.logger.warning("Loss tensor does not require gradients, this may cause issues")
-                        
-                        # Check for NaN or infinite values
-                        if torch.isnan(loss) or torch.isinf(loss):
-                            self.logger.error(f"Invalid loss value: {loss}")
-                            raise ValueError(f"Loss contains NaN or infinite values: {loss}")
-                        
-                    except Exception as e:
-                        self.logger.error(f"Loss computation failed: {e}")
-                        self.logger.error(f"Shapes - csi_pred: {csi_pred.shape}, csi_target: {csi_target.shape}")
-                        raise
                     
-                    # Backward pass
+                    print(f"    ✅ Forward pass completed for batch {batch_idx+1}")
+                    
+                    # Validate loss is a tensor
+                    if not isinstance(loss, torch.Tensor):
+                        self.logger.error(f"Loss computation returned non-tensor: {type(loss)} = {loss}")
+                        raise ValueError(f"Loss must be a torch.Tensor, got {type(loss)}")
+                    
+                    # Ensure loss has requires_grad for backward pass
+                    if not loss.requires_grad:
+                        self.logger.warning("Loss tensor does not require gradients, this may cause issues")
+                    
+                    # Check for NaN or infinite values
+                    if torch.isnan(loss) or torch.isinf(loss):
+                        self.logger.error(f"Invalid loss value: {loss}")
+                        raise ValueError(f"Loss contains NaN or infinite values: {loss}")
+                    
+                except Exception as e:
+                    self.logger.error(f"Loss computation failed: {e}")
+                    if 'csi_pred' in locals():
+                        self.logger.error(f"Shapes - csi_pred: {csi_pred.shape}, csi_target: {csi_target.shape}")
+                    else:
+                        self.logger.error(f"csi_pred not available, csi_target: {csi_target.shape}")
+                    raise
+                
+                # Backward pass
+                print(f"    ⬅️  Backward pass for batch {batch_idx+1}...")
+                if self.use_mixed_precision and self.scaler is not None:
+                    # Mixed precision backward pass
+                    self.scaler.scale(loss).backward()
+                    
+                    # Gradient clipping with scaler
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    
+                    print(f"    📈 Optimizer step for batch {batch_idx+1}...")
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    # Regular backward pass
                     loss.backward()
                     
                     # Gradient clipping
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     
+                    print(f"    📈 Optimizer step for batch {batch_idx+1}...")
                     self.optimizer.step()
-                    
-                    total_loss += loss.item()
-                    num_batches += 1
-                    
-                    # Update training state in TrainingInterface
-                    self.model.update_training_state(epoch, batch_idx, loss.item())
-                    
-                    # Save batch checkpoint if enabled and at the right interval
-                    if (self.enable_batch_checkpoints and 
-                        self.batch_save_interval > 0 and 
-                        (batch_idx + 1) % self.batch_save_interval == 0):
+                
+                print(f"    ✅ Batch {batch_idx+1} completed! Loss: {loss.item():.6f}")
+                
+                total_loss += loss.item()
+                num_batches += 1
+                
+                # Update training state in TrainingInterface
+                self.model.update_training_state(epoch, batch_idx, loss.item())
+                
+                # Save batch checkpoint if enabled and at the right interval
+                checkpoint_condition = (self.enable_batch_checkpoints and 
+                                      self.batch_save_interval > 0 and 
+                                      (batch_idx + 1) % self.batch_save_interval == 0)
+                
+                # Debug logging for checkpoint decision (ENHANCED DEBUG)
+                # ALWAYS show debug info to debug checkpoint issue
+                self.logger.info(f"🔍 CHECKPOINT DEBUG - Batch {batch_idx}:")
+                self.logger.info(f"  📊 batch_idx: {batch_idx}")
+                self.logger.info(f"  📊 batch_idx + 1: {batch_idx + 1}")
+                self.logger.info(f"  📊 batch_save_interval: {self.batch_save_interval}")
+                self.logger.info(f"  📊 (batch_idx + 1) % batch_save_interval: {(batch_idx + 1) % self.batch_save_interval}")
+                self.logger.info(f"  📊 enable_batch_checkpoints: {self.enable_batch_checkpoints}")
+                self.logger.info(f"  📊 checkpoint_condition: {checkpoint_condition}")
+                print(f"🔍 CHECKPOINT DEBUG - Batch {batch_idx}: condition = {checkpoint_condition}")
+                
+                if checkpoint_condition:
+                    self.logger.info(f"🎯 CHECKPOINT TRIGGERED! Saving checkpoint for batch {batch_idx + 1}")
+                    print(f"🎯 CHECKPOINT TRIGGERED! Saving checkpoint for batch {batch_idx + 1}")
+                    try:
                         self._save_batch_checkpoint(epoch, batch_idx + 1, loss.item())
+                        self.logger.info(f"✅ Checkpoint save completed for batch {batch_idx + 1}")
+                        print(f"✅ Checkpoint save completed for batch {batch_idx + 1}")
+                    except Exception as e:
+                        self.logger.error(f"❌ Checkpoint save FAILED for batch {batch_idx + 1}: {e}")
+                        print(f"❌ Checkpoint save FAILED for batch {batch_idx + 1}: {e}")
+                        import traceback
+                        self.logger.error(f"Full traceback: {traceback.format_exc()}")
+                else:
+                    self.logger.info(f"⏭️  No checkpoint for batch {batch_idx + 1} (condition not met)")
+                    print(f"⏭️  No checkpoint for batch {batch_idx + 1} (condition not met)")
+                
+                # Log batch completion with epoch progress bar
+                batch_progress = (batch_idx + 1) / self.batches_per_epoch * 100
+                avg_loss_so_far = total_loss / num_batches
+                
+                # Create epoch progress bar
+                progress_bar_length = 30
+                filled_length = int(progress_bar_length * batch_progress / 100)
+                progress_bar = '█' * filled_length + '░' * (progress_bar_length - filled_length)
+                
+                print(f"✅ BATCH {batch_idx + 1}/{self.batches_per_epoch} COMPLETED")
+                print(f"   📊 Epoch Progress: [{progress_bar}] {batch_progress:5.1f}%")
+                print(f"   📈 Loss: {loss.item():.6f} | Avg Loss: {avg_loss_so_far:.6f}")
+                self.logger.info(f"Batch {batch_idx + 1}/{self.batches_per_epoch} completed with loss: {loss.item():.6f}")
+                
+                # Update progress monitor with real-time information if available
+                if hasattr(self, 'progress_monitor') and self.progress_monitor is not None:
+                    self.progress_monitor.update_batch_progress(batch_idx, loss.item(), self.batches_per_epoch)
+                else:
+                    # Fallback progress logging
+                    if batch_idx % 5 == 0 or batch_idx == self.batches_per_epoch - 1:
+                        progress = (batch_idx + 1) / self.batches_per_epoch * 100
+                        avg_loss_so_far = total_loss / num_batches
+                        print(f"  📊 Batch {batch_idx+1:3d}/{self.batches_per_epoch:3d} ({progress:5.1f}%) | "
+                              f"Loss: {loss.item():.6f} | Avg: {avg_loss_so_far:.6f}")
+                
+                # Check for potential deadlocks or slow progress
+                if not self._check_training_progress(epoch_start_time, batch_idx, self.batches_per_epoch):
+                    print(f"  ⚠️  Training progress check failed - consider restarting if stuck")
+                
+                # Log to tensorboard
+                self.writer.add_scalar(f'Loss/Batch_{epoch}', loss.item(), batch_idx)
                     
-                    # Update progress monitor with real-time information if available
-                    if hasattr(self, 'progress_monitor') and self.progress_monitor is not None:
-                        self.progress_monitor.update_batch_progress(batch_idx, loss.item(), len(self.dataloader))
-                    else:
-                        # Fallback progress logging
-                        if batch_idx % 5 == 0 or batch_idx == len(self.dataloader) - 1:
-                            progress = (batch_idx + 1) / len(self.dataloader) * 100
-                            avg_loss_so_far = total_loss / num_batches
-                            print(f"  📊 Batch {batch_idx+1:3d}/{len(self.dataloader):3d} ({progress:5.1f}%) | "
-                                  f"Loss: {loss.item():.6f} | Avg: {avg_loss_so_far:.6f}")
-                    
-                    # Check for potential deadlocks or slow progress
-                    if not self._check_training_progress(epoch_start_time, batch_idx, len(self.dataloader)):
-                        print(f"  ⚠️  Training progress check failed - consider restarting if stuck")
-                    
-                    # Log to tensorboard
-                    self.writer.add_scalar(f'Loss/Batch_{epoch}', loss.item(), batch_idx)
-                    
-                except Exception as e:
-                    self.logger.error(f"❌ Error in batch {batch_idx}: {e}")
-                    print(f"  ❌ Batch {batch_idx} failed: {e}")
-                    
-                    # Try to continue with next batch instead of crashing
-                    if batch_idx < len(self.dataloader) - 1:
-                        print(f"  🔄 Continuing with next batch...")
-                        continue
-                    else:
-                        print(f"  🛑 Last batch failed, ending epoch early")
-                        break
-                        
         except StopIteration as e:
             self.logger.error(f"❌ StopIteration error in epoch {epoch}: {e}")
             print(f"  ❌ StopIteration error: {e}")
@@ -971,10 +1393,12 @@ class PrismTrainer:
                     self.dataset,
                     batch_size=self.batch_size,
                     shuffle=True,
-                    num_workers=1,  # Use single worker for recovery
-                    pin_memory=True,
+                    num_workers=0,  # Use no workers for recovery to avoid "Broken pipe"
+                    pin_memory=True if self.device.type == 'cuda' else False,
                     persistent_workers=False,  # Disable persistent workers
-                    drop_last=False
+                    drop_last=False,
+                    timeout=0,  # No timeout for single-threaded
+                    multiprocessing_context=None  # No multiprocessing
                 )
                 print(f"  ✅ Dataloader reinitialized successfully")
             except Exception as recovery_error:
@@ -1067,8 +1491,10 @@ class PrismTrainer:
         """Save model checkpoint using TrainingInterface"""
         print(f"💾 Saving checkpoint for epoch {epoch}...")
         
-        # Save TrainingInterface checkpoint
-        self.model.save_checkpoint(f'checkpoint_epoch_{epoch}.pt')
+        # Save TrainingInterface checkpoint with optimizer and scheduler states
+        self.model.save_checkpoint(f'checkpoint_epoch_{epoch}.pt', 
+                                  optimizer_state_dict=self.optimizer.state_dict(),
+                                  scheduler_state_dict=self.scheduler.state_dict())
         
         # Save additional training state
         training_state = {
@@ -1084,28 +1510,52 @@ class PrismTrainer:
             'timestamp': datetime.now().isoformat()
         }
         
-        checkpoint_path = self.output_dir / f'training_state_epoch_{epoch}.pt'
+        # Save epoch training state in checkpoints directory for consistency
+        checkpoint_dir = Path(self.model.checkpoint_dir)
+        checkpoint_path = checkpoint_dir / f'training_state_epoch_{epoch}.pt'
         torch.save(training_state, checkpoint_path)
         self.logger.info(f"Training state saved: {checkpoint_path}")
         
         # Save best model
         if not hasattr(self, 'best_val_loss') or val_loss < self.best_val_loss:
             self.best_val_loss = val_loss
-            best_model_path = self.output_dir / 'best_model.pt'
-            self.model.save_checkpoint('best_model.pt')
+            models_dir = Path(self.config['output']['training']['models_dir'])
+            models_dir.mkdir(parents=True, exist_ok=True)
+            best_model_path = models_dir / 'best_model.pt'
+            # Save the best model directly to the models directory (not through checkpoint_dir)
+            torch.save({
+                'model_state_dict': self.model.state_dict(),
+                'prism_network_state_dict': self.model.prism_network.state_dict(),
+                'current_epoch': self.model.current_epoch,
+                'current_batch': self.model.current_batch,
+                'best_loss': self.model.best_loss,
+                'training_history': self.model.training_history,
+                'current_selection': self.model.current_selection,
+                'current_selection_mask': self.model.current_selection_mask,
+                'training_config': {
+                    'num_sampling_points': self.model.num_sampling_points,
+                    'subcarrier_sampling_ratio': self.model.subcarrier_sampling_ratio,
+                    'scene_bounds': (self.model.scene_min.tolist(), self.model.scene_max.tolist())
+                }
+            }, str(best_model_path))
             torch.save(training_state, str(best_model_path).replace('.pt', '_state.pt'))
             self.logger.info(f"Best model saved: {best_model_path}")
             print(f"🏆 New best model saved! (Val Loss: {val_loss:.6f})")
         
-        # Save latest checkpoint for resuming
-        latest_checkpoint_path = self.output_dir / 'latest_checkpoint.pt'
-        self.model.save_checkpoint('latest_checkpoint.pt')
+        # Save latest checkpoint for resuming in checkpoint directory
+        checkpoint_dir = Path(self.model.checkpoint_dir)
+        latest_checkpoint_path = checkpoint_dir / 'latest_checkpoint.pt'
+        self.model.save_checkpoint('latest_checkpoint.pt',
+                                  optimizer_state_dict=self.optimizer.state_dict(),
+                                  scheduler_state_dict=self.scheduler.state_dict())
         torch.save(training_state, str(latest_checkpoint_path).replace('.pt', '_state.pt'))
         self.logger.info(f"Latest checkpoint saved: {latest_checkpoint_path}")
         
-        # Save emergency checkpoint every epoch for better recovery
-        emergency_checkpoint_path = self.output_dir / 'emergency_checkpoint.pt'
-        self.model.save_checkpoint('emergency_checkpoint.pt')
+        # Save emergency checkpoint every epoch for better recovery in checkpoint directory
+        emergency_checkpoint_path = checkpoint_dir / 'emergency_checkpoint.pt'
+        self.model.save_checkpoint('emergency_checkpoint.pt',
+                                  optimizer_state_dict=self.optimizer.state_dict(),
+                                  scheduler_state_dict=self.scheduler.state_dict())
         torch.save(training_state, str(emergency_checkpoint_path).replace('.pt', '_state.pt'))
         
         print(f"✅ Checkpoint saved: Epoch {epoch}, Loss: {train_loss:.6f}, Val: {val_loss:.6f}")
@@ -1115,15 +1565,24 @@ class PrismTrainer:
     
     def _save_batch_checkpoint(self, epoch: int, batch_idx: int, batch_loss: float):
         """Save checkpoint after completing a batch"""
+        self.logger.info(f"🔧 _save_batch_checkpoint called: epoch={epoch}, batch_idx={batch_idx}, loss={batch_loss}")
+        print(f"🔧 _save_batch_checkpoint called: epoch={epoch}, batch_idx={batch_idx}, loss={batch_loss}")
         try:
             if not self.enable_batch_checkpoints:
+                self.logger.warning(f"❌ Batch checkpoints disabled! enable_batch_checkpoints={self.enable_batch_checkpoints}")
+                print(f"❌ Batch checkpoints disabled! enable_batch_checkpoints={self.enable_batch_checkpoints}")
                 return
                 
-            # Save TrainingInterface batch checkpoint
-            checkpoint_name = f'checkpoint_epoch_{epoch}_batch_{batch_idx}.pt'
-            self.model.save_checkpoint(checkpoint_name)
+            # Get checkpoint directory from model (configured directory)
+            checkpoint_dir = Path(self.model.checkpoint_dir)
             
-            # Save batch training state
+            # Save TrainingInterface batch checkpoint with optimizer and scheduler states
+            checkpoint_name = f'checkpoint_epoch_{epoch}_batch_{batch_idx}.pt'
+            self.model.save_checkpoint(checkpoint_name,
+                                      optimizer_state_dict=self.optimizer.state_dict(),
+                                      scheduler_state_dict=self.scheduler.state_dict())
+            
+            # Save batch training state to the same checkpoint directory
             batch_state = {
                 'epoch': epoch,
                 'batch_idx': batch_idx,
@@ -1133,12 +1592,14 @@ class PrismTrainer:
                 'batch_checkpoint': True
             }
             
-            batch_state_path = self.output_dir / f'training_state_epoch_{epoch}_batch_{batch_idx}.pt'
+            batch_state_path = checkpoint_dir / f'training_state_epoch_{epoch}_batch_{batch_idx}.pt'
             torch.save(batch_state, batch_state_path)
             
-            # Update latest batch checkpoint
-            latest_batch_path = self.output_dir / 'latest_batch_checkpoint.pt'
-            self.model.save_checkpoint('latest_batch_checkpoint.pt')
+            # Update latest batch checkpoint in checkpoint directory
+            latest_batch_path = checkpoint_dir / 'latest_batch_checkpoint.pt'
+            self.model.save_checkpoint('latest_batch_checkpoint.pt',
+                                      optimizer_state_dict=self.optimizer.state_dict(),
+                                      scheduler_state_dict=self.scheduler.state_dict())
             torch.save(batch_state, str(latest_batch_path).replace('.pt', '_state.pt'))
             
             self.logger.info(f"Batch checkpoint saved: Epoch {epoch}, Batch {batch_idx}, Loss: {batch_loss:.6f}")
@@ -1151,7 +1612,9 @@ class PrismTrainer:
         """Save emergency checkpoint for quick recovery"""
         try:
             # Save TrainingInterface emergency checkpoint
-            self.model.save_checkpoint('emergency_checkpoint.pt')
+            self.model.save_checkpoint('emergency_checkpoint.pt',
+                                      optimizer_state_dict=self.optimizer.state_dict(),
+                                      scheduler_state_dict=self.scheduler.state_dict())
             
             # Save minimal training state for emergency recovery
             emergency_state = {
@@ -1162,7 +1625,8 @@ class PrismTrainer:
                 'emergency': True
             }
             
-            emergency_path = self.output_dir / 'emergency_checkpoint_state.pt'
+            checkpoint_dir = Path(self.model.checkpoint_dir)
+            emergency_path = checkpoint_dir / 'emergency_checkpoint_state.pt'
             torch.save(emergency_state, emergency_path)
             
         except Exception as e:
@@ -1172,12 +1636,13 @@ class PrismTrainer:
         """Automatically detect the best checkpoint to resume from"""
         print("🔍 Auto-detecting checkpoints...")
         
-        # Priority order for checkpoint detection
+        # Priority order for checkpoint detection - use checkpoint directory
+        checkpoint_dir = Path(self.config['output']['training']['checkpoint_dir'])
         checkpoint_candidates = [
-            self.output_dir / 'latest_batch_checkpoint.pt',  # Most recent batch
-            self.output_dir / 'emergency_checkpoint.pt',     # Emergency checkpoint
-            self.output_dir / 'latest_checkpoint.pt',        # Latest epoch
-            self.output_dir / 'best_model.pt'                # Best performance
+            checkpoint_dir / 'latest_batch_checkpoint.pt',  # Most recent batch
+            checkpoint_dir / 'emergency_checkpoint.pt',     # Emergency checkpoint
+            checkpoint_dir / 'latest_checkpoint.pt',        # Latest epoch
+            Path(self.config['output']['training']['models_dir']) / 'best_model.pt'  # Best performance
         ]
         
         for checkpoint_path in checkpoint_candidates:
@@ -1186,7 +1651,7 @@ class PrismTrainer:
                 return str(checkpoint_path)
         
         # Check for batch-specific checkpoints
-        checkpoint_dir = self.output_dir / 'checkpoints'
+        checkpoint_dir = Path(self.config['output']['training']['checkpoint_dir'])
         if checkpoint_dir.exists():
             # First check for batch checkpoints (most recent)
             batch_checkpoints = list(checkpoint_dir.glob('checkpoint_epoch_*_batch_*.pt'))
@@ -1237,8 +1702,8 @@ class PrismTrainer:
                 checkpoint.unlink()
                 self.logger.info(f"Removed old batch checkpoint: {checkpoint}")
         
-        # Clean up epoch training state files
-        epoch_training_states = list(self.output_dir.glob('training_state_epoch_*.pt'))
+        # Clean up epoch training state files in checkpoint directory
+        epoch_training_states = list(checkpoint_dir.glob('training_state_epoch_*.pt'))
         # Filter out batch training states
         epoch_only_states = [ts for ts in epoch_training_states if '_batch_' not in ts.name]
         if len(epoch_only_states) > 5:
@@ -1247,8 +1712,8 @@ class PrismTrainer:
                 state.unlink()
                 self.logger.info(f"Removed old epoch training state: {state}")
         
-        # Clean up batch training state files (keep last 20)
-        batch_training_states = list(self.output_dir.glob('training_state_epoch_*_batch_*.pt'))
+        # Clean up batch training state files in checkpoint directory (keep last 20)
+        batch_training_states = list(checkpoint_dir.glob('training_state_epoch_*_batch_*.pt'))
         if len(batch_training_states) > 20:
             batch_training_states.sort(key=lambda x: (
                 int(x.stem.split('_')[3]),  # epoch number
@@ -1271,18 +1736,32 @@ class PrismTrainer:
             self.model.load_checkpoint(self.resume_from)
             self.logger.info("TrainingInterface checkpoint loaded successfully")
             
-            # Load training state if available
-            training_state_path = self.resume_from.replace('.pt', '_state.pt')
-            if os.path.exists(training_state_path):
-                training_state = torch.load(training_state_path, map_location=self.device)
+            # Try to load optimizer and scheduler states from main checkpoint first
+            try:
+                checkpoint = torch.load(self.resume_from, map_location=self.device)
+                if 'optimizer_state_dict' in checkpoint:
+                    self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                    self.logger.info("Optimizer state loaded from main checkpoint")
+                if 'scheduler_state_dict' in checkpoint:
+                    self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                    self.logger.info("Scheduler state loaded from main checkpoint")
+            except Exception as e:
+                self.logger.warning(f"Could not load optimizer/scheduler from main checkpoint: {e}")
                 
-                # Load optimizer state
-                self.optimizer.load_state_dict(training_state['optimizer_state_dict'])
-                self.logger.info("Optimizer state loaded successfully")
-                
-                # Load scheduler state
-                self.scheduler.load_state_dict(training_state['scheduler_state_dict'])
-                self.logger.info("Scheduler state loaded successfully")
+                # Fallback: Load training state from separate file if available
+                training_state_path = self.resume_from.replace('.pt', '_state.pt')
+                if os.path.exists(training_state_path):
+                    training_state = torch.load(training_state_path, map_location=self.device)
+                    
+                    # Load optimizer state
+                    if 'optimizer_state_dict' in training_state:
+                        self.optimizer.load_state_dict(training_state['optimizer_state_dict'])
+                        self.logger.info("Optimizer state loaded from separate state file")
+                    
+                    # Load scheduler state
+                    if 'scheduler_state_dict' in training_state:
+                        self.scheduler.load_state_dict(training_state['scheduler_state_dict'])
+                        self.logger.info("Scheduler state loaded from separate state file")
                 
                 # Load training state
                 self.start_epoch = training_state['epoch'] + 1
@@ -1393,7 +1872,11 @@ class PrismTrainer:
             val_losses.append(val_loss)
             
             # Update learning rate
-            self.scheduler.step(val_loss)
+            if self.scheduler is not None:
+                if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                    self.scheduler.step(val_loss)
+                else:
+                    self.scheduler.step()
             current_lr = self.optimizer.param_groups[0]['lr']
             
             # Calculate timing
@@ -1426,6 +1909,21 @@ class PrismTrainer:
                 self._save_emergency_checkpoint(epoch, train_loss, val_loss)
             
             # Early stopping check
+            if self.early_stopping_enabled:
+                if val_loss < self.best_val_loss - self.early_stopping_min_delta:
+                    self.best_val_loss = val_loss
+                    self.early_stopping_counter = 0
+                    print(f"🏆 New best validation loss: {val_loss:.6f}")
+                else:
+                    self.early_stopping_counter += 1
+                    print(f"⏳ Early stopping counter: {self.early_stopping_counter}/{self.early_stopping_patience}")
+                    
+                if self.early_stopping_counter >= self.early_stopping_patience:
+                    print(f"🛑 Early stopping triggered after {self.early_stopping_patience} epochs without improvement")
+                    self.logger.info(f"Early stopping triggered: no improvement for {self.early_stopping_patience} epochs")
+                    break
+            
+            # Learning rate stopping check
             if current_lr < 1e-7:
                 print(f"⚠️  Learning rate too low ({current_lr:.2e}), stopping training")
                 self.logger.info("Learning rate too low, stopping training")
@@ -1502,8 +2000,9 @@ class PrismTrainer:
         
         # Show output files
         print(f"\n📁 Output Files:")
-        print(f"   📊 TensorBoard logs: {self.output_dir}/tensorboard/")
-        print(f"   💾 Checkpoints: {self.output_dir}/checkpoints/")
+        print(f"   📊 TensorBoard logs: {self.config['output']['training']['tensorboard_dir']}/")
+        print(f"   💾 Checkpoints: {self.config['output']['training']['checkpoint_dir']}/")
+        print(f"   🏆 Best models: {self.config['output']['training']['models_dir']}/")
         print(f"   📈 Training plots: {self.output_dir}/")
         print(f"   📝 Training log: training.log")
         
@@ -1582,9 +2081,9 @@ class PrismTrainer:
         print("=" * 20)
         
         # Display TrainingInterface checkpoints
-        checkpoint_dir = Path(self.original_model.checkpoint_dir)
+        checkpoint_dir = Path(self.model.checkpoint_dir)
         if checkpoint_dir.exists():
-            print(f"TrainingInterface Checkpoints (in {self.original_model.checkpoint_dir}):")
+            print(f"TrainingInterface Checkpoints (in {self.model.checkpoint_dir}):")
             checkpoints = list(checkpoint_dir.glob('checkpoint_epoch_*.pt'))
             if checkpoints:
                 print(f"  - Latest: {checkpoints[-1]}")
@@ -1594,13 +2093,14 @@ class PrismTrainer:
         else:
             print(f"TrainingInterface Checkpoints directory not found: {self.model.checkpoint_dir}")
 
-        # Display emergency checkpoint
-        emergency_checkpoint_path = self.output_dir / 'emergency_checkpoint.pt'
+        # Display emergency checkpoint in checkpoint directory
+        checkpoint_dir = Path(self.model.checkpoint_dir)
+        emergency_checkpoint_path = checkpoint_dir / 'emergency_checkpoint.pt'
         if emergency_checkpoint_path.exists():
-            print(f"\nEmergency Checkpoint (in {self.output_dir}):")
+            print(f"\nEmergency Checkpoint (in {checkpoint_dir}):")
             print(f"  - Path: {emergency_checkpoint_path}")
         else:
-            print(f"\nEmergency Checkpoint (in {self.output_dir}):")
+            print(f"\nEmergency Checkpoint (in {checkpoint_dir}):")
             print("  - Not found.")
     
     def _display_batch_checkpoint_info(self):
@@ -1629,19 +2129,21 @@ class PrismTrainer:
             print(f"   ❌ Batch checkpoints: DISABLED")
         print(f"   💡 This allows recovery from mid-epoch failures")
 
-        # Display latest checkpoint
-        latest_checkpoint_path = self.output_dir / 'latest_checkpoint.pt'
+        # Display latest checkpoint in checkpoint directory
+        checkpoint_dir = Path(self.model.checkpoint_dir)
+        latest_checkpoint_path = checkpoint_dir / 'latest_checkpoint.pt'
         if latest_checkpoint_path.exists():
-            print(f"\nLatest Checkpoint (in {self.output_dir}):")
+            print(f"\nLatest Checkpoint (in {checkpoint_dir}):")
             print(f"  - Path: {latest_checkpoint_path}")
         else:
-            print(f"\nLatest Checkpoint (in {self.output_dir}):")
+            print(f"\nLatest Checkpoint (in {checkpoint_dir}):")
             print("  - Not found.")
 
         # Display best model
-        best_model_path = self.output_dir / 'best_model.pt'
+        models_dir = Path(self.config['output']['training']['models_dir'])
+        best_model_path = models_dir / 'best_model.pt'
         if best_model_path.exists():
-            print(f"\nBest Model (in {self.output_dir}):")
+            print(f"\nBest Model (in {models_dir}):")
             print(f"  - Path: {best_model_path}")
         else:
             print(f"\nBest Model (in {self.output_dir}):")
@@ -1663,17 +2165,16 @@ def main():
     parser = argparse.ArgumentParser(description='Train Prism Network using TrainingInterface')
     parser.add_argument('--config', type=str, default='configs/ofdm-5g-sionna.yml',
                        help='Path to configuration file')
-    parser.add_argument('--data', type=str, required=True,
-                       help='Path to training data HDF5 file')
-    parser.add_argument('--output', type=str, default='results/training',
-                       help='Output directory for results')
+
+
     parser.add_argument('--resume', type=str, default=None,
                        help='Path to checkpoint file to resume training from')
     
     args = parser.parse_args()
     
     # Create trainer and start training
-    trainer = PrismTrainer(args.config, args.data, args.output, args.resume)
+    # Create trainer and run training (data path and output directory from config)
+    trainer = PrismTrainer(args.config, None, None, args.resume)
     trainer.train()
 
 if __name__ == '__main__':
