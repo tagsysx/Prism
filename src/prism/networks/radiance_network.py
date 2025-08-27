@@ -112,39 +112,28 @@ class RadianceNetwork(nn.Module):
             ue_positions: IPE-encoded UE positions of shape (batch_size, ue_position_dim)
             view_directions: IPE-encoded viewing directions of shape (batch_size, view_direction_dim)
             features: 128D feature vectors from AttenuationNetwork of shape (batch_size, feature_dim)
-            antenna_embeddings: Antenna embeddings of shape (batch_size, antenna_embedding_dim)
-                               or (batch_size, num_antennas, antenna_embedding_dim)
+            antenna_embeddings: Antenna embeddings of shape (batch_size, num_antennas, antenna_embedding_dim)
+                               Note: In practice, num_antennas=1 (single BS antenna per ray tracing call)
             
         Returns:
             Radiation values of shape (batch_size, num_ue_antennas, num_subcarriers)
-            or (batch_size, num_ue_antennas, num_subcarriers, 2) for complex
+            Note: Single BS antenna processing - no multi-antenna dimension needed
         """
-        batch_size = ue_positions.shape[0]
+        batch_size, num_antennas = antenna_embeddings.shape[:2]
         
-        # Handle single vs multiple antennas
-        if antenna_embeddings.dim() == 2:
-            # Single antenna per batch element
-            # Concatenate inputs: [ue_pos, view_dir, features, antenna_embedding]
-            x = torch.cat([ue_positions, view_directions, features, antenna_embeddings], dim=-1)
-            
-            # Process through network
-            output = self._process_single_antenna(x)
-            
+        # Since we always process one BS antenna at a time, num_antennas should be 1
+        # Extract the single antenna embedding
+        if num_antennas == 1:
+            antenna_embedding_single = antenna_embeddings[:, 0, :]  # (batch_size, antenna_embedding_dim)
         else:
-            # Multiple antennas per batch element
-            num_antennas = antenna_embeddings.shape[1]
-            
-            # Expand other inputs to match antenna dimension
-            ue_pos_expanded = ue_positions.unsqueeze(1).expand(-1, num_antennas, -1)
-            view_dir_expanded = view_directions.unsqueeze(1).expand(-1, num_antennas, -1)
-            features_expanded = features.unsqueeze(1).expand(-1, num_antennas, -1)
-            
-            # Concatenate inputs: [ue_pos, view_dir, features, antenna_embedding]
-            # Shape: (batch_size, num_antennas, total_input_dim)
-            x = torch.cat([ue_pos_expanded, view_dir_expanded, features_expanded, antenna_embeddings], dim=-1)
-            
-            # Process through network
-            output = self._process_multiple_antennas(x)
+            # Fallback: take mean if multiple antennas (shouldn't happen in practice)
+            antenna_embedding_single = antenna_embeddings.mean(dim=1)  # (batch_size, antenna_embedding_dim)
+        
+        # Concatenate inputs: [ue_pos, view_dir, features, antenna_embedding]
+        x = torch.cat([ue_positions, view_directions, features, antenna_embedding_single], dim=-1)
+        
+        # Process through single antenna path
+        output = self._process_single_antenna(x)
         
         return output
     

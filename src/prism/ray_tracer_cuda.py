@@ -76,10 +76,13 @@ class CUDARayTracer(RayTracer):
             elevation_divisions=elevation_divisions,
             max_ray_length=max_ray_length,
             scene_bounds=scene_bounds,
+            device='cuda',  # CUDA ray tracer uses GPU
             prism_network=prism_network,
             signal_threshold=signal_threshold,
             enable_early_termination=enable_early_termination,
-            top_k_directions=top_k_directions
+            top_k_directions=top_k_directions,
+            uniform_samples=uniform_samples,
+            resampled_points=resampled_points
         )
         
         # Store CUDA-specific parameters
@@ -160,12 +163,12 @@ class CUDARayTracer(RayTracer):
                    base_station_pos: torch.Tensor,
                    ue_positions: List[torch.Tensor],
                    selected_subcarriers: Dict,
-                   antenna_embeddings: torch.Tensor) -> Dict:
+                   antenna_indices: torch.Tensor) -> Dict:
         """Main ray tracing method - delegates to PyTorch GPU implementation."""
         direction_vectors = self.generate_direction_vectors()
         return self.trace_rays_pytorch_gpu(
             base_station_pos, direction_vectors, ue_positions,
-            selected_subcarriers, antenna_embeddings
+            selected_subcarriers, antenna_indices
         )
     
     def trace_ray(self, 
@@ -182,7 +185,7 @@ class CUDARayTracer(RayTracer):
             direction: Direction indices (phi_idx, theta_idx)
             ue_positions: List of UE positions
             selected_subcarriers: Subcarrier information from training interface
-            antenna_embedding: Base station's antenna embedding parameter C
+            antenna_indices: Base station's antenna indices for embedding lookup
         
         Returns:
             Dictionary mapping (ue_pos, subcarrier) to received RF signal strength
@@ -221,7 +224,7 @@ class CUDARayTracer(RayTracer):
                               direction_vectors: torch.Tensor,
                               ue_positions: List[torch.Tensor],
                               selected_subcarriers: Dict,
-                              antenna_embeddings: torch.Tensor) -> Dict:
+                              antenna_indices: torch.Tensor) -> Dict:
         """
         BS-Centric Ray Tracing with Importance-Based Resampling (ENHANCED IMPLEMENTATION)
         
@@ -245,7 +248,7 @@ class CUDARayTracer(RayTracer):
             direction_vectors: Pre-computed A×B direction grid
             ue_positions: List of UE positions (RadianceNetwork inputs only)
             selected_subcarriers: Dictionary mapping UE to selected subcarriers
-            antenna_embeddings: Antenna embedding parameters
+            antenna_indices: Antenna indices for embedding lookup
         
         Returns:
             Dictionary mapping (ue_pos, subcarrier, direction) to complex signal strength
@@ -270,11 +273,16 @@ class CUDARayTracer(RayTracer):
             # Create mapping from UE position to subcarrier indices
             ue_to_subcarriers = {}
             for i, ue_pos in enumerate(ue_positions):
+                # Use exactly the same key creation logic as in _create_subcarrier_dict
                 ue_key = tuple(ue_pos.tolist())
+                
                 if ue_key in selected_subcarriers:
                     ue_to_subcarriers[i] = selected_subcarriers[ue_key]
+                    logger.debug(f"✅ Found subcarriers for UE {i}: {selected_subcarriers[ue_key]}")
                 else:
                     ue_to_subcarriers[i] = []
+                    logger.warning(f"⚠️  No subcarrier mapping found for UE {i} at position {ue_key}")
+                    logger.warning(f"   This indicates a data flow inconsistency between training interface and ray tracer!")
             
             # BS-CENTRIC RAY TRACING: Process rays from BS outward in all directions
             num_directions = direction_vectors.shape[0]
@@ -297,14 +305,14 @@ class CUDARayTracer(RayTracer):
             if use_importance_sampling:
                 logger.debug("✨ IMPORTANCE-BASED RESAMPLING enabled")
             else:
-                logger.info("⚠️  Falling back to uniform sampling (no neural network available)")
+                logger.warning("⚠️  Falling back to uniform sampling (no neural network available)")
             
             if use_importance_sampling:
                 # VECTORIZED IMPORTANCE SAMPLING IMPLEMENTATION
                 logger.debug("🚀 Using VECTORIZED importance sampling (maintains GPU acceleration)")
                 all_signal_strengths = self._vectorized_importance_sampling(
                     base_station_pos, direction_vectors, ue_positions_tensor,
-                    ue_to_subcarriers, subcarrier_list, antenna_embeddings,
+                    ue_to_subcarriers, subcarrier_list, antenna_indices,
                     all_signal_strengths
                 )
             else:
@@ -336,12 +344,12 @@ class CUDARayTracer(RayTracer):
         pytorch_time = time.time() - start_time
         rays_per_second = ray_count / pytorch_time if pytorch_time > 0 else 0
         
-        logger.debug(f"✅ BS-CENTRIC Ray Tracing with IMPORTANCE RESAMPLING completed in {pytorch_time:.4f}s")
-        logger.debug(f"🎯 Processed {ray_count:,} rays at {rays_per_second:,.0f} rays/second")
+        logger.info(f"✅ BS-CENTRIC Ray Tracing completed in {pytorch_time:.4f}s")
+        logger.info(f"🎯 Processed {ray_count:,} rays at {rays_per_second:,.0f} rays/second")
         logger.debug(f"🚀 Performance: {ray_count/pytorch_time/1000:.1f}k rays/second" if pytorch_time > 0 else "🚀 Performance: ∞ rays/second")
         logger.debug(f"📡 Complex signals preserved with importance sampling correction")
         if use_importance_sampling:
-            logger.debug(f"✨ Importance resampling: {self.uniform_samples} → {self.resampled_points} samples per ray")
+            logger.info(f"✨ Importance resampling: {self.uniform_samples} → {self.resampled_points} samples per ray")
         
         return results
     
@@ -361,9 +369,11 @@ class CUDARayTracer(RayTracer):
         
         # Extract real part β_k = Re(ρ(P_v(t_k))) for importance weight calculation
         beta_k = torch.real(attenuation_factors)  # (num_samples,)
+        logger.debug(f"🔍 beta_k shape: {beta_k.shape}, min: {beta_k.min()}, max: {beta_k.max()}")
         
         # Ensure non-negative values for physical validity
         beta_k = torch.clamp(beta_k, min=0.0)
+        logger.debug(f"🔍 beta_k after clamp: min: {beta_k.min()}, max: {beta_k.max()}")
         
         # CUDA-optimized vectorized computation
         # w_k = (1 - e^(-β_k * Δt)) * exp(-Σ_{j<k} β_j * Δt)
@@ -386,11 +396,15 @@ class CUDARayTracer(RayTracer):
         
         # Normalize weights to sum to 1 for proper probability distribution
         total_weight = torch.sum(importance_weights)
+        logger.debug(f"🔍 total_weight: {total_weight}")
         if total_weight > 1e-8:
             importance_weights = importance_weights / total_weight
         else:
             # Fallback to uniform weights if all weights are near zero
             importance_weights = torch.ones_like(importance_weights) / len(importance_weights)
+        
+        logger.debug(f"🔍 final importance_weights shape: {importance_weights.shape}, sum: {importance_weights.sum()}")
+        logger.debug(f"🔍 final importance_weights min: {importance_weights.min()}, max: {importance_weights.max()}")
         
         return importance_weights
     
@@ -417,6 +431,7 @@ class CUDARayTracer(RayTracer):
         
         # Use CUDA-optimized multinomial sampling
         # Higher weight positions have higher probability of being selected
+        logger.debug(f"🔍 Multinomial sampling: importance_weights shape = {importance_weights.shape}")
         selected_indices = torch.multinomial(importance_weights, num_samples, replacement=True)
         
         # Get resampled positions using advanced indexing (CUDA-optimized)
@@ -456,7 +471,7 @@ class CUDARayTracer(RayTracer):
                                      uniform_view_dirs: torch.Tensor,
                                      ue_pos: torch.Tensor,
                                      base_station_pos: torch.Tensor,
-                                     antenna_embeddings: torch.Tensor,
+                                     antenna_indices: torch.Tensor,
                                      subcarrier_list: List[int]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Perform importance-based resampling using base class logic.
@@ -466,25 +481,45 @@ class CUDARayTracer(RayTracer):
             uniform_view_dirs: View directions for uniform samples (num_uniform, 3)
             ue_pos: UE position for this computation
             base_station_pos: Base station position
-            antenna_embeddings: Antenna embedding parameters
+            antenna_indices: Antenna indices for embedding lookup
             subcarrier_list: List of all subcarrier indices
             
         Returns:
             Tuple of (resampled_positions, resampled_view_dirs, importance_weights)
         """
         try:
+            logger.debug(f"🔍 _perform_importance_resampling called")
+            logger.debug(f"   - uniform_positions shape: {uniform_positions.shape}")
+            logger.debug(f"   - uniform_view_dirs shape: {uniform_view_dirs.shape}")
+            logger.debug(f"   - ue_pos shape: {ue_pos.shape}")
+            logger.debug(f"   - base_station_pos shape: {base_station_pos.shape}")
+            logger.debug(f"   - antenna_indices shape: {antenna_indices.shape}")
+            
             # Get uniform attenuation factors for importance weight computation
             if self.prism_network is not None:
+                logger.info(f"🧠 Calling PRISM network for importance resampling...")
+                logger.debug(f"   - uniform_positions shape: {uniform_positions.shape}")
+                logger.debug(f"   - ue_pos shape: {ue_pos.shape}")
+                logger.debug(f"   - uniform_view_dirs shape: {uniform_view_dirs.shape}")
+                logger.debug(f"   - antenna_indices shape: {antenna_indices.shape}")
+                
                 with torch.no_grad():
                     uniform_network_outputs = self.prism_network(
                         sampled_positions=uniform_positions.unsqueeze(0),
                         ue_positions=ue_pos.unsqueeze(0),
                         view_directions=uniform_view_dirs.mean(dim=0, keepdim=True),
-                        antenna_indices=antenna_embeddings.unsqueeze(0)
+                        antenna_indices=antenna_indices.unsqueeze(0)
                     )
                 
+                logger.debug(f"🧠 Network outputs keys: {list(uniform_network_outputs.keys())}")
+                for key, value in uniform_network_outputs.items():
+                    logger.debug(f"   - {key} shape: {value.shape}")
+                
                 # Extract attenuation factors for the first subcarrier (for importance calculation)
-                uniform_attenuation = uniform_network_outputs['attenuation_factors'][0, :, 0]  # (num_uniform,)
+                attenuation_full = uniform_network_outputs['attenuation_factors']
+                logger.debug(f"🔍 attenuation_full shape: {attenuation_full.shape}")
+                uniform_attenuation = attenuation_full[0, :, 0]  # (num_uniform,)
+                logger.debug(f"🔍 uniform_attenuation shape: {uniform_attenuation.shape}")
             else:
                 # Network not available - log error and raise exception
                 error_msg = "PRISM network not available for importance resampling. Cannot compute attenuation factors."
@@ -533,23 +568,127 @@ class CUDARayTracer(RayTracer):
         Returns:
             Integrated complex signal strengths for UE subcarriers (len(ue_subcarriers),)
         """
-        # Get indices for UE subcarriers
-        selected_subcarrier_indices = [subcarrier_list.index(sc) for sc in ue_subcarriers if sc in subcarrier_list]
-        if not selected_subcarrier_indices:
+        logger.debug(f"🔍 CUDA DEBUG: _integrate_with_importance_sampling ENTRY")
+        logger.debug(f"🔍 CUDA DEBUG: radiation_factors shape: {radiation_factors.shape}")
+        logger.debug(f"🔍 CUDA DEBUG: ue_subcarriers: {ue_subcarriers}")
+        logger.debug(f"🔍 CUDA DEBUG: sampled_positions shape: {sampled_positions.shape}")
+        logger.debug(f"🔍 CUDA DEBUG: attenuation_factors shape: {attenuation_factors.shape}")
+        logger.debug(f"🔍 CUDA DEBUG: subcarrier_list: {subcarrier_list}")
+        # Neural network outputs radiation_factors for ALL subcarriers (408 total)
+        # We need to select the specific subcarriers requested for this UE
+        logger.debug(f"🔍 CUDA DEBUG: ue_subcarriers (requested): {ue_subcarriers}")
+        logger.debug(f"🔍 CUDA DEBUG: radiation_factors shape: {radiation_factors.shape}")
+        logger.debug(f"🔍 CUDA DEBUG: radiation_factors device: {radiation_factors.device}")
+        logger.debug(f"🔍 CUDA DEBUG: radiation_factors dtype: {radiation_factors.dtype}")
+        
+        # Validate that all ue_subcarriers are within bounds of the full subcarrier range
+        max_subcarrier_idx = radiation_factors.shape[-1] - 1
+        logger.debug(f"🔍 CUDA DEBUG: max_subcarrier_idx: {max_subcarrier_idx}")
+        
+        valid_ue_subcarriers = []
+        for sc in ue_subcarriers:
+            logger.debug(f"🔍 CUDA DEBUG: checking subcarrier {sc} <= {max_subcarrier_idx}")
+            if 0 <= sc <= max_subcarrier_idx:
+                valid_ue_subcarriers.append(sc)
+                logger.debug(f"✅ CUDA DEBUG: subcarrier {sc} is valid")
+            else:
+                logger.error(f"❌ CUDA DEBUG: Invalid subcarrier index {sc} (max: {max_subcarrier_idx}), skipping")
+        
+        if not valid_ue_subcarriers:
+            logger.error(f"❌ No valid subcarrier indices found! All indices out of bounds.")
+            logger.error(f"   ue_subcarriers: {ue_subcarriers}")
+            logger.error(f"   radiation_factors shape: {radiation_factors.shape}")
             return torch.zeros(len(ue_subcarriers), dtype=torch.complex64, device=sampled_positions.device)
         
-        # Extract attenuation and radiation for selected subcarriers
-        ue_attenuation = attenuation_factors[:, selected_subcarrier_indices]  # (num_samples, len(ue_subcarriers))
-        ue_radiation = radiation_factors[selected_subcarrier_indices]  # (len(ue_subcarriers),)
+        logger.debug(f"🔍 Using {len(valid_ue_subcarriers)} valid subcarriers: {valid_ue_subcarriers}")
+        
+        # Check if indices are reasonable before indexing
+        if valid_ue_subcarriers and max(valid_ue_subcarriers) >= radiation_factors.shape[-1]:
+            logger.error(f"❌ Index out of bounds: max index {max(valid_ue_subcarriers)} >= shape {radiation_factors.shape[-1]}")
+            return torch.zeros(len(ue_subcarriers), dtype=torch.complex64, device=sampled_positions.device)
+        
+        # Extract radiation for the specific UE subcarriers (direct indexing into full 408 subcarrier range)
+        logger.debug(f"🔍 CUDA DEBUG: About to index radiation_factors")
+        logger.debug(f"🔍 CUDA DEBUG: valid_ue_subcarriers: {valid_ue_subcarriers}")
+        if valid_ue_subcarriers:
+            logger.debug(f"🔍 CUDA DEBUG: valid_ue_subcarriers range: {min(valid_ue_subcarriers)} to {max(valid_ue_subcarriers)}")
+        
+        logger.debug(f"🔍 CUDA DEBUG: radiation_factors shape: {radiation_factors.shape}")
+        logger.debug(f"🔍 CUDA DEBUG: valid_ue_subcarriers type: {type(valid_ue_subcarriers)}")
+        
+        try:
+            ue_radiation = radiation_factors[:, valid_ue_subcarriers]  # (num_ue_antennas, len(valid_ue_subcarriers))
+            logger.debug(f"✅ CUDA DEBUG: radiation_factors indexing successful")
+            logger.debug(f"✅ CUDA DEBUG: ue_radiation shape: {ue_radiation.shape}")
+        except Exception as e:
+            logger.error(f"❌ CUDA DEBUG: radiation_factors indexing failed: {e}")
+            logger.error(f"   radiation_factors shape: {radiation_factors.shape}")
+            logger.error(f"   valid_ue_subcarriers: {valid_ue_subcarriers}")
+            raise
+        
+        # For attenuation, we need to map UE subcarriers to the subcarrier_list indices
+        # subcarrier_list contains only the selected subcarriers from all UEs
+        selected_subcarrier_indices = []
+        for sc in valid_ue_subcarriers:
+            if sc in subcarrier_list:
+                selected_subcarrier_indices.append(subcarrier_list.index(sc))
+            else:
+                logger.warning(f"⚠️  UE subcarrier {sc} not found in subcarrier_list {subcarrier_list}")
+        
+        if not selected_subcarrier_indices:
+            logger.warning(f"⚠️  No valid subcarrier indices found in subcarrier_list!")
+            return torch.zeros(len(ue_subcarriers), dtype=torch.complex64, device=sampled_positions.device)
+        
+        # Extract attenuation for selected subcarriers
+        logger.debug(f"🔍 CUDA DEBUG: About to index attenuation_factors")
+        logger.debug(f"🔍 CUDA DEBUG: selected_subcarrier_indices: {selected_subcarrier_indices}")
+        if selected_subcarrier_indices:
+            logger.debug(f"🔍 CUDA DEBUG: selected_subcarrier_indices range: {min(selected_subcarrier_indices)} to {max(selected_subcarrier_indices)}")
+        
+        logger.debug(f"🔍 CUDA DEBUG: attenuation_factors shape: {attenuation_factors.shape}")
+        logger.debug(f"🔍 CUDA DEBUG: selected_subcarrier_indices type: {type(selected_subcarrier_indices)}")
+        
+        try:
+            # Correct indexing: select subcarriers from the last dimension
+            ue_attenuation_full = attenuation_factors[:, :, selected_subcarrier_indices]  # (num_samples, num_ue_antennas, len(selected_subcarriers))
+            # Take mean across UE antennas for integration
+            ue_attenuation = ue_attenuation_full.mean(dim=1)  # (num_samples, len(selected_subcarriers))
+            logger.debug(f"✅ CUDA DEBUG: attenuation_factors indexing successful")
+            logger.debug(f"✅ CUDA DEBUG: ue_attenuation shape after correction: {ue_attenuation.shape}")
+        except Exception as e:
+            logger.error(f"❌ CUDA DEBUG: attenuation_factors indexing failed: {e}")
+            logger.error(f"   attenuation_factors shape: {attenuation_factors.shape}")
+            logger.error(f"   selected_subcarrier_indices: {selected_subcarrier_indices}")
+            raise
+
+        logger.debug(f"🔍 ue_radiation shape: {ue_radiation.shape}")
+        logger.debug(f"🔍 ue_radiation device: {ue_radiation.device}")
+        logger.debug(f"🔍 ue_radiation dtype: {ue_radiation.dtype}")
         
         # Calculate dynamic path lengths using CUDA-optimized method
         delta_t = self._cuda_compute_dynamic_path_lengths(sampled_positions)
         
         # Apply discrete radiance field integration
-        K, N_ue = ue_attenuation.shape
+        logger.debug(f"🔍 CUDA DEBUG: About to unpack ue_attenuation.shape")
+        logger.debug(f"🔍 CUDA DEBUG: ue_attenuation.shape: {ue_attenuation.shape}")
+        logger.debug(f"🔍 CUDA DEBUG: ue_attenuation.shape length: {len(ue_attenuation.shape)}")
+        
+        if len(ue_attenuation.shape) == 2:
+            K, N_ue = ue_attenuation.shape
+        else:
+            logger.error(f"❌ CUDA DEBUG: Unexpected ue_attenuation shape: {ue_attenuation.shape}")
+            logger.error(f"   Expected 2D tensor, got {len(ue_attenuation.shape)}D tensor")
+            raise ValueError(f"ue_attenuation has unexpected shape: {ue_attenuation.shape}")
+        logger.debug(f"🔬 Starting discrete radiance field integration:")
+        logger.debug(f"   - K (num_samples): {K}")
+        logger.debug(f"   - N_ue (num_ue_subcarriers): {N_ue}")
+        logger.debug(f"   - ue_attenuation shape: {ue_attenuation.shape}")
+        logger.debug(f"   - ue_radiation shape: {ue_radiation.shape}")
+        logger.debug(f"   - delta_t shape: {delta_t.shape}")
         
         # Step 1: Attenuation deltas Δρ = ρ ⊙ Δt
         attenuation_deltas = ue_attenuation * delta_t.unsqueeze(1)  # (K, N_ue)
+        logger.debug(f"🔬 Step 1 - Attenuation deltas computed: {attenuation_deltas.shape}")
         
         # Step 2: Cumulative attenuation
         zero_pad = torch.zeros(1, N_ue, dtype=attenuation_deltas.dtype, device=attenuation_deltas.device)
@@ -563,7 +702,21 @@ class CUDARayTracer(RayTracer):
         local_absorption = 1.0 - torch.exp(-attenuation_deltas)  # (K, N_ue)
         
         # Step 5: Broadcast radiation
-        radiation_expanded = ue_radiation.unsqueeze(0).expand(K, -1)  # (K, N_ue)
+        # Unified processing: ue_radiation now has shape (num_ue_antennas, N_ue)
+        # Take mean across UE antennas for integration (could be improved with proper antenna handling)
+        logger.debug(f"🔍 CUDA DEBUG: About to compute ue_radiation.mean(dim=0)")
+        logger.debug(f"🔍 CUDA DEBUG: ue_radiation shape before mean: {ue_radiation.shape}")
+        
+        try:
+            ue_radiation_mean = ue_radiation.mean(dim=0)  # (N_ue,)
+            logger.debug(f"✅ CUDA DEBUG: ue_radiation.mean successful")
+            logger.debug(f"✅ CUDA DEBUG: ue_radiation_mean shape: {ue_radiation_mean.shape}")
+        except Exception as e:
+            logger.error(f"❌ CUDA DEBUG: ue_radiation.mean failed: {e}")
+            logger.error(f"   ue_radiation shape: {ue_radiation.shape}")
+            raise
+        
+        radiation_expanded = ue_radiation_mean.unsqueeze(0).expand(K, -1)  # (K, N_ue)
         
         # Step 6: Vectorized computation 
         signal_contributions = attenuation_exp * local_absorption * radiation_expanded  # (K, N_ue)
@@ -589,6 +742,11 @@ class CUDARayTracer(RayTracer):
         # Step 8: Integration
         integrated_signals = torch.sum(signal_contributions, dim=0)  # (N_ue,)
         
+        logger.debug(f"🔬 Final integration results:")
+        logger.debug(f"   - integrated_signals shape: {integrated_signals.shape}")
+        logger.debug(f"   - integrated_signals abs max: {torch.abs(integrated_signals).max() if integrated_signals.numel() > 0 else 'N/A'}")
+        logger.debug(f"   - integrated_signals abs mean: {torch.abs(integrated_signals).mean() if integrated_signals.numel() > 0 else 'N/A'}")
+        
         return integrated_signals
     
     def _vectorized_importance_sampling(self,
@@ -597,7 +755,7 @@ class CUDARayTracer(RayTracer):
                                       ue_positions_tensor: torch.Tensor,
                                       ue_to_subcarriers: Dict,
                                       subcarrier_list: List[int],
-                                      antenna_embeddings: torch.Tensor,
+                                      antenna_indices: torch.Tensor,
                                       all_signal_strengths: torch.Tensor) -> torch.Tensor:
         """
         Vectorized importance sampling that maintains GPU acceleration.
@@ -624,11 +782,34 @@ class CUDARayTracer(RayTracer):
         uniform_view_dirs_all = uniform_view_dirs_all / (torch.norm(uniform_view_dirs_all, dim=-1, keepdim=True) + 1e-8)
         
         # Vectorized scene bounds check: (num_directions, uniform_samples)
-        scene_bounds = self.scene_size / 2.0
+        # Use actual scene bounds instead of symmetric cube
+        scene_min = self.scene_min.to(uniform_positions_all.device)
+        scene_max = self.scene_max.to(uniform_positions_all.device)
+        
+        # Check each dimension separately for scene bounds validation
+        x_valid = (uniform_positions_all[..., 0] >= scene_min[0]) & (uniform_positions_all[..., 0] <= scene_max[0])
+        y_valid = (uniform_positions_all[..., 1] >= scene_min[1]) & (uniform_positions_all[..., 1] <= scene_max[1])
+        z_valid = (uniform_positions_all[..., 2] >= scene_min[2]) & (uniform_positions_all[..., 2] <= scene_max[2])
+        
         valid_mask_all = torch.all(
-            (uniform_positions_all >= -scene_bounds) & (uniform_positions_all <= scene_bounds),
+            (uniform_positions_all >= scene_min) & (uniform_positions_all <= scene_max),
             dim=-1
         )
+        
+        total_samples = valid_mask_all.numel()
+        valid_samples = valid_mask_all.sum().item()
+        
+        if valid_samples == 0:
+            logger.warning("⚠️  CRITICAL: No valid sampling positions found within scene bounds!")
+            logger.warning(f"📊 Scene bounds: X=[{scene_min[0]:.1f}, {scene_max[0]:.1f}], Y=[{scene_min[1]:.1f}, {scene_max[1]:.1f}], Z=[{scene_min[2]:.1f}, {scene_max[2]:.1f}]")
+            logger.warning(f"📊 Sampling range: X=[{uniform_positions_all[..., 0].min():.1f}, {uniform_positions_all[..., 0].max():.1f}], Y=[{uniform_positions_all[..., 1].min():.1f}, {uniform_positions_all[..., 1].max():.1f}], Z=[{uniform_positions_all[..., 2].min():.1f}, {uniform_positions_all[..., 2].max():.1f}]")
+            logger.warning(f"💡 Solution: Expand scene_bounds in config file to include sampling range")
+            logger.warning(f"📈 Validity per dimension: X={x_valid.sum()}/{x_valid.numel()}, Y={y_valid.sum()}/{y_valid.numel()}, Z={z_valid.sum()}/{z_valid.numel()}")
+        elif valid_samples < total_samples * 0.5:
+            logger.warning(f"⚠️  WARNING: Only {valid_samples}/{total_samples} ({100*valid_samples/total_samples:.1f}%) sampling positions are within scene bounds")
+            logger.warning(f"📊 Consider expanding scene_bounds for better coverage")
+        else:
+            logger.debug(f"✅ Scene bounds check: {valid_samples}/{total_samples} ({100*valid_samples/total_samples:.1f}%) valid sampling positions")
         
         logger.debug(f"📊 Vectorized uniform sampling: {num_directions} × {self.uniform_samples} points")
         
@@ -656,7 +837,7 @@ class CUDARayTracer(RayTracer):
                 # Vectorized importance sampling for this UE across batch directions
                 batch_signals = self._batch_importance_sampling_for_ue(
                     batch_uniform_pos, batch_uniform_dirs, batch_valid_mask,
-                    ue_pos, base_station_pos, antenna_embeddings,
+                    ue_pos, base_station_pos, antenna_indices,
                     ue_subcarriers, subcarrier_list
                 )
                 
@@ -673,7 +854,7 @@ class CUDARayTracer(RayTracer):
                                         batch_valid_mask: torch.Tensor,
                                         ue_pos: torch.Tensor,
                                         base_station_pos: torch.Tensor,
-                                        antenna_embeddings: torch.Tensor,
+                                        antenna_indices: torch.Tensor,
                                         ue_subcarriers: List[int],
                                         subcarrier_list: List[int]) -> torch.Tensor:
         """
@@ -698,18 +879,25 @@ class CUDARayTracer(RayTracer):
             uniform_dirs = batch_uniform_dirs[dir_idx]  # (uniform_samples, 3)
             valid_mask = batch_valid_mask[dir_idx]  # (uniform_samples,)
             
+            logger.debug(f"🔍 Processing direction {dir_idx}/{batch_size}")
+            logger.debug(f"   - uniform_pos shape: {uniform_pos.shape}")
+            logger.debug(f"   - valid_mask sum: {valid_mask.sum()}/{len(valid_mask)}")
+            
             # Filter valid positions
             valid_pos = uniform_pos[valid_mask]  # (num_valid, 3)
             valid_dirs = uniform_dirs[valid_mask]  # (num_valid, 3)
             
+            logger.debug(f"   - valid_pos shape after filtering: {valid_pos.shape}")
+            
             if len(valid_pos) == 0:
+                logger.warning(f"⚠️  No valid sampling positions for direction {dir_idx}/{batch_size} - all {len(uniform_pos)} positions outside scene bounds")
                 continue
             
             # Apply importance sampling if we have enough points
             if len(valid_pos) > self.resampled_points:
                 final_pos, final_dirs, importance_weights = self._perform_importance_resampling(
                     valid_pos, valid_dirs, ue_pos, base_station_pos, 
-                    antenna_embeddings, subcarrier_list
+                    antenna_indices, subcarrier_list
                 )
             else:
                 final_pos = valid_pos
@@ -717,17 +905,55 @@ class CUDARayTracer(RayTracer):
                 importance_weights = None
             
             # Neural network call for this direction-UE combination
+            logger.debug(f"🔍 About to call PrismNetwork for direction {dir_idx}")
+            logger.debug(f"   - self.prism_network is None: {self.prism_network is None}")
+            logger.debug(f"   - final_pos shape: {final_pos.shape}")
+            logger.debug(f"   - ue_pos shape: {ue_pos.shape}")
+            logger.debug(f"   - final_dirs shape: {final_dirs.shape}")
+            logger.debug(f"   - antenna_indices shape: {antenna_indices.shape}")
+            
             if self.prism_network is not None:
-                with torch.no_grad():
-                    network_outputs = self.prism_network(
-                        sampled_positions=final_pos.unsqueeze(0),
-                        ue_positions=ue_pos.unsqueeze(0),
-                        view_directions=final_dirs.mean(dim=0, keepdim=True),
-                        antenna_indices=antenna_embeddings.unsqueeze(0)
-                    )
+                logger.debug(f"🔍 CUDA DEBUG: About to call PrismNetwork.forward()...")
+                logger.debug(f"🔍 CUDA DEBUG: final_pos shape: {final_pos.shape}")
+                logger.debug(f"🔍 CUDA DEBUG: ue_pos shape: {ue_pos.shape}")
+                logger.debug(f"🔍 CUDA DEBUG: final_dirs shape: {final_dirs.shape}")
+                logger.debug(f"🔍 CUDA DEBUG: antenna_indices shape: {antenna_indices.shape}")
                 
-                attenuation_factors = network_outputs['attenuation_factors'][0]
-                radiation_factors = network_outputs['radiation_factors'][0]
+                try:
+                    with torch.no_grad():
+                        network_outputs = self.prism_network(
+                            sampled_positions=final_pos.unsqueeze(0),
+                            ue_positions=ue_pos.unsqueeze(0),
+                            view_directions=final_dirs.mean(dim=0, keepdim=True),
+                            antenna_indices=antenna_indices.unsqueeze(0)
+                        )
+                    
+                    logger.debug(f"✅ CUDA DEBUG: PrismNetwork.forward() completed successfully!")
+                    logger.debug(f"✅ CUDA DEBUG: network_outputs keys: {list(network_outputs.keys())}")
+                    for key, value in network_outputs.items():
+                        logger.debug(f"✅ CUDA DEBUG: {key} shape: {value.shape}")
+                except Exception as e:
+                    logger.error(f"❌ CUDA DEBUG: PrismNetwork.forward() failed: {e}")
+                    logger.error(f"   final_pos shape: {final_pos.shape}")
+                    logger.error(f"   ue_pos shape: {ue_pos.shape}")
+                    logger.error(f"   final_dirs shape: {final_dirs.shape}")
+                    logger.error(f"   antenna_indices shape: {antenna_indices.shape}")
+                    raise
+                
+                # Handle network outputs with consistent shape processing
+                attenuation_factors = network_outputs['attenuation_factors']
+                radiation_factors = network_outputs['radiation_factors']
+                
+                # Ensure we have the right shapes after batch dimension removal
+                if attenuation_factors.dim() == 4:  # (batch_size, num_samples, num_ue_antennas, num_subcarriers)
+                    attenuation_factors = attenuation_factors[0]  # (num_samples, num_ue_antennas, num_subcarriers)
+                if radiation_factors.dim() == 3:  # (batch_size, num_ue_antennas, num_subcarriers)
+                    radiation_factors = radiation_factors[0]  # (num_ue_antennas, num_subcarriers)
+                
+                # Debug: Check neural network outputs
+                logger.debug(f"🔍 Neural network outputs for direction {dir_idx}:")
+                logger.debug(f"   - attenuation_factors shape: {attenuation_factors.shape}")
+                logger.debug(f"   - radiation_factors shape: {radiation_factors.shape}")
             else:
                 # Network is not available - log error and raise exception
                 error_msg = "PRISM network is not available. Cannot perform ray tracing without neural network."
@@ -857,12 +1083,12 @@ class CUDARayTracer(RayTracer):
                           base_station_pos: torch.Tensor,
                           ue_positions: List[torch.Tensor],
                           selected_subcarriers: Union[Dict, torch.Tensor, List[int]],
-                          antenna_embedding: torch.Tensor) -> Dict:
+                          antenna_indices: torch.Tensor) -> Dict:
         """
-        Accumulate RF signals using MLP-based direction sampling with antenna embedding C.
+        Accumulate RF signals using MLP-based direction sampling with antenna indices.
         
         This method implements the design document's MLP-based direction sampling:
-        1. Use AntennaNetwork to compute directional importance based on antenna embedding C
+        1. Use AntennaNetwork to compute directional importance based on antenna indices
         2. Select top-K directions based on importance
         3. Only trace rays for selected directions
         
@@ -874,7 +1100,7 @@ class CUDARayTracer(RayTracer):
                            - torch.Tensor: Tensor of subcarrier indices
                            - List[int]: List of subcarrier indices
                            Note: This MUST be provided by the calling code
-            antenna_embedding: Base station's antenna embedding parameter C
+            antenna_indices: Base station's antenna indices for embedding lookup
         
         Returns:
             Accumulated signal strength matrix for all virtual links
@@ -882,8 +1108,10 @@ class CUDARayTracer(RayTracer):
         accumulated_signals = {}
         
         # Debug logging with detailed information
-        logger.debug(f"🔄 accumulate_signals called with selected_subcarriers type: {type(selected_subcarriers)}")
-        logger.debug(f"📍 UE positions: {len(ue_positions)} positions")
+        logger.info(f"🔄 CUDA accumulate_signals called with selected_subcarriers type: {type(selected_subcarriers)}")
+        logger.info(f"📍 UE positions: {len(ue_positions)} positions")
+        logger.info(f"🎯 antenna_indices: {antenna_indices}")
+        logger.info(f"📡 base_station_pos: {base_station_pos}")
         
         # Log UE coordinates
         for i, ue_pos in enumerate(ue_positions):
@@ -943,10 +1171,13 @@ class CUDARayTracer(RayTracer):
                     # Ensure all input tensors are on the correct device
                     base_station_pos = base_station_pos.to(self.device)
                     ue_positions = [ue_pos.to(self.device) for ue_pos in ue_positions]
-                    antenna_embedding = antenna_embedding.to(self.device)
+                    antenna_indices = antenna_indices.to(self.device)
+                    
+                    # Convert antenna indices to embeddings using the antenna codebook
+                    antenna_embeddings = self.prism_network.antenna_codebook(antenna_indices)
                     
                     # Get directional importance matrix from AntennaNetwork (with mixed precision)
-                    directional_importance = self.prism_network.antenna_network(antenna_embedding.unsqueeze(0))
+                    directional_importance = self.prism_network.antenna_network(antenna_embeddings.unsqueeze(0))
                     
                     # Get top-K directions for efficient sampling (with mixed precision)
                     top_k_directions, top_k_importance = self.prism_network.antenna_network.get_top_k_directions(
@@ -954,7 +1185,18 @@ class CUDARayTracer(RayTracer):
                     )
                 
                 # Extract direction indices for the first batch element
-                selected_directions = top_k_directions[0]  # Shape: (k, 2)
+                # Handle different shapes: (batch_size, k, 2) or (batch_size, num_antennas, k, 2)
+                if len(top_k_directions.shape) == 4:
+                    # Shape: (batch_size, num_antennas, k, 2) -> take first batch and first antenna
+                    selected_directions = top_k_directions[0, 0]  # Shape: (k, 2)
+                else:
+                    # Shape: (batch_size, k, 2) -> take first batch
+                    selected_directions = top_k_directions[0]  # Shape: (k, 2)
+                
+                logger.debug(f"🔍 Direction selection debug:")
+                logger.debug(f"   - top_k_directions shape: {top_k_directions.shape}")
+                logger.debug(f"   - selected_directions shape: {selected_directions.shape}")
+                logger.debug(f"   - selected_directions sample: {selected_directions[:3] if selected_directions.numel() > 0 else 'empty'}")
                 
             # Convert tensor directions to list of tuples for parallel processing
             directions_list = []
@@ -975,7 +1217,7 @@ class CUDARayTracer(RayTracer):
             # Use CUDA-optimized processing for selected directions
             logger.debug(f"🚀 Using CUDA-optimized processing for {len(directions_list)} directions")
             accumulated_signals = self._accumulate_signals_cuda_optimized(
-                base_station_pos, ue_positions, selected_subcarriers, antenna_embedding, directions_list
+                base_station_pos, ue_positions, selected_subcarriers, antenna_indices, directions_list
             )
             
             return accumulated_signals
@@ -997,7 +1239,7 @@ class CUDARayTracer(RayTracer):
                                          base_station_pos: torch.Tensor,
                                          ue_positions: List[torch.Tensor],
                                          selected_subcarriers: Union[Dict, torch.Tensor, List[int]],
-                                         antenna_embedding: torch.Tensor,
+                                         antenna_indices: torch.Tensor,
                                          directions_list: List[Tuple[int, int]]) -> Dict:
         """
         CUDA-optimized signal accumulation for selected directions.
@@ -1019,7 +1261,7 @@ class CUDARayTracer(RayTracer):
             # Use the existing trace_ray method for each direction
             direction_results = self.trace_ray(
                 base_station_pos, direction, ue_positions, 
-                selected_subcarriers, antenna_embedding
+                selected_subcarriers, antenna_indices
             )
             
             # Accumulate results

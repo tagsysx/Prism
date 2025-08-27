@@ -233,6 +233,33 @@ class PrismTester:
         """Load trained Prism network model from TrainingInterface checkpoint"""
         logger.info(f"Loading TrainingInterface model from {self.model_path}")
         
+        # Check if model file exists
+        if not os.path.exists(self.model_path):
+            error_msg = f"Model file not found: {self.model_path}"
+            logger.error(f"❌ FATAL ERROR: {error_msg}")
+            logger.error("Please ensure the model has been trained and the path is correct.")
+            logger.error("Available model locations to check:")
+            logger.error("  - results/sionna/training/models/best_model.pt")
+            logger.error("  - results/sionna/training/checkpoints/")
+            raise FileNotFoundError(error_msg)
+        
+        # Check if model file is readable
+        if not os.access(self.model_path, os.R_OK):
+            error_msg = f"Model file is not readable: {self.model_path}"
+            logger.error(f"❌ FATAL ERROR: {error_msg}")
+            logger.error("Please check file permissions.")
+            raise PermissionError(error_msg)
+        
+        # Check file size (empty files are likely corrupted)
+        file_size = os.path.getsize(self.model_path)
+        if file_size == 0:
+            error_msg = f"Model file is empty (0 bytes): {self.model_path}"
+            logger.error(f"❌ FATAL ERROR: {error_msg}")
+            logger.error("The model file appears to be corrupted or incomplete.")
+            raise ValueError(error_msg)
+        
+        logger.info(f"Model file found: {self.model_path} ({file_size / 1024 / 1024:.1f} MB)")
+        
         try:
             # Check if this is a TrainingInterface checkpoint
             if ('checkpoint_epoch_' in str(self.model_path) or 'best_model.pt' in str(self.model_path) or 
@@ -240,11 +267,21 @@ class PrismTester:
                 # This is a TrainingInterface checkpoint
                 self._load_training_interface_checkpoint()
             else:
-                logger.error("❌ FATAL ERROR: Unsupported checkpoint format")
-                raise ValueError("Only TrainingInterface checkpoints are supported")
+                error_msg = "Unsupported checkpoint format. Only TrainingInterface checkpoints are supported."
+                logger.error(f"❌ FATAL ERROR: {error_msg}")
+                logger.error(f"Expected checkpoint file names: *best_model.pt, *checkpoint_epoch_*.pt, *latest_checkpoint.pt")
+                raise ValueError(error_msg)
                 
+        except (FileNotFoundError, PermissionError, ValueError) as e:
+            # Re-raise these specific errors without modification
+            raise
         except Exception as e:
             logger.error(f"❌ FATAL ERROR: Failed to load model: {e}")
+            logger.error(f"Model path: {self.model_path}")
+            logger.error(f"Error type: {type(e).__name__}")
+            if hasattr(e, '__traceback__'):
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
             raise
     
     def _load_training_interface_checkpoint(self):
@@ -322,26 +359,79 @@ class PrismTester:
                 checkpoint_dir=checkpoint_dir
             )
             
-            # Load checkpoint
-            checkpoint = torch.load(self.model_path, map_location=self.device)
-            self.model.load_state_dict(checkpoint['model_state_dict'])
+            # Load checkpoint with detailed error handling
+            try:
+                logger.info("Loading checkpoint file...")
+                checkpoint = torch.load(self.model_path, map_location=self.device)
+                logger.info("Checkpoint file loaded successfully")
+            except Exception as e:
+                error_msg = f"Failed to load checkpoint file: {e}"
+                logger.error(f"❌ FATAL ERROR: {error_msg}")
+                logger.error("This could indicate:")
+                logger.error("  - Corrupted checkpoint file")
+                logger.error("  - Incompatible PyTorch version")
+                logger.error("  - Insufficient memory")
+                logger.error("  - Invalid checkpoint format")
+                raise RuntimeError(error_msg) from e
+            
+            # Validate checkpoint structure
+            if 'model_state_dict' not in checkpoint:
+                error_msg = "Checkpoint file is missing 'model_state_dict'. This is not a valid TrainingInterface checkpoint."
+                logger.error(f"❌ FATAL ERROR: {error_msg}")
+                logger.error(f"Available keys in checkpoint: {list(checkpoint.keys())}")
+                raise ValueError(error_msg)
+            
+            # Load model state with error handling
+            try:
+                logger.info("Loading model state dictionary...")
+                self.model.load_state_dict(checkpoint['model_state_dict'])
+                logger.info("Model state dictionary loaded successfully")
+            except Exception as e:
+                error_msg = f"Failed to load model state dictionary: {e}"
+                logger.error(f"❌ FATAL ERROR: {error_msg}")
+                logger.error("This could indicate:")
+                logger.error("  - Model architecture mismatch")
+                logger.error("  - Incompatible checkpoint version")
+                logger.error("  - Missing or extra model parameters")
+                raise RuntimeError(error_msg) from e
+            
             self.checkpoint_info = checkpoint.get('checkpoint_info', {})
             
-            # Set device for model and ray tracer
-            self.model.to(self.device)
-            self.ray_tracer.device = self.device
-            logger.info(f"Set ray tracer device to: {self.device}")
+            # Set device for model and ray tracer with error handling
+            try:
+                logger.info(f"Moving model to device: {self.device}")
+                self.model.to(self.device)
+                self.ray_tracer.device = self.device
+                logger.info(f"Set ray tracer device to: {self.device}")
+                
+                # Set CUDA device for ray tracer
+                if hasattr(self.ray_tracer, 'cuda_device'):
+                    self.ray_tracer.cuda_device = self.device
+                    logger.info(f"Set CUDA device to: {self.device}")
+                    
+            except Exception as e:
+                error_msg = f"Failed to move model to device {self.device}: {e}"
+                logger.error(f"❌ FATAL ERROR: {error_msg}")
+                logger.error("This could indicate:")
+                logger.error("  - Insufficient GPU memory")
+                logger.error("  - CUDA driver issues")
+                logger.error("  - Device compatibility problems")
+                raise RuntimeError(error_msg) from e
             
-            # Set CUDA device for ray tracer
-            if hasattr(self.ray_tracer, 'cuda_device'):
-                self.ray_tracer.cuda_device = self.device
-                logger.info(f"Set CUDA device to: {self.device}")
-            
-            logger.info(f"TrainingInterface model loaded with {sum(p.numel() for p in self.model.parameters()):,} parameters")
-            logger.info(f"TrainingInterface checkpoint info: {self.checkpoint_info}")
+            # Log successful loading
+            try:
+                param_count = sum(p.numel() for p in self.model.parameters())
+                logger.info(f"✅ TrainingInterface model loaded successfully with {param_count:,} parameters")
+                logger.info(f"✅ Checkpoint info: {self.checkpoint_info}")
+            except Exception as e:
+                logger.warning(f"Could not count model parameters: {e}")
+                logger.info(f"✅ TrainingInterface model loaded successfully")
+                logger.info(f"✅ Checkpoint info: {self.checkpoint_info}")
             
         except Exception as e:
             logger.error(f"❌ FATAL ERROR: Failed to load TrainingInterface checkpoint: {e}")
+            logger.error(f"Checkpoint path: {self.model_path}")
+            logger.error(f"Device: {self.device}")
             raise
     
     def _load_data(self):
@@ -1091,17 +1181,18 @@ class PrismTester:
             logger.info(f"  {p}th percentile: {p_value:.6f}")
     
     def _evaluate_model(self) -> Dict[str, float]:
-        """Evaluate model performance on test data using TrainingInterface"""
-        logger.info("Evaluating model performance...")
+        """Perform CSI inference on test data using TrainingInterface"""
+        logger.info("Performing CSI inference on test data...")
         
         try:
             self.model.eval()
             predictions = []
-            losses = []
             
             # Process in batches to avoid memory issues (use config setting)
             batch_size = self.config['testing']['batch_size']
             num_samples = len(self.ue_positions)
+            
+            logger.info(f"Processing {num_samples} samples in batches of {batch_size}")
             
             with torch.no_grad():
                 for i in range(0, num_samples, batch_size):
@@ -1109,10 +1200,9 @@ class PrismTester:
                     batch_ue_pos = self.ue_positions[i:end_idx]
                     batch_bs_pos = self.bs_position.expand(end_idx - i, -1)
                     batch_antenna_idx = self.antenna_indices.expand(end_idx - i, -1)
-                    batch_csi_target = self.csi_target[i:end_idx]
                     
                     try:
-                        # Use TrainingInterface forward pass
+                        # Use TrainingInterface forward pass for CSI prediction
                         outputs = self.model(
                             ue_positions=batch_ue_pos,
                             bs_position=batch_bs_pos,
@@ -1120,18 +1210,12 @@ class PrismTester:
                         )
                         batch_predictions = outputs['csi_predictions']
                         
-                        # Compute loss directly (without gradients for testing)
-                        loss_fn = nn.MSELoss()
-                        if batch_predictions.dtype.is_complex:
-                            # For complex numbers, compute MSE on both real and imaginary parts
-                            real_loss = loss_fn(batch_predictions.real, batch_csi_target.real)
-                            imag_loss = loss_fn(batch_predictions.imag, batch_csi_target.imag)
-                            batch_loss = real_loss + imag_loss
-                        else:
-                            batch_loss = loss_fn(batch_predictions, batch_csi_target)
-                        
+                        # Store predictions (move to CPU to save GPU memory)
                         predictions.append(batch_predictions.cpu())
-                        losses.append(batch_loss.item())
+                        
+                        # Log progress
+                        if (i // batch_size + 1) % 10 == 0 or end_idx == num_samples:
+                            logger.info(f"Processed batch {i//batch_size + 1}/{(num_samples + batch_size - 1)//batch_size}")
                         
                     except Exception as e:
                         logger.error(f"❌ Error in batch {i//batch_size}: {e}")
@@ -1142,13 +1226,302 @@ class PrismTester:
             
             # Concatenate all predictions
             self.predictions = torch.cat(predictions, dim=0)
-            avg_loss = np.mean(losses)
             
-            logger.info(f"Evaluation completed. Average loss: {avg_loss:.6f}")
-            return {'avg_loss': avg_loss}
+            # Log prediction statistics
+            logger.info(f"CSI inference completed successfully")
+            logger.info(f"Prediction tensor shape: {self.predictions.shape}")
+            logger.info(f"Prediction tensor dtype: {self.predictions.dtype}")
+            logger.info(f"Target tensor shape: {self.csi_target.shape}")
+            logger.info(f"Target tensor dtype: {self.csi_target.dtype}")
+            
+            # Store predictions for later analysis
+            self._store_predictions()
+            
+            # Return basic statistics (no loss calculation)
+            return {
+                'num_samples': num_samples,
+                'prediction_shape': list(self.predictions.shape),
+                'target_shape': list(self.csi_target.shape)
+            }
             
         except Exception as e:
-            logger.error(f"❌ FATAL ERROR: Model evaluation failed: {e}")
+            logger.error(f"❌ FATAL ERROR: CSI inference failed: {e}")
+            raise
+    
+    def _store_predictions(self):
+        """Store predicted CSI results for later analysis"""
+        logger.info("Storing predicted CSI results...")
+        
+        try:
+            # Create predictions directory
+            predictions_dir = Path(self.config['output']['testing']['predictions_dir'])
+            predictions_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Save raw predictions and targets
+            predictions_path = predictions_dir / 'csi_predictions_raw.npz'
+            
+            # Convert to numpy for storage
+            predictions_np = self.predictions.numpy()
+            targets_np = self.csi_target.cpu().numpy()
+            ue_positions_np = self.ue_positions.cpu().numpy()
+            bs_position_np = self.bs_position.cpu().numpy()
+            antenna_indices_np = self.antenna_indices.cpu().numpy()
+            
+            # Save comprehensive prediction data
+            np.savez_compressed(
+                predictions_path,
+                # CSI data
+                csi_predictions=predictions_np,
+                csi_targets=targets_np,
+                # Position and antenna data
+                ue_positions=ue_positions_np,
+                bs_position=bs_position_np,
+                antenna_indices=antenna_indices_np,
+                # Metadata
+                prediction_timestamp=datetime.now().isoformat(),
+                model_path=str(self.model_path),
+                data_path=str(self.data_path),
+                checkpoint_info=self.checkpoint_info
+            )
+            
+            logger.info(f"✅ CSI predictions stored successfully")
+            logger.info(f"   📁 File: {predictions_path}")
+            logger.info(f"   📊 Predictions shape: {predictions_np.shape}")
+            logger.info(f"   📊 Targets shape: {targets_np.shape}")
+            logger.info(f"   📊 UE positions shape: {ue_positions_np.shape}")
+            logger.info(f"   💾 File size: {predictions_path.stat().st_size / 1024 / 1024:.1f} MB")
+            
+            # Also save a summary JSON file with metadata
+            summary_path = predictions_dir / 'csi_predictions_summary.json'
+            summary_data = {
+                'prediction_timestamp': datetime.now().isoformat(),
+                'model_path': str(self.model_path),
+                'data_path': str(self.data_path),
+                'checkpoint_info': self.checkpoint_info,
+                'data_shapes': {
+                    'csi_predictions': list(predictions_np.shape),
+                    'csi_targets': list(targets_np.shape),
+                    'ue_positions': list(ue_positions_np.shape),
+                    'bs_position': list(bs_position_np.shape),
+                    'antenna_indices': list(antenna_indices_np.shape)
+                },
+                'data_types': {
+                    'csi_predictions': str(predictions_np.dtype),
+                    'csi_targets': str(targets_np.dtype),
+                    'ue_positions': str(ue_positions_np.shape),
+                    'bs_position': str(bs_position_np.dtype),
+                    'antenna_indices': str(antenna_indices_np.dtype)
+                },
+                'simulation_parameters': self.sim_params
+            }
+            
+            with open(summary_path, 'w') as f:
+                json.dump(summary_data, f, indent=2, default=str)
+            
+            logger.info(f"   📋 Summary saved: {summary_path}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to store predictions: {e}")
+            raise
+    
+    def analyze_csi_predictions(self):
+        """Analyze and compare predicted CSI with target CSI"""
+        logger.info("🔍 Analyzing CSI predictions vs targets...")
+        
+        if not hasattr(self, 'predictions') or self.predictions is None:
+            logger.error("❌ No predictions available for analysis. Run inference first.")
+            raise ValueError("Predictions not available")
+        
+        try:
+            # Calculate comprehensive metrics
+            metrics = self._calculate_csi_metrics()
+            
+            # Create detailed visualizations
+            self._create_csi_analysis_plots()
+            
+            # Save analysis results
+            self._save_csi_analysis(metrics)
+            
+            logger.info("✅ CSI analysis completed successfully")
+            return metrics
+            
+        except Exception as e:
+            logger.error(f"❌ CSI analysis failed: {e}")
+            raise
+    
+    def _calculate_csi_metrics(self) -> Dict[str, float]:
+        """Calculate detailed CSI comparison metrics"""
+        logger.info("Calculating CSI comparison metrics...")
+        
+        pred_np = self.predictions.numpy()
+        target_np = self.csi_target.cpu().numpy()
+        
+        # Calculate magnitude and phase errors
+        pred_mag = np.abs(pred_np)
+        target_mag = np.abs(target_np)
+        mag_error = np.abs(pred_mag - target_mag)
+        
+        pred_phase = np.angle(pred_np)
+        target_phase = np.angle(target_np)
+        phase_diff = pred_phase - target_phase
+        phase_diff = np.angle(np.exp(1j * phase_diff))  # Wrap to [-π, π]
+        phase_error = np.abs(phase_diff)
+        
+        # Calculate MSE for comparison (optional)
+        if pred_np.dtype == np.complex64 or pred_np.dtype == np.complex128:
+            mse_real = np.mean((pred_np.real - target_np.real)**2)
+            mse_imag = np.mean((pred_np.imag - target_np.imag)**2)
+            mse_total = mse_real + mse_imag
+        else:
+            mse_total = np.mean((pred_np - target_np)**2)
+        
+        # Calculate correlation coefficients
+        pred_flat = pred_np.flatten()
+        target_flat = target_np.flatten()
+        
+        if pred_flat.dtype == np.complex64 or pred_flat.dtype == np.complex128:
+            # For complex data, calculate correlation for magnitude and phase separately
+            mag_corr = np.corrcoef(np.abs(pred_flat), np.abs(target_flat))[0, 1]
+            phase_corr = np.corrcoef(np.angle(pred_flat), np.angle(target_flat))[0, 1]
+        else:
+            mag_corr = np.corrcoef(pred_flat, target_flat)[0, 1]
+            phase_corr = 0.0
+        
+        # Calculate comprehensive metrics
+        metrics = {
+            # Basic errors
+            'mse_total': float(mse_total),
+            'rmse_total': float(np.sqrt(mse_total)),
+            
+            # Magnitude metrics
+            'magnitude_mae': float(np.mean(mag_error)),
+            'magnitude_mse': float(np.mean(mag_error**2)),
+            'magnitude_rmse': float(np.sqrt(np.mean(mag_error**2))),
+            'magnitude_max_error': float(np.max(mag_error)),
+            'magnitude_correlation': float(mag_corr) if not np.isnan(mag_corr) else 0.0,
+            
+            # Phase metrics  
+            'phase_mae': float(np.mean(phase_error)),
+            'phase_mse': float(np.mean(phase_error**2)),
+            'phase_rmse': float(np.sqrt(np.mean(phase_error**2))),
+            'phase_max_error': float(np.max(phase_error)),
+            'phase_correlation': float(phase_corr) if not np.isnan(phase_corr) else 0.0,
+            
+            # Percentile metrics
+            'magnitude_error_50th': float(np.percentile(mag_error, 50)),
+            'magnitude_error_90th': float(np.percentile(mag_error, 90)),
+            'magnitude_error_95th': float(np.percentile(mag_error, 95)),
+            'magnitude_error_99th': float(np.percentile(mag_error, 99)),
+            
+            'phase_error_50th': float(np.percentile(phase_error, 50)),
+            'phase_error_90th': float(np.percentile(phase_error, 90)),
+            'phase_error_95th': float(np.percentile(phase_error, 95)),
+            'phase_error_99th': float(np.percentile(phase_error, 99)),
+            
+            # Data statistics
+            'num_samples': int(pred_np.shape[0]),
+            'prediction_shape': list(pred_np.shape),
+            'target_shape': list(target_np.shape)
+        }
+        
+        # Log key metrics
+        logger.info("📊 Key CSI Comparison Metrics:")
+        logger.info(f"   • Total RMSE: {metrics['rmse_total']:.6f}")
+        logger.info(f"   • Magnitude RMSE: {metrics['magnitude_rmse']:.6f}")
+        logger.info(f"   • Phase RMSE: {metrics['phase_rmse']:.6f}")
+        logger.info(f"   • Magnitude Correlation: {metrics['magnitude_correlation']:.4f}")
+        logger.info(f"   • Phase Correlation: {metrics['phase_correlation']:.4f}")
+        
+        return metrics
+    
+    def _create_csi_analysis_plots(self):
+        """Create detailed CSI analysis plots"""
+        logger.info("Creating CSI analysis plots...")
+        
+        # Use existing visualization methods
+        self._visualize_results()
+        
+        logger.info("✅ CSI analysis plots created")
+    
+    def _save_csi_analysis(self, metrics: Dict[str, float]):
+        """Save CSI analysis results"""
+        logger.info("Saving CSI analysis results...")
+        
+        try:
+            # Save analysis results
+            results_dir = Path(self.config['output']['testing']['results_dir'])
+            results_dir.mkdir(parents=True, exist_ok=True)
+            
+            analysis_results = {
+                'analysis_timestamp': datetime.now().isoformat(),
+                'model_path': str(self.model_path),
+                'data_path': str(self.data_path),
+                'checkpoint_info': self.checkpoint_info,
+                'csi_comparison_metrics': metrics,
+                'simulation_parameters': self.sim_params
+            }
+            
+            analysis_path = results_dir / 'csi_analysis_results.json'
+            with open(analysis_path, 'w') as f:
+                json.dump(analysis_results, f, indent=2, default=str)
+            
+            logger.info(f"✅ CSI analysis results saved: {analysis_path}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to save CSI analysis: {e}")
+            raise
+    
+    def inference_only(self):
+        """Perform only CSI inference without analysis"""
+        logger.info("🧪 PRISM NETWORK CSI INFERENCE ONLY")
+        logger.info("=" * 80)
+        logger.info(f"📅 Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"🔧 Configuration file: {self.config_path}")
+        logger.info(f"🤖 Model path: {self.model_path}")
+        logger.info(f"📊 Data path: {self.data_path}")
+        logger.info(f"📁 Output directory: {self.output_dir}")
+        logger.info("=" * 80)
+        
+        start_time = time.time()
+        
+        try:
+            # Phase 1: CSI Inference Only
+            logger.info("🔄 INFERENCE PHASE: CSI PREDICTION")
+            logger.info("📝 Description: Running CSI prediction inference only")
+            logger.info("-" * 60)
+            inference_stats = self._evaluate_model()
+            
+            # Log inference statistics
+            logger.info("📊 CSI INFERENCE STATISTICS:")
+            logger.info("-" * 40)
+            for stat_name, stat_value in inference_stats.items():
+                logger.info(f"   • {stat_name}: {stat_value}")
+            logger.info("-" * 40)
+            
+            # Calculate total time
+            total_time = time.time() - start_time
+            
+            # Log completion
+            logger.info("=" * 80)
+            logger.info("✅ PRISM NETWORK CSI INFERENCE COMPLETED")
+            logger.info("=" * 80)
+            logger.info(f"⏱️  Total inference time: {total_time:.2f} seconds")
+            logger.info(f"📅 Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.info("")
+            logger.info("📋 INFERENCE SUMMARY:")
+            logger.info(f"   • Total test samples: {len(self.ue_positions)}")
+            logger.info(f"   • Model parameters: {sum(p.numel() for p in self.prism_network.parameters()):,}")
+            logger.info(f"   • Predictions saved for later analysis")
+            for stat_name, stat_value in inference_stats.items():
+                logger.info(f"   • {stat_name}: {stat_value}")
+            logger.info("=" * 80)
+            
+            return inference_stats
+            
+        except Exception as e:
+            logger.error(f"❌ CSI inference failed: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             raise
     
     def _visualize_results(self):
@@ -1271,34 +1644,44 @@ class PrismTester:
             logger.info("-" * 60)
             logger.info("✅ Test data loaded successfully")
             
-            # Phase 3: Model Evaluation
-            logger.info("🔄 TESTING PHASE: MODEL EVALUATION")
-            logger.info("📝 Description: Running inference and calculating metrics")
+            # Phase 3: CSI Inference
+            logger.info("🔄 TESTING PHASE: CSI INFERENCE")
+            logger.info("📝 Description: Running CSI prediction inference")
             logger.info("-" * 60)
-            metrics = self._evaluate_model()
+            inference_stats = self._evaluate_model()
             
-            # Log metrics
-            logger.info("📊 MODEL PERFORMANCE METRICS:")
+            # Log inference statistics
+            logger.info("📊 CSI INFERENCE STATISTICS:")
             logger.info("-" * 40)
-            for metric_name, metric_value in metrics.items():
+            for stat_name, stat_value in inference_stats.items():
+                logger.info(f"   • {stat_name}: {stat_value}")
+            logger.info("-" * 40)
+            logger.info("✅ CSI inference completed successfully")
+            
+            # Phase 4: CSI Analysis (Optional - can be run separately)
+            logger.info("🔄 TESTING PHASE: CSI ANALYSIS")
+            logger.info("📝 Description: Analyzing predicted CSI vs target CSI")
+            logger.info("-" * 60)
+            analysis_metrics = self.analyze_csi_predictions()
+            
+            # Log analysis metrics
+            logger.info("📊 CSI ANALYSIS METRICS:")
+            logger.info("-" * 40)
+            for metric_name, metric_value in analysis_metrics.items():
                 if isinstance(metric_value, float):
                     logger.info(f"   • {metric_name}: {metric_value:.6f}")
                 else:
                     logger.info(f"   • {metric_name}: {metric_value}")
             logger.info("-" * 40)
-            
-            # Phase 4: Visualization
-            logger.info("🔄 TESTING PHASE: VISUALIZATION")
-            logger.info("📝 Description: Creating performance plots and visualizations")
-            logger.info("-" * 60)
-            self._visualize_results()
-            logger.info("✅ Visualizations created successfully")
+            logger.info("✅ CSI analysis completed successfully")
             
             # Phase 5: Results Saving
             logger.info("🔄 TESTING PHASE: RESULTS SAVING")
-            logger.info("📝 Description: Saving test results, metrics, and predictions")
+            logger.info("📝 Description: Saving final test results and summary")
             logger.info("-" * 60)
-            self._save_results(metrics)
+            # Combine inference stats and analysis metrics
+            combined_metrics = {**inference_stats, **analysis_metrics}
+            self._save_results(combined_metrics)
             logger.info("✅ Results saved successfully")
             
             # Calculate total time
@@ -1315,11 +1698,19 @@ class PrismTester:
             logger.info(f"   • Total test samples: {len(self.ue_positions)}")
             logger.info(f"   • Model parameters: {sum(p.numel() for p in self.prism_network.parameters()):,}")
             logger.info(f"   • Best loss from checkpoint: {self.checkpoint_info.get('best_loss', 'N/A')}")
-            for key, value in metrics.items():
-                if isinstance(value, float):
-                    logger.info(f"   • {key}: {value:.6f}")
-                else:
-                    logger.info(f"   • {key}: {value}")
+            
+            # Show key metrics from analysis
+            if 'rmse_total' in combined_metrics:
+                logger.info(f"   • Total RMSE: {combined_metrics['rmse_total']:.6f}")
+            if 'magnitude_rmse' in combined_metrics:
+                logger.info(f"   • Magnitude RMSE: {combined_metrics['magnitude_rmse']:.6f}")
+            if 'phase_rmse' in combined_metrics:
+                logger.info(f"   • Phase RMSE: {combined_metrics['phase_rmse']:.6f}")
+            if 'magnitude_correlation' in combined_metrics:
+                logger.info(f"   • Magnitude Correlation: {combined_metrics['magnitude_correlation']:.4f}")
+            if 'phase_correlation' in combined_metrics:
+                logger.info(f"   • Phase Correlation: {combined_metrics['phase_correlation']:.4f}")
+            
             logger.info("=" * 80)
             
         except Exception as e:
@@ -1335,16 +1726,53 @@ def main():
                        help='Path to configuration file')
     parser.add_argument('--model', type=str, default=None,
                        help='Path to trained model checkpoint (optional, will read from config if not provided)')
+    parser.add_argument('--inference-only', action='store_true',
+                       help='Perform only CSI inference without analysis (faster, saves predictions for later analysis)')
     
     args = parser.parse_args()
     
     try:
         # Create tester and start testing
+        logger.info("🚀 Initializing Prism Tester...")
         tester = PrismTester(args.config, args.model, None, None)
+        logger.info("✅ Prism Tester initialized successfully")
+        
+        if args.inference_only:
+            logger.info("🔍 Starting CSI inference only...")
+            tester.inference_only()
+            logger.info("✅ CSI inference completed successfully")
+            logger.info("💡 Tip: Run without --inference-only flag to perform full analysis")
+        else:
+            logger.info("🧪 Starting full testing process...")
         tester.test()
+            logger.info("✅ Full testing completed successfully")
+        
+    except (FileNotFoundError, PermissionError) as e:
+        logger.error(f"❌ FATAL ERROR - Model file issue: {e}")
+        logger.error("Please check:")
+        logger.error("  1. Model file exists at the specified path")
+        logger.error("  2. File has proper read permissions")
+        logger.error("  3. Training has been completed successfully")
+        sys.exit(1)
+        
+    except (ValueError, RuntimeError) as e:
+        logger.error(f"❌ FATAL ERROR - Model loading failed: {e}")
+        logger.error("Please check:")
+        logger.error("  1. Model checkpoint is not corrupted")
+        logger.error("  2. PyTorch version compatibility")
+        logger.error("  3. Model architecture matches training configuration")
+        logger.error("  4. Sufficient GPU/CPU memory available")
+        sys.exit(1)
+        
+    except KeyboardInterrupt:
+        logger.warning("⚠️  Testing interrupted by user (Ctrl+C)")
+        sys.exit(130)  # Standard exit code for SIGINT
         
     except Exception as e:
-        logger.error(f"❌ Testing failed with error: {e}")
+        logger.error(f"❌ FATAL ERROR - Unexpected error during testing: {e}")
+        logger.error(f"Error type: {type(e).__name__}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         sys.exit(1)
 
 if __name__ == '__main__':

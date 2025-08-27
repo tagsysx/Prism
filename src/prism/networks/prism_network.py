@@ -11,7 +11,11 @@ This module integrates:
 
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple, Dict, Any
+import logging
+from typing import Optional, Tuple, Dict, Any, List
+
+# Setup logger
+logger = logging.getLogger(__name__)
 
 from .attenuation_network import AttenuationNetwork, AttenuationNetworkConfig
 from .attenuation_decoder import AttenuationDecoder, AttenuationDecoderConfig
@@ -139,12 +143,43 @@ class PrismNetwork(nn.Module):
             complex_output=self.complex_output
         )
         
+        # Initialize network weights for better training
+        self._init_weights()
+        
+    def _init_weights(self):
+        """Initialize network weights using Xavier/Glorot initialization for better training."""
+        logger.info("🔧 Initializing PrismNetwork weights with Xavier/Glorot initialization...")
+        
+        # Initialize all linear layers with Xavier/Glorot initialization
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                # Xavier/Glorot initialization for linear layers
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+                logger.debug(f"   ✓ Initialized {module.__class__.__name__} with Xavier uniform")
+            
+            elif isinstance(module, nn.LayerNorm):
+                # Initialize LayerNorm with standard values
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+                logger.debug(f"   ✓ Initialized {module.__class__.__name__} with standard values")
+        
+        # Initialize antenna codebook embeddings if present
+        if hasattr(self, 'antenna_codebook') and self.antenna_codebook is not None:
+            if hasattr(self.antenna_codebook, 'embedding'):
+                nn.init.xavier_uniform_(self.antenna_codebook.embedding.weight)
+                logger.debug(f"   ✓ Initialized AntennaEmbeddingCodebook with Xavier uniform")
+        
+        logger.info("✅ PrismNetwork weight initialization completed")
+        
     def forward(
         self,
         sampled_positions: torch.Tensor,
         ue_positions: torch.Tensor,
         view_directions: torch.Tensor,
         antenna_indices: torch.Tensor,
+        selected_subcarriers: Optional[List[int]] = None,
         return_intermediates: bool = False
     ) -> Dict[str, torch.Tensor]:
         """
@@ -197,35 +232,39 @@ class PrismNetwork(nn.Module):
                     # Process real and imaginary parts through the decoder
                     real_features = voxel_features.real
                     imag_features = voxel_features.imag
-                
-                real_attenuation = self.attenuation_decoder(real_features)
-                imag_attenuation = self.attenuation_decoder(imag_features)
-                
-                # Combine to form complex attenuation
-                if self.attenuation_decoder.is_complex():
-                    # If decoder outputs complex, combine properly
-                    voxel_attenuation = real_attenuation + 1j * imag_attenuation
+                    
+                    real_attenuation = self.attenuation_decoder(real_features)
+                    imag_attenuation = self.attenuation_decoder(imag_features)
+                    
+                    # Combine to form complex attenuation
+                    if self.attenuation_decoder.is_complex():
+                        # If decoder outputs complex, combine properly
+                        voxel_attenuation = real_attenuation + 1j * imag_attenuation
+                    else:
+                        # If decoder outputs real, create complex from real/imag parts
+                        voxel_attenuation = torch.complex(real_attenuation, imag_attenuation)
                 else:
-                    # If decoder outputs real, create complex from real/imag parts
-                    voxel_attenuation = torch.complex(real_attenuation, imag_attenuation)
-            else:
-                voxel_attenuation = self.attenuation_decoder(voxel_features)
+                    # Features are real, process directly
+                    voxel_attenuation = self.attenuation_decoder(voxel_features)
                 
-            attenuation_factors.append(voxel_attenuation)
+                # Add this voxel's attenuation factor to the list
+                attenuation_factors.append(voxel_attenuation)
         
         # Stack attenuation factors: (batch_size, num_voxels, num_ue_antennas, num_subcarriers)
         attenuation_factors = torch.stack(attenuation_factors, dim=1)
         
-        # 3. AntennaEmbeddingCodebook: Get antenna embeddings
+        # 3. AntennaEmbeddingCodebook: Get antenna embeddings (now unified to 3D output)
         if self.antenna_codebook is not None:
-            antenna_embeddings = self.antenna_codebook(antenna_indices)
+            antenna_embeddings = self.antenna_codebook(antenna_indices)  # Always returns (batch_size, num_antennas, embedding_dim)
         else:
-            # Fallback: create random embeddings
+            # Fallback: create random embeddings in unified 3D format
             if antenna_indices.dim() == 1:
-                antenna_embeddings = torch.randn(batch_size, self.antenna_embedding_dim)
+                # Single antenna case: create (batch_size, 1, embedding_dim)
+                antenna_embeddings = torch.randn(batch_size, 1, self.antenna_embedding_dim, device=antenna_indices.device)
             else:
+                # Multiple antennas case: create (batch_size, num_antennas, embedding_dim)
                 num_antennas = antenna_indices.shape[1]
-                antenna_embeddings = torch.randn(batch_size, num_antennas, self.antenna_embedding_dim)
+                antenna_embeddings = torch.randn(batch_size, num_antennas, self.antenna_embedding_dim, device=antenna_indices.device)
         
         # 4. AntennaNetwork: Get directional importance
         directional_importance = self.antenna_network(antenna_embeddings)
@@ -259,6 +298,15 @@ class PrismNetwork(nn.Module):
             antenna_embeddings
         )
         
+        # Debug: Check the computed factors
+        logger.debug(f"🔍 PrismNetwork forward outputs:")
+        logger.debug(f"   - attenuation_factors shape: {attenuation_factors.shape}")
+        logger.debug(f"   - radiation_factors shape: {radiation_factors.shape}")
+        logger.debug(f"   - attenuation_factors abs max: {torch.abs(attenuation_factors).max() if attenuation_factors.numel() > 0 else 'N/A'}")
+        logger.debug(f"   - radiation_factors abs max: {torch.abs(radiation_factors).max() if radiation_factors.numel() > 0 else 'N/A'}")
+        logger.debug(f"   - attenuation_factors sample: {attenuation_factors[:2, :2, :2, :2] if attenuation_factors.numel() > 0 else 'empty'}")
+
+        
         # Prepare outputs
         outputs = {
             'attenuation_factors': attenuation_factors,
@@ -274,7 +322,7 @@ class PrismNetwork(nn.Module):
                 'antenna_embeddings': antenna_embeddings
             })
         
-            return outputs
+        return outputs
     
     def get_network_info(self) -> Dict[str, Any]:
         """Get information about the network architecture."""

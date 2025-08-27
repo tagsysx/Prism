@@ -686,7 +686,16 @@ class CPURayTracer(RayTracer):
         
         # Extract complex attenuation and radiation for the specific subcarrier
         attenuation = attenuation_factors[0, :, 0, subcarrier_idx]  # (num_samples,) - complex
-        radiation = radiation_factors[0, 0, subcarrier_idx]  # scalar - complex
+        
+        # Correct radiation_factors indexing - now 2D: (num_ue_antennas, num_subcarriers)
+        logger.debug(f"🔍 DEBUG: radiation_factors shape: {radiation_factors.shape}")
+        logger.debug(f"🔍 DEBUG: subcarrier_idx: {subcarrier_idx}")
+        
+        # radiation_factors should be (num_ue_antennas, num_subcarriers) after [0] indexing
+        radiation = radiation_factors[0, subcarrier_idx]  # scalar - complex (first UE antenna)
+            
+        logger.debug(f"🔍 DEBUG: radiation value: {radiation}")
+        logger.debug(f"🔍 DEBUG: radiation abs: {torch.abs(radiation)}")
         
         # Calculate dynamic step sizes using base class method
         delta_t = self.compute_dynamic_path_lengths(sampled_positions)
@@ -765,7 +774,10 @@ class CPURayTracer(RayTracer):
         
         # Extract data for selected subcarriers - shape: (num_samples, num_subcarriers)
         attenuation_batch = attenuation_factors[0, :, 0, subcarrier_indices].T  # (num_subcarriers, num_samples)
-        radiation_batch = radiation_factors[0, 0, subcarrier_indices]  # (num_subcarriers,)
+        
+        # Unified radiation_factors processing - now always 4D: (batch_size, num_antennas, num_ue_antennas, num_subcarriers)
+        # Extract for first batch, first antenna, first UE antenna (batch processing)
+        radiation_batch = radiation_factors[0, 0, 0, subcarrier_indices]  # (num_subcarriers,)
         
         # Calculate dynamic step sizes once for all subcarriers
         if num_samples > 1:

@@ -81,32 +81,25 @@ class AntennaNetwork(nn.Module):
         
     def forward(self, antenna_embeddings: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass through the AntennaNetwork.
+        Unified forward pass through the AntennaNetwork.
         
         Args:
-            antenna_embeddings: Input tensor of shape (batch_size, antenna_embedding_dim)
-                               or (batch_size, num_antennas, antenna_embedding_dim)
+            antenna_embeddings: Input tensor of shape (batch_size, num_antennas, antenna_embedding_dim)
+                               Note: Now expects unified 3D input from AntennaEmbeddingCodebook
             
         Returns:
-            Directional importance matrix of shape (batch_size, azimuth_divisions, elevation_divisions)
-            or (batch_size, num_antennas, azimuth_divisions, elevation_divisions)
+            Directional importance matrix of shape (batch_size, num_antennas, azimuth_divisions, elevation_divisions)
+            Note: Always returns 4D tensor for unified processing
         """
-        batch_size = antenna_embeddings.shape[0]
+        batch_size, num_antennas = antenna_embeddings.shape[:2]
         
-        # Process through network
-        if antenna_embeddings.dim() == 2:
-            # Single antenna per batch element
-            output = self.network(antenna_embeddings)
-            # Reshape to (batch_size, azimuth_divisions, elevation_divisions)
-            output = output.view(batch_size, self.azimuth_divisions, self.elevation_divisions)
-        else:
-            # Multiple antennas per batch element
-            num_antennas = antenna_embeddings.shape[1]
-            # Reshape to (batch_size * num_antennas, antenna_embedding_dim) for processing
-            flat_embeddings = antenna_embeddings.view(-1, self.antenna_embedding_dim)
-            output = self.network(flat_embeddings)
-            # Reshape to (batch_size, num_antennas, azimuth_divisions, elevation_divisions)
-            output = output.view(batch_size, num_antennas, self.azimuth_divisions, self.elevation_divisions)
+        # Unified processing: always handle as multiple antennas
+        # Reshape to (batch_size * num_antennas, antenna_embedding_dim) for processing
+        flat_embeddings = antenna_embeddings.view(-1, self.antenna_embedding_dim)
+        output = self.network(flat_embeddings)
+        
+        # Reshape to unified 4D format: (batch_size, num_antennas, azimuth_divisions, elevation_divisions)
+        output = output.view(batch_size, num_antennas, self.azimuth_divisions, self.elevation_divisions)
         
         # Apply importance activation
         if self.importance_activation == "softmax":
@@ -128,51 +121,35 @@ class AntennaNetwork(nn.Module):
         k: int
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Get top-K most important directions from the importance matrix.
+        Unified method to get top-K directions based on importance matrix.
         
         Args:
-            importance_matrix: Directional importance matrix from forward pass
+            importance_matrix: Importance matrix of shape (batch_size, num_antennas, azimuth_divisions, elevation_divisions)
+                              Note: Now expects unified 4D input
             k: Number of top directions to select
             
         Returns:
-            Tuple of (top_k_indices, top_k_importance_scores)
+            Tuple of (top_k_indices, top_k_values)
+            - top_k_indices: (batch_size, num_antennas, k, 2) - [azimuth_idx, elevation_idx]
+            - top_k_values: (batch_size, num_antennas, k) - importance values
         """
-        batch_size = importance_matrix.shape[0]
+        batch_size, num_antennas = importance_matrix.shape[:2]
         
-        if importance_matrix.dim() == 3:
-            # Single antenna: (batch_size, azimuth_divisions, elevation_divisions)
-            # Flatten to (batch_size, azimuth_divisions * elevation_divisions)
-            flat_importance = importance_matrix.view(batch_size, -1)
-            
-            # Get top-k indices and values
-            top_k_values, top_k_indices = torch.topk(flat_importance, k, dim=-1)
-            
-            # Convert flat indices to 2D indices
-            azimuth_indices = top_k_indices // self.elevation_divisions
-            elevation_indices = top_k_indices % self.elevation_divisions
-            
-            # Stack to get (batch_size, k, 2) tensor
-            top_k_indices_2d = torch.stack([azimuth_indices, elevation_indices], dim=-1)
-            
-            return top_k_indices_2d, top_k_values
-            
-        else:
-            # Multiple antennas: (batch_size, num_antennas, azimuth_divisions, elevation_divisions)
-            num_antennas = importance_matrix.shape[1]
-            # Flatten to (batch_size, num_antennas, azimuth_divisions * elevation_divisions)
-            flat_importance = importance_matrix.view(batch_size, num_antennas, -1)
-            
-            # Get top-k indices and values
-            top_k_values, top_k_indices = torch.topk(flat_importance, k, dim=-1)
-            
-            # Convert flat indices to 2D indices
-            azimuth_indices = top_k_indices // self.elevation_divisions
-            elevation_indices = top_k_indices % self.elevation_divisions
-            
-            # Stack to get (batch_size, num_antennas, k, 2) tensor
-            top_k_indices_2d = torch.stack([azimuth_indices, elevation_indices], dim=-1)
-            
-            return top_k_indices_2d, top_k_values
+        # Unified processing: always handle as 4D tensor
+        # Flatten to (batch_size, num_antennas, azimuth_divisions * elevation_divisions)
+        flat_importance = importance_matrix.view(batch_size, num_antennas, -1)
+        
+        # Get top-k indices and values
+        top_k_values, top_k_indices = torch.topk(flat_importance, k, dim=-1)
+        
+        # Convert flat indices to 2D indices
+        azimuth_indices = top_k_indices // self.elevation_divisions
+        elevation_indices = top_k_indices % self.elevation_divisions
+        
+        # Stack to get (batch_size, num_antennas, k, 2) tensor
+        top_k_indices_2d = torch.stack([azimuth_indices, elevation_indices], dim=-1)
+        
+        return top_k_indices_2d, top_k_values
     
     def get_directional_resolution(self) -> Tuple[int, int]:
         """Get the directional resolution (azimuth_divisions, elevation_divisions)."""

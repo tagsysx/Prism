@@ -116,7 +116,7 @@ ray_tracing:
 system:
   # Computational settings
   device: 'cuda'                     # Primary device for computation ('cuda' or 'cpu')
-  batch_size: 2                      # Global batch size for all operations
+  batch_size: 1                      # Global batch size for all operations
   gpu_memory_fraction: 0.8           # GPU memory usage fraction
   
   # Ray tracing execution mode
@@ -172,12 +172,12 @@ system:
 training:
   # Training parameters
   learning_rate: 1e-4                # Initial learning rate
-  num_epochs: 2                    # Number of training epochs
+  num_epochs: 4                     # Number of training epochs
   batches_per_epoch: 10              # Number of batches per epoch
   
   # Checkpoint and recovery
   auto_checkpoint: true              # Enable automatic checkpointing
-  checkpoint_frequency: 5           # Save checkpoint every N batches
+  checkpoint_frequency: 1           # Save checkpoint every N batches
   epoch_save_interval: 1             # Save checkpoint every N epochs
   
   # Loss function
@@ -242,7 +242,7 @@ input:
   # Train/test split configuration
   split:
     random_seed: 42                    # Random seed for reproducible splits
-    train_ratio: 0.8                   # Training data ratio (0.0 to 1.0)
+    train_ratio: 0.2                   # Training data ratio (0.0 to 1.0)
     test_ratio: 0.2                    # Testing data ratio (0.0 to 1.0)
     # Note: train_ratio + test_ratio can be < 1.0 to use only subset of data
   
@@ -260,7 +260,7 @@ output:
     
     # Training logging configuration
     logging:
-      log_level: 'INFO'                 # Training logging level
+      log_level: 'DEBUG'                 # Training logging level
       log_dir: "{{base_dir}}/training/logs"                # Training logs directory
       log_file: "{{base_dir}}/training/logs/training.log"  # Training log file path
   

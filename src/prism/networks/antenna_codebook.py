@@ -68,35 +68,39 @@ class AntennaEmbeddingCodebook(nn.Module):
         
     def forward(self, antenna_indices: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass to retrieve antenna embeddings.
+        Unified forward pass to retrieve antenna embeddings.
         
         Args:
             antenna_indices: Tensor of antenna indices of shape (batch_size,) or (batch_size, num_antennas)
                            Values should be in range [0, num_bs_antennas-1]
             
         Returns:
-            Antenna embeddings of shape (batch_size, embedding_dim) or (batch_size, num_antennas, embedding_dim)
+            Antenna embeddings of shape (batch_size, num_antennas, embedding_dim)
+            Note: Always returns 3D tensor for unified processing. Single antenna becomes (batch_size, 1, embedding_dim)
         """
         batch_size = antenna_indices.shape[0]
         
-        # Handle single antenna vs multiple antennas
+        # Unified processing: normalize input to 2D shape (batch_size, num_antennas)
         if antenna_indices.dim() == 1:
-            # Single antenna per batch element
-            embeddings = F.embedding(antenna_indices, self.embeddings)
-            if self.normalize:
-                embeddings = F.normalize(embeddings, p=2, dim=-1)
-            return embeddings
+            # Single antenna case: add antenna dimension
+            antenna_indices = antenna_indices.unsqueeze(1)  # (batch_size, 1)
+            num_antennas = 1
         else:
-            # Multiple antennas per batch element
+            # Multiple antennas case: keep as is
             num_antennas = antenna_indices.shape[1]
-            # Reshape to (batch_size * num_antennas,) for embedding lookup
-            flat_indices = antenna_indices.view(-1)
-            embeddings = F.embedding(flat_indices, self.embeddings)
-            # Reshape back to (batch_size, num_antennas, embedding_dim)
-            embeddings = embeddings.view(batch_size, num_antennas, self.embedding_dim)
-            if self.normalize:
-                embeddings = F.normalize(embeddings, p=2, dim=-1)
-            return embeddings
+        
+        # Unified embedding lookup
+        # Reshape to (batch_size * num_antennas,) for embedding lookup
+        flat_indices = antenna_indices.view(-1)
+        embeddings = F.embedding(flat_indices, self.embeddings)
+        
+        # Reshape back to unified 3D format: (batch_size, num_antennas, embedding_dim)
+        embeddings = embeddings.view(batch_size, num_antennas, self.embedding_dim)
+        
+        if self.normalize:
+            embeddings = F.normalize(embeddings, p=2, dim=-1)
+            
+        return embeddings
     
     def get_embedding(self, antenna_id: int) -> torch.Tensor:
         """

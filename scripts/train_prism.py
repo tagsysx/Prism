@@ -459,14 +459,7 @@ class PrismTrainer:
         
         return total_loss
     
-    def _load_config(self):
-        """Load configuration from YAML file using ConfigLoader"""
-        config_loader = ConfigLoader(self.config_path)
-        config = config_loader.config
-        
-        self.logger.info(f"Loaded configuration from {self.config_path}")
-        # Logging level was already set in __init__ from config file
-        return config
+
     
     def _setup_model(self):
         """
@@ -556,7 +549,6 @@ class PrismTrainer:
         
         self.model = PrismTrainingInterface(
             prism_network=self.prism_network,
-            ray_tracer=None,  # Let the interface create the appropriate ray tracer
             ray_tracing_config=ray_tracing_config,
             system_config=system_config,
             user_equipment_config=user_equipment_config,
@@ -577,107 +569,13 @@ class PrismTrainer:
         self.logger.info(f"  num_bs_antennas: {self.prism_network.num_bs_antennas}")
         
         # Create Ray Tracer with PrismNetwork for MLP-based direction selection
-        # Read parallel processing configuration from config file
-        parallel_config = self.config.get('system', {})
-        ray_tracer_config = self.config.get('ray_tracer_integration', {})
+        # Note: PrismTrainingInterface will handle all ray tracing configuration internally
         
-        # Get ray tracing mode from system configuration
-        system_config = self.config.get('system', {})
-        ray_tracing_mode = system_config.get('ray_tracing_mode', 'hybrid')
+        # Note: PrismTrainingInterface will create its own ray tracer based on configuration
+        self.logger.info("📡 Ray tracer will be created by PrismTrainingInterface based on configuration")
         
-        # Check if CUDA ray tracer should be used (from ray_tracing_mode or legacy setting)
-        use_cuda_ray_tracer = (ray_tracing_mode == 'cuda') or ray_tracer_config.get('use_cuda_ray_tracer', False)
-        
-        # Parallel processing settings with fallback to config values
-        enable_parallel = parallel_config.get('enable_parallel_processing', True)
-        max_workers = parallel_config.get('num_workers', 4)
-        
-        # Configure parallel processing based on ray tracing mode
-        if ray_tracing_mode == 'cuda':
-            # CUDA mode: disable parallel processing to avoid conflicts
-            enable_parallel = False
-            self.logger.info("🔒 CUDA mode: parallel processing disabled to avoid device conflicts")
-        elif ray_tracing_mode == 'cpu':
-            # CPU mode: enable parallel processing for performance
-            enable_parallel = True
-            self.logger.info("🚀 CPU mode: parallel processing enabled for performance")
-        else:  # hybrid mode
-            # Hybrid mode: use configured parallel processing
-            enable_parallel = True
-            self.logger.info("⚖️  Hybrid mode: parallel processing enabled")
-        
-        # Override with ray_tracer_integration settings if available
-        if 'parallel_antenna_processing' in ray_tracer_config:
-            enable_parallel = ray_tracer_config['parallel_antenna_processing']
-        if 'num_workers' in ray_tracer_config:
-            max_workers = ray_tracer_config['num_workers']
-        
-        self.logger.info(f"Ray tracer configuration:")
-        self.logger.info(f"  - Type: {'CUDA' if use_cuda_ray_tracer else 'CPU'}")
-        self.logger.info(f"  - Ray tracing mode: {ray_tracing_mode}")
-        self.logger.info(f"  - Parallel processing: {enable_parallel}")
-        self.logger.info(f"  - Max workers: {max_workers}")
-        
-        # Calculate max ray length from scene bounds
-        def calculate_max_ray_length(scene_bounds):
-            """Calculate maximum ray length from scene bounds"""
-            if 'min' in scene_bounds and 'max' in scene_bounds:
-                import numpy as np
-                min_bounds = np.array(scene_bounds['min'])
-                max_bounds = np.array(scene_bounds['max'])
-                # Calculate diagonal distance of the scene
-                diagonal = np.linalg.norm(max_bounds - min_bounds)
-                # Add some margin for safety
-                return diagonal * 1.2
-            else:
-                # Fallback to default if scene bounds not properly configured
-                return 200.0
-        
-        scene_bounds = ray_tracing_config.get('scene_bounds', {})
-        max_ray_length = ray_tracing_config.get('max_ray_length', calculate_max_ray_length(scene_bounds))
-        
-        # Create ray tracer based on configuration
-        if use_cuda_ray_tracer and torch.cuda.is_available():
-            self.logger.info("🚀 Using CUDA-accelerated ray tracer for maximum performance")
-            # Get sampling configurations from new structure
-            angular_sampling = ray_tracing_config.get('angular_sampling', {})
-            spatial_sampling = ray_tracing_config.get('spatial_sampling', {})
-            mixed_precision = system_config.get('mixed_precision', {})
-            
-            self.logger.info(f"📏 Calculated max_ray_length: {max_ray_length:.1f}m from scene bounds")
-            
-            self.ray_tracer = CUDARayTracer(
-                azimuth_divisions=angular_sampling.get('azimuth_divisions', 18),
-                elevation_divisions=angular_sampling.get('elevation_divisions', 9),
-                max_ray_length=max_ray_length,
-                prism_network=self.prism_network,
-                signal_threshold=ray_tracing_config.get('signal_threshold', 1e-6),
-                enable_early_termination=ray_tracing_config.get('enable_early_termination', True),
-                uniform_samples=spatial_sampling.get('num_sampling_points', 64),
-                resampled_points=spatial_sampling.get('resampled_points', 32),
-                use_mixed_precision=mixed_precision.get('enabled', True)
-            )
-        else:
-            if use_cuda_ray_tracer and not torch.cuda.is_available():
-                self.logger.warning("⚠️  CUDA ray tracer requested but CUDA not available, falling back to CPU version")
-            self.logger.info("💻 Using CPU ray tracer")
-            # Get sampling configurations from new structure
-            angular_sampling = ray_tracing_config.get('angular_sampling', {})
-            spatial_sampling = ray_tracing_config.get('spatial_sampling', {})
-            cpu_config = system_config.get('cpu', {})
-            
-            self.logger.info(f"📏 Using max_ray_length: {max_ray_length:.1f}m from scene bounds")
-            
-            self.ray_tracer = CPURayTracer(
-                azimuth_divisions=angular_sampling.get('azimuth_divisions', 18),
-                elevation_divisions=angular_sampling.get('elevation_divisions', 9),
-                max_ray_length=max_ray_length,
-                prism_network=self.prism_network,
-                signal_threshold=ray_tracing_config.get('signal_threshold', 1e-6),
-                enable_early_termination=ray_tracing_config.get('enable_early_termination', True),
-                top_k_directions=angular_sampling.get('top_k_directions', 32),
-                max_workers=cpu_config.get('num_workers', 4)
-            )
+        # Note: PrismTrainingInterface will create its own ray tracer based on configuration
+        self.logger.info("📡 Ray tracer will be created by PrismTrainingInterface based on configuration")
         
         # Get configuration sections for new structure
         ray_tracing_config = self.config.get('ray_tracing', {})
@@ -699,25 +597,11 @@ class PrismTrainer:
         # Create PrismTrainingInterface with new simplified parameters
         self.model = PrismTrainingInterface(
             prism_network=self.prism_network,
-            ray_tracer=self.ray_tracer,
             ray_tracing_config=ray_tracing_config,
             system_config=system_config,
             checkpoint_dir=checkpoint_dir
         )
-        
-        # Pass config to the training interface
-        self.model.config = self.config
-        
-        # Ensure ray tracer uses the same device as training
-        if hasattr(self.ray_tracer, 'device') and self.ray_tracer.device != self.device:
-            self.logger.info(f"🔧 Updating ray tracer device from {self.ray_tracer.device} to {self.device}")
-            self.ray_tracer.device = self.device
-            # Also update the device string for CUDA ray tracer
-            if hasattr(self.ray_tracer, '_setup_cuda'):
-                self.ray_tracer._setup_cuda()
-        
 
-        
         # Log configuration details
         subcarrier_sampling = ray_tracing_config.get('subcarrier_sampling', {})
         subcarrier_ratio = subcarrier_sampling.get('sampling_ratio', 0.1)
@@ -1247,11 +1131,6 @@ class PrismTrainer:
                                 bs_position=bs_pos,
                                 antenna_indices=antenna_idx
                             )
-                            # Extract CSI predictions
-                            csi_pred = outputs['csi_predictions']
-                            
-                            print(f"    🎯 Computing loss for batch {batch_idx+1}...")
-                            loss = self.model.compute_loss(csi_pred, csi_target, self.criterion)
                     else:
                         # Regular forward pass
                         outputs = self.model(
@@ -1259,11 +1138,11 @@ class PrismTrainer:
                             bs_position=bs_pos,
                             antenna_indices=antenna_idx
                         )
-                        # Extract CSI predictions
-                        csi_pred = outputs['csi_predictions']
-                        
-                        print(f"    🎯 Computing loss for batch {batch_idx+1}...")
-                        loss = self.model.compute_loss(csi_pred, csi_target, self.criterion)
+                    
+                    # Extract CSI predictions and compute loss (common logic)
+                    csi_pred = outputs['csi_predictions']
+                    print(f"    🎯 Computing loss for batch {batch_idx+1}...")
+                    loss = self.model.compute_loss(csi_pred, csi_target, self.criterion)
                     
                     print(f"    ✅ Forward pass completed for batch {batch_idx+1}")
                     
@@ -1316,6 +1195,10 @@ class PrismTrainer:
                 
                 total_loss += loss.item()
                 num_batches += 1
+                
+                # Update progress monitoring
+                if hasattr(self, 'progress_monitor') and self.progress_monitor is not None:
+                    self.progress_monitor.update_batch_progress(batch_idx, loss.item(), self.batches_per_epoch)
                 
                 # Update training state in TrainingInterface
                 self.model.update_training_state(epoch, batch_idx, loss.item())
@@ -1863,9 +1746,7 @@ class PrismTrainer:
         
         # Load data
         print("📂 Loading training data...")
-        self._validate_data_integrity()  # Validate data integrity first
         self._load_data()
-        self._adjust_training_parameters()  # Adjust parameters for stability
         print(f"✅ Data loaded: {len(self.dataset)} samples")
         
         # Initialize training state
@@ -1902,7 +1783,15 @@ class PrismTrainer:
         
         start_time = time.time()
         
-        for epoch in range(start_epoch, self.num_epochs + 1):
+        # Adjust num_epochs if resuming from a later epoch
+        if start_epoch > self.num_epochs:
+            self.logger.warning(f"Resuming from epoch {start_epoch} but config only has {self.num_epochs} epochs")
+            self.logger.warning(f"Extending training to complete at least {start_epoch} epochs")
+            actual_num_epochs = max(self.num_epochs, start_epoch)
+        else:
+            actual_num_epochs = self.num_epochs
+            
+        for epoch in range(start_epoch, actual_num_epochs + 1):
             epoch_start_time = time.time()
             
             print(f"\n{'='*80}")
@@ -2066,42 +1955,48 @@ class PrismTrainer:
         print("\n🔍 Ray Tracer Configuration:")
         print("=" * 30)
         
-        # Display ray tracer type and performance info
-        if hasattr(self.ray_tracer, 'get_parallelization_stats'):
-            try:
-                stats = self.ray_tracer.get_parallelization_stats()
-                print(f"  - Type: {'CUDA' if stats.get('cuda_enabled', False) else 'CPU'}")
-                print(f"  - Parallel processing: {stats.get('parallel_processing_enabled', 'N/A')}")
-                print(f"  - Processing mode: {stats.get('processing_mode', 'N/A')}")
-                print(f"  - Max workers: {stats.get('max_workers', 'N/A')}")
-                print(f"  - Total directions: {stats.get('total_directions', 'N/A')}")
-            except Exception as e:
-                print(f"  - Error getting parallelization stats: {e}")
-        
-        # Display CUDA-specific information if available
-        if hasattr(self.ray_tracer, 'get_performance_info'):
-            try:
-                perf_info = self.ray_tracer.get_performance_info()
-                print(f"  - Device: {perf_info.get('device', 'N/A')}")
-                print(f"  - CUDA enabled: {perf_info.get('use_cuda', 'N/A')}")
-                if perf_info.get('use_cuda', False):
-                    print(f"  - CUDA device: {perf_info.get('cuda_device_name', 'N/A')}")
-                    print(f"  - CUDA memory: {perf_info.get('cuda_memory_gb', 'N/A')} GB")
-            except Exception as e:
-                print(f"  - Error getting performance info: {e}")
-        
-        # Display ray count analysis if available
-        if hasattr(self.ray_tracer, 'get_ray_count_analysis'):
-            try:
-                # Use default values for analysis
-                num_bs = 1
-                num_ue = 100
-                num_subcarriers = 64
-                analysis = self.ray_tracer.get_ray_count_analysis(num_bs, num_ue, num_subcarriers)
-                print(f"  - Total rays (1 BS, 100 UE, 64 subcarriers): {analysis.get('total_rays', 'N/A'):,}")
-                print(f"  - Ray count formula: {analysis.get('ray_count_formula', 'N/A')}")
-            except Exception as e:
-                print(f"  - Error getting ray count analysis: {e}")
+        # Display ray tracer type and performance info from TrainingInterface
+        if hasattr(self.model, 'ray_tracer') and self.model.ray_tracer is not None:
+            ray_tracer = self.model.ray_tracer
+            
+            # Display parallelization stats if available
+            if hasattr(ray_tracer, 'get_parallelization_stats'):
+                try:
+                    stats = ray_tracer.get_parallelization_stats()
+                    print(f"  - Type: {'CUDA' if stats.get('cuda_enabled', False) else 'CPU'}")
+                    print(f"  - Parallel processing: {stats.get('parallel_processing_enabled', 'N/A')}")
+                    print(f"  - Processing mode: {stats.get('processing_mode', 'N/A')}")
+                    print(f"  - Max workers: {stats.get('max_workers', 'N/A')}")
+                    print(f"  - Total directions: {stats.get('total_directions', 'N/A')}")
+                except Exception as e:
+                    print(f"  - Error getting parallelization stats: {e}")
+            
+            # Display CUDA-specific information if available
+            if hasattr(ray_tracer, 'get_performance_info'):
+                try:
+                    perf_info = ray_tracer.get_performance_info()
+                    print(f"  - Device: {perf_info.get('device', 'N/A')}")
+                    print(f"  - CUDA enabled: {perf_info.get('use_cuda', 'N/A')}")
+                    if perf_info.get('use_cuda', False):
+                        print(f"  - CUDA device: {perf_info.get('cuda_device_name', 'N/A')}")
+                        print(f"  - CUDA memory: {perf_info.get('cuda_memory_gb', 'N/A')} GB")
+                except Exception as e:
+                    print(f"  - Error getting performance info: {e}")
+            
+            # Display ray count analysis if available
+            if hasattr(ray_tracer, 'get_ray_count_analysis'):
+                try:
+                    # Use default values for analysis
+                    num_bs = 1
+                    num_ue = 100
+                    num_subcarriers = 64
+                    analysis = ray_tracer.get_ray_count_analysis(num_bs, num_ue, num_subcarriers)
+                    print(f"  - Total rays (1 BS, 100 UE, 64 subcarriers): {analysis.get('total_rays', 'N/A'):,}")
+                    print(f"  - Ray count formula: {analysis.get('ray_count_formula', 'N/A')}")
+                except Exception as e:
+                    print(f"  - Error getting ray count analysis: {e}")
+        else:
+            print(f"  - Ray tracer information not available (managed by TrainingInterface)")
         
         print("=" * 30)
     

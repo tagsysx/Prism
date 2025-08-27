@@ -12,13 +12,12 @@ Welcome to the documentation for **Prism: Wideband RF Neural Radiance Fields for
 - [Network Design](NETWORK_DESIGN.md) - System architecture and network design overview
 - [Training Design](TRAINING_DESIGN.md) - Comprehensive training methodology and implementation
 - [Ray Tracing Design](RAY_TRACING_DESIGN.md) - Advanced ray tracing system design
-- [CUDA Acceleration](CUDA_ACCELERATION.md) - GPU-accelerated ray tracing with CUDA implementation
-- [CSI Spatial Spectrum](CSI_SPATIAL_SPECTRUM.md) - CSI-based spatial spectrum generation methods and algorithms
+
+- [Spatial Spectrum](SPATIAL_SPECTRUM.md) - CSI-based spatial spectrum generation methods and algorithms
 
 ### **Implementation Guides**
 - [Installation Guide](INSTALLATION.md) - Setup and environment configuration
 - [Ray Tracing Design](RAY_TRACING_DESIGN.md) - Ray tracing implementation and optimization
-- [CUDA Acceleration](CUDA_ACCELERATION.md) - GPU acceleration setup and optimization
 
 ### **Integration & Compatibility**
 - [Installation Guide](INSTALLATION.md) - Dependencies and compatibility information
@@ -30,8 +29,8 @@ Welcome to the documentation for **Prism: Wideband RF Neural Radiance Fields for
 - **Training the model?** See [Training Design](TRAINING_DESIGN.md)
 - **Technical details?** Read the [Specification](SPECIFICATION.md)
 - **Ray tracing implementation?** Explore [Ray Tracing Design](RAY_TRACING_DESIGN.md)
-- **GPU acceleration?** Check [CUDA Acceleration](CUDA_ACCELERATION.md)
-- **CSI spatial spectrum analysis?** See [CSI Spatial Spectrum](CSI_SPATIAL_SPECTRUM.md)
+
+- **CSI spatial spectrum analysis?** See [Spatial Spectrum](SPATIAL_SPECTRUM.md)
 
 ## 📖 **Documentation Conventions**
 
