@@ -76,38 +76,14 @@ class PrismTrainingInterface(nn.Module):
     ):
         super().__init__()
         
-        # Note: config_loader parameter has been removed as ray tracers no longer need it
-        
         # Store configuration
         self.ray_tracing_config = ray_tracing_config or {}
         self.system_config = system_config or {}
         self.user_equipment_config = user_equipment_config or {}
         
         # Set logger level from system config - use fallback if missing
-        try:
-            # Try system.logging first
-            if 'logging' in self.system_config:
-                logging_config = self.system_config['logging']
-                log_level_str = logging_config['log_level']
-            else:
-                # Fallback: check if logging config is at root level
-                import yaml
-                # Get the full config from the caller if available
-                full_config = getattr(self, '_full_config', {})
-                if 'logging' in full_config:
-                    logging_config = full_config['logging']
-                    log_level_str = logging_config['log_level']
-                else:
-                    # Default fallback
-                    log_level_str = 'INFO'
-                    logger.warning("⚠️  No logging config found, using default INFO level")
-            
-            log_level = getattr(logging, log_level_str.upper(), logging.INFO)
-            logger.setLevel(log_level)
-            logger.info(f"TrainingInterface logger level set to: {log_level_str}")
-        except (KeyError, TypeError) as e:
-            logger.warning(f"⚠️  Could not read logging config: {e}, using default INFO level")
-            logger.setLevel(logging.INFO)
+        log_level = self.system_config.get('logging', {}).get('log_level', 'INFO')
+        logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
         
         # Get ray tracing mode from system config - fail fast if missing
         try:
@@ -131,6 +107,7 @@ class PrismTrainingInterface(nn.Module):
         else:
             # Use provided ray_tracer but validate it matches the mode
             self.ray_tracer = self._validate_ray_tracer(ray_tracer, ray_tracing_mode)
+        
         # Get configuration parameters from config dictionaries - fail fast if missing
         try:
             spatial_sampling = self.ray_tracing_config['spatial_sampling']
@@ -146,7 +123,7 @@ class PrismTrainingInterface(nn.Module):
             logger.error("   Please check your configuration file.")
             sys.exit(1)
         
-        # Store configuration parameters - fail fast if missing required config
+        # Store configuration parameters - fail fast if missing
         try:
             self.num_sampling_points = spatial_sampling['num_sampling_points']
         except KeyError:
@@ -174,7 +151,10 @@ class PrismTrainingInterface(nn.Module):
             logger.error("   Please check your configuration file.")
             sys.exit(1)
         
-        # Handle checkpoint directory path - fail-fast if not provided
+        # Calculate and log training ray count if configuration is available
+        self._log_training_ray_count()
+        
+        # Initialize checkpoint directory
         logger.info(f"🔍 DEBUG: checkpoint_dir parameter = {repr(checkpoint_dir)}")
         
         if not checkpoint_dir or not checkpoint_dir.strip():
@@ -308,24 +288,37 @@ class PrismTrainingInterface(nn.Module):
         
         Args:
             ray_tracer: The ray tracer instance to validate
-            ray_tracing_mode: The expected mode
+            ray_tracing_mode: The expected ray tracing mode
             
         Returns:
-            The validated ray tracer
+            Validated ray tracer instance
         """
-        from .ray_tracer_cpu import CPURayTracer
         from .ray_tracer_cuda import CUDARayTracer
+        from .ray_tracer_cpu import CPURayTracer
         
-        if ray_tracing_mode == 'cuda':
-            if not isinstance(ray_tracer, CUDARayTracer):
-                logger.warning(f"Expected CUDARayTracer for 'cuda' mode, but got {type(ray_tracer).__name__}. Creating new CUDARayTracer.")
-                return self._create_ray_tracer_by_mode('cuda')
-        elif ray_tracing_mode == 'cpu':
-            if not isinstance(ray_tracer, CPURayTracer):
-                logger.warning(f"Expected CPURayTracer for 'cpu' mode, but got {type(ray_tracer).__name__}. Creating new CPURayTracer.")
-                return self._create_ray_tracer_by_mode('cpu')
-        # For hybrid mode, accept either type
+        # Check if the ray tracer type matches the mode
+        if ray_tracing_mode == 'cuda' and not isinstance(ray_tracer, CUDARayTracer):
+            logger.warning(f"⚠️  Expected CUDARayTracer for 'cuda' mode, but got {type(ray_tracer).__name__}")
+            logger.warning("   Creating new CUDARayTracer to match the mode")
+            return self._create_ray_tracer_by_mode('cuda')
         
+        elif ray_tracing_mode == 'cpu' and not isinstance(ray_tracer, CPURayTracer):
+            logger.warning(f"⚠️  Expected CPURayTracer for 'cpu' mode, but got {type(ray_tracer).__name__}")
+            logger.warning("   Creating new CPURayTracer to match the mode")
+            return self._create_ray_tracer_by_mode('cpu')
+        
+        elif ray_tracing_mode == 'hybrid':
+            # For hybrid mode, we accept either type but prefer CUDA
+            if isinstance(ray_tracer, CUDARayTracer):
+                logger.info("✅ Hybrid mode: Using provided CUDARayTracer")
+            elif isinstance(ray_tracer, CPURayTracer):
+                logger.info("✅ Hybrid mode: Using provided CPURayTracer")
+            else:
+                logger.warning(f"⚠️  Hybrid mode: Unexpected ray tracer type {type(ray_tracer).__name__}")
+                logger.warning("   Creating new ray tracer for hybrid mode")
+                return self._create_ray_tracer_by_mode('hybrid')
+        
+        logger.info(f"✅ Ray tracer validation passed: {type(ray_tracer).__name__} for {ray_tracing_mode} mode")
         return ray_tracer
     
     def forward(self, ue_positions: torch.Tensor, bs_position: torch.Tensor, antenna_indices: torch.Tensor, return_intermediates: bool = False) -> Dict[str, torch.Tensor]:
@@ -353,7 +346,7 @@ class PrismTrainingInterface(nn.Module):
         num_subcarriers = self.prism_network.num_subcarriers
         num_selected = int(num_subcarriers * self.subcarrier_sampling_ratio)
         
-        logger.info(f"🚀 Forward pass: {batch_size} batches × {num_bs_antennas} BS antennas × {num_ue_antennas} UE antennas × {num_selected} selected subcarriers")
+        logger.debug(f"🚀 Forward pass: {batch_size} batches × {num_bs_antennas} BS antennas × {num_ue_antennas} UE antennas × {num_selected} selected subcarriers")
         
         # Step 1: Initialize current_selection attributes directly to ensure they exist
         self.current_selection = torch.zeros(
@@ -390,7 +383,7 @@ class PrismTrainingInterface(nn.Module):
             if bs_antenna_idx % 5 == 0 or bs_antenna_idx == num_bs_antennas - 1:  # More frequent progress updates
                 progress = (bs_antenna_idx / num_bs_antennas) * 100
                 print(f"      📡 BS antenna {bs_antenna_idx+1}/{num_bs_antennas} ({progress:.1f}%)")
-                logger.info(f"📡 Processing BS antenna {bs_antenna_idx+1}/{num_bs_antennas} ({progress:.1f}%)")
+                logger.debug(f"📡 Processing BS antenna {bs_antenna_idx+1}/{num_bs_antennas} ({progress:.1f}%)")
             
             # Get antenna-specific embedding
             antenna_embedding = self.prism_network.antenna_codebook(antenna_indices[:, bs_antenna_idx])
@@ -1101,12 +1094,14 @@ class PrismTrainingInterface(nn.Module):
             checkpoint['scheduler_state_dict'] = scheduler_state_dict
         
         torch.save(checkpoint, checkpoint_path)
-        logger.info(f"Checkpoint saved: {checkpoint_path}")
+        logger.info(f"💾 TrainingInterface checkpoint saved: {checkpoint_path}")
+        logger.info(f"📊 Checkpoint includes: epoch={self.current_epoch}, batch={self.current_batch}, best_loss={self.best_loss:.6f}")
         
         # Save training info
         info_path = checkpoint_path.replace('.pt', '_info.json')
         with open(info_path, 'w') as f:
             json.dump(self.get_training_info(), f, indent=2)
+        logger.info(f"📝 Training info saved: {info_path}")
     
     def load_checkpoint(self, checkpoint_path: str):
         """Load training checkpoint."""
@@ -1163,3 +1158,74 @@ class PrismTrainingInterface(nn.Module):
                 'top_k_directions': self.prism_network.top_k_directions
             }
         }
+
+    def _log_training_ray_count(self):
+        """Calculate and log the total number of rays for training based on configuration."""
+        try:
+            # Get configuration values
+            angular_sampling = self.ray_tracing_config.get('angular_sampling', {})
+            spatial_sampling = self.ray_tracing_config.get('spatial_sampling', {})
+            subcarrier_sampling = self.ray_tracing_config.get('subcarrier_sampling', {})
+            
+            # Get training configuration from system config or use defaults
+            training_config = getattr(self, 'config', {}).get('training', {})
+            num_epochs = training_config.get('num_epochs', 2)
+            batches_per_epoch = training_config.get('batches_per_epoch', 5)
+            
+            # Get ray tracing configuration values
+            top_k_directions = angular_sampling.get('top_k_directions', 32)
+            azimuth_divisions = angular_sampling.get('azimuth_divisions', 18)
+            elevation_divisions = angular_sampling.get('elevation_divisions', 9)
+            num_sampling_points = spatial_sampling.get('num_sampling_points', 64)
+            resampled_points = spatial_sampling.get('resampled_points', 32)
+            
+            # Get subcarrier configuration
+            sampling_ratio = subcarrier_sampling.get('sampling_ratio', 0.01)
+            num_subcarriers = getattr(self.prism_network, 'num_subcarriers', 408)
+            
+            # Get system configuration
+            num_bs_antennas = self.system_config.get('base_station', {}).get('num_antennas', 64)
+            num_ue_antennas = self.user_equipment_config.get('num_ue_antennas', 4)
+            
+            # Calculate ray counts
+            rays_per_direction = num_sampling_points + resampled_points
+            rays_per_batch = top_k_directions * rays_per_direction * num_subcarriers * sampling_ratio
+            rays_per_epoch = batches_per_epoch * rays_per_batch
+            total_rays_training = num_epochs * rays_per_epoch
+            
+            # Calculate total possible directions
+            total_possible_directions = azimuth_divisions * elevation_divisions
+            
+            # Log detailed breakdown
+            logger.info("=" * 80)
+            logger.info("📊 TRAINING RAY COUNT ANALYSIS")
+            logger.info("=" * 80)
+            logger.info(f"🎯 Training Configuration:")
+            logger.info(f"   • Number of epochs: {num_epochs}")
+            logger.info(f"   • Batches per epoch: {batches_per_epoch}")
+            logger.info(f"   • Total batches: {num_epochs * batches_per_epoch}")
+            logger.info(f"")
+            logger.info(f"🔍 Ray Tracing Configuration:")
+            logger.info(f"   • Top-K directions: {top_k_directions}")
+            logger.info(f"   • Total possible directions: {total_possible_directions} ({azimuth_divisions} × {elevation_divisions})")
+            logger.info(f"   • Sampling points per ray: {num_sampling_points} uniform + {resampled_points} resampled = {rays_per_direction}")
+            logger.info(f"   • Total subcarriers: {num_subcarriers}")
+            logger.info(f"   • Subcarrier sampling ratio: {sampling_ratio:.3f} ({sampling_ratio*100:.1f}%)")
+            logger.info(f"   • BS antennas: {num_bs_antennas}")
+            logger.info(f"   • UE antennas per device: {num_ue_antennas}")
+            logger.info(f"")
+            logger.info(f"🧮 Ray Count Calculations:")
+            logger.info(f"   • Rays per direction: {rays_per_direction:,}")
+            logger.info(f"   • Rays per batch: {rays_per_batch:,.0f}")
+            logger.info(f"   • Rays per epoch: {rays_per_epoch:,.0f}")
+            logger.info(f"   • Total rays for training: {total_rays_training:,.0f}")
+            logger.info(f"")
+            logger.info(f"⚡ Performance Notes:")
+            logger.info(f"   • CUDA acceleration will process {top_k_directions} directions per batch")
+            logger.info(f"   • Each direction processes {num_subcarriers * sampling_ratio:.1f} subcarriers")
+            logger.info(f"   • Total computational complexity: O({total_rays_training:,.0e})")
+            logger.info("=" * 80)
+            
+        except Exception as e:
+            logger.warning(f"⚠️  Could not calculate training ray count: {e}")
+            logger.info("Using default ray count logging")

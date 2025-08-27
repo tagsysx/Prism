@@ -1,7 +1,15 @@
 # Prism Configuration Guide
 
 ## Overview
-This document explains the configuration parameters for the Prism neural network-based electromagnetic ray tracing system. The configuration has been reorganized for better clarity and maintainability.
+This document explains the configuration parameters for the Prism neural network-based electromagnetic ray tracing system. The configuration has been completely reorganized and updated with the latest features including automatic GPU selection, improved data handling, enhanced CUDA acceleration, and comprehensive testing capabilities.
+
+### Latest Updates (January 2025)
+- ✅ **Automatic GPU Selection**: No manual GPU configuration needed
+- ✅ **Unified Data Handling**: Single dataset with automatic train/test splitting
+- ✅ **Enhanced CUDA Support**: Improved CUDA ray tracing with fallback mechanisms
+- ✅ **Comprehensive Testing**: Complete testing pipeline with visualization
+- ✅ **Performance Optimizations**: Reduced computational complexity for faster training
+- ✅ **Template Variables**: Dynamic path resolution in configuration files
 
 ## Table of Contents
 1. [Key Concepts Clarification](#key-concepts-clarification)
@@ -16,7 +24,9 @@ This document explains the configuration parameters for the Prism neural network
 10. [Output Configuration](#output-configuration)
 11. [Performance Optimization Guide](#performance-optimization-guide)
 12. [CUDA Acceleration Guide](#cuda-acceleration-guide)
-13. [Configuration Examples](#configuration-examples)
+13. [Recent Updates and Improvements](#recent-updates-and-improvements-january-2025)
+14. [Configuration Examples](#configuration-examples)
+15. [Troubleshooting Guide](#troubleshooting-guide)
 
 ## Key Concepts Clarification
 
@@ -213,11 +223,10 @@ neural_networks:
     hidden_dim: 256               # Hidden layer dimension
     num_hidden_layers: 4          # Number of hidden layers
     output_dim: 408               # Number of subcarriers K
-    num_ue_antennas: 4            # Number of UE antennas per device
     activation: 'relu'            # Activation function
 ```
 
-**Description**: Predicts radiance (signal strength) for each subcarrier and UE antenna.
+**Description**: Predicts radiance (signal strength) for each subcarrier and UE antenna. Note that `num_ue_antennas` is now specified in the `attenuation_decoder` section for consistency.
 
 ---
 
@@ -302,20 +311,25 @@ system:
 
 **Description**: Controls the execution mode for ray tracing operations with automatic fallback capabilities.
 
-### CUDA-Specific Settings
+### CUDA-Specific Settings (Automatic GPU Selection)
 ```yaml
 system:
   cuda:
-    device_id: 0                     # CUDA device ID to use (0 for first GPU)
+    # GPU selection is now automatic - system will scan and select the best available GPU
+    # No need to manually specify device_id or gpu_ids
     optimization_level: 'O2'         # CUDA optimization level ('O0', 'O1', 'O2', 'O3')
     benchmark_mode: true             # Enable CUDA benchmark mode for optimal performance
     deterministic: false             # Disable deterministic mode for better performance
-    multi_gpu: false                 # Disable multi-GPU CUDA operations
-    gpu_ids: [0]                     # Use only GPU 0
+    multi_gpu: false                 # Enable/disable multi-GPU CUDA operations
     memory_pool: true                # Enable CUDA memory pool for better memory management
+    auto_select_gpu: true            # Enable automatic GPU selection (default: true)
 ```
 
-**Description**: Advanced CUDA configuration options for optimal performance and control.
+**Description**: 
+- **Automatic GPU Selection**: System automatically detects and selects the best available GPU
+- **No Manual Configuration**: No need to specify device IDs or GPU lists
+- **Intelligent Selection**: Chooses GPU based on memory availability and compute capability
+- **Fallback Support**: Automatically falls back to CPU if no suitable GPU is found
 
 ### CPU-Specific Settings
 ```yaml
@@ -449,13 +463,16 @@ testing:
 ### Model Configuration
 ```yaml
 testing:
-  model_path: "results/training-sionna/checkpoints/latest/latest_batch_checkpoint.pt"    # Path to trained model for testing
+  model_path: "results/sionna/training/models/best_model.pt"    # Path to trained model for testing
   # Alternative model paths (uncomment to use):
-  # model_path: "results/training-sionna/checkpoints/models/checkpoint_epoch_1_batch_30.pt"  # Specific epoch/batch
-  # model_path: "results/training-sionna/backup_old_checkpoints/latest_batch_checkpoint.pt"  # Backup checkpoint
+  # model_path: "results/sionna/training/checkpoints/checkpoint_epoch_1_batch_39.pt"  # Specific epoch/batch
+  # model_path: "results/sionna/training/models/best_model.pt"  # Best model
 ```
 
-**Description**: Configuration for loading trained models for testing and evaluation.
+**Description**: 
+- **Best Model Path**: Uses the best performing model saved during training
+- **Checkpoint Support**: Can load specific epoch/batch checkpoints for analysis
+- **Template Variable Support**: Paths use the same base directory structure as training
 
 ### Evaluation Metrics
 ```yaml
@@ -483,53 +500,91 @@ testing:
 
 ## Input Configuration
 
-### Data Paths
+### Unified Data Handling (New Approach)
 ```yaml
 input:
-  # Input data paths (all paths relative to project root)
-  training_data: "data/sionna/sionna_5g_training.h5"     # Training data HDF5 file (80 positions)
-  testing_data: "data/sionna/sionna_5g_testing.h5"       # Testing data HDF5 file (20 positions)
+  # Single dataset configuration for train/test split
+  dataset_path: "data/sionna/sionna_5g_simulation.h5"    # Single HDF5 file containing all data
+  
+  # Train/test split configuration
+  split:
+    random_seed: 42                    # Random seed for reproducible splits
+    train_ratio: 0.2                   # Training data ratio (0.0 to 1.0)
+    test_ratio: 0.1                    # Testing data ratio (0.0 to 1.0)
+    # Note: train_ratio + test_ratio can be < 1.0 to use only subset of data
 ```
 
-**Description**: Paths to training and testing datasets. All paths are relative to the project root directory.
+**Description**: 
+- **Unified approach**: Single dataset file with automatic train/test splitting
+- **Flexible ratios**: Configure training and testing data proportions
+- **Reproducible splits**: Fixed random seed ensures consistent data splits
+- **Subset support**: Use only a portion of data for faster experimentation
+
+### Legacy Data Paths (Still Supported)
+```yaml
+input:
+  # Alternative: Separate training and testing files
+  training_data: "data/sionna/sionna_5g_training.h5"     # Training data HDF5 file
+  testing_data: "data/sionna/sionna_5g_testing.h5"       # Testing data HDF5 file
+```
+
+**Note**: The system automatically detects which configuration approach is used and handles data loading accordingly.
 
 ---
 
 ## Output Configuration
 
-### Base Directories
+### Base Directories with Template Variables
 ```yaml
 output:
-  base_dir: "results"                           # Base results directory
+  # Base directories (all paths relative to project root)
+  base_dir: "results/sionna"                           # Base results directory
 ```
 
 **Description**: Base directory for all output files, relative to project root.
 
-### Training Output Directories
+### Training Output Directories (Template Variables)
 ```yaml
 output:
+  # Training output directories (using template variables)
   training:
-    output_dir: "results/training-sionna"                    # Main training output directory
-    checkpoint_dir: "results/training-sionna/checkpoints"    # Directory for saving checkpoints
-    tensorboard_dir: "results/training-sionna/tensorboard"   # TensorBoard logs directory
-    models_dir: "results/training-sionna/models"             # Saved models directory
-    logs_dir: "results/training-sionna/logs"                 # Training logs directory
+    checkpoint_dir: "{{base_dir}}/training/checkpoints"    # Directory for saving checkpoints
+    tensorboard_dir: "{{base_dir}}/training/tensorboard"   # TensorBoard logs directory
+    models_dir: "{{base_dir}}/training/models"             # Saved models directory
+    
+    # Training logging configuration
+    logging:
+      log_level: 'INFO'                 # Training logging level
+      log_dir: "{{base_dir}}/training/logs"                # Training logs directory
+      log_file: "{{base_dir}}/training/logs/training.log"  # Training log file path
 ```
 
-**Description**: Organized directory structure for training outputs.
+**Description**: 
+- **Template Variables**: Use `{{base_dir}}` for dynamic path resolution
+- **Automatic Creation**: Directories are created automatically during execution
+- **Centralized Logging**: Dedicated logging configuration for training
 
-### Testing Output Directories
+### Testing Output Directories (Template Variables)
 ```yaml
 output:
+  # Testing output directories (using template variables)
   testing:
-    output_dir: "results/testing-sionna"                     # Main testing output directory
-    results_dir: "results/testing-sionna/results"            # Test results and metrics
-    plots_dir: "results/testing-sionna/plots"                # Visualization plots
-    predictions_dir: "results/testing-sionna/predictions"    # Model predictions
-    reports_dir: "results/testing-sionna/reports"            # Test reports directory
+    results_dir: "{{base_dir}}/testing/results"      # Test results and metrics
+    plots_dir: "{{base_dir}}/testing/plots"          # Visualization plots
+    predictions_dir: "{{base_dir}}/testing/predictions"  # Model predictions
+    reports_dir: "{{base_dir}}/testing/reports"      # Test reports directory
+    
+    # Testing logging configuration
+    logging:
+      log_level: 'INFO'                  # Testing logging level
+      log_dir: "{{base_dir}}/testing/logs"             # Testing logs directory
+      log_file: "{{base_dir}}/testing/logs/testing.log"  # Testing log file path
 ```
 
-**Description**: Organized directory structure for testing outputs.
+**Description**: 
+- **Organized Structure**: Separate directories for different types of test outputs
+- **Template Variables**: Dynamic path resolution based on base directory
+- **Comprehensive Logging**: Dedicated logging for testing operations
 
 ### File Formats and Compression
 ```yaml
@@ -748,32 +803,37 @@ curriculum_learning:
 
 ---
 
-## Recent Updates and Improvements
+## Recent Updates and Improvements (January 2025)
 
-### Configuration Reorganization
+### Major Configuration Enhancements
 
-The configuration file has been completely reorganized for better clarity and maintainability:
+The configuration system has been completely overhauled with significant improvements:
 
-#### ✅ **Key Improvements**
-1. **Cleaner Structure**: Logical grouping of related parameters
-2. **New System Section**: Centralized system-wide settings
-3. **Enhanced OFDM Support**: Comprehensive 5G NR OFDM parameters
-4. **Spatial Spectrum Analysis**: Built-in beamforming and direction finding
-5. **Mixed Precision Training**: Improved performance and memory efficiency
-6. **Organized Output Directories**: Structured output organization
+#### ✅ **Key New Features**
+1. **Automatic GPU Selection**: Intelligent GPU detection and selection
+2. **Template Variables**: Dynamic path resolution with `{{base_dir}}` syntax
+3. **Unified Data Handling**: Single dataset with automatic train/test splitting
+4. **Enhanced Testing Pipeline**: Comprehensive testing with visualization
+5. **Improved CUDA Support**: Better CUDA acceleration with fallback mechanisms
+6. **Centralized Logging**: Dedicated logging configuration for training and testing
 
-#### 🔧 **New Features**
-- **Ray Tracing Modes**: Clear selection between 'cuda', 'cpu', and 'hybrid' modes
-- **OFDM System Parameters**: Realistic 5G NR configuration
-- **Spatial Spectrum Configuration**: Advanced beamforming capabilities
-- **Mixed Precision Support**: Automatic mixed precision training
-- **Comprehensive Testing**: Dedicated testing configuration section
+#### 🚀 **Performance Improvements**
+- **Reduced Complexity**: Optimized angular and spatial sampling for faster training
+- **Smart Memory Management**: CUDA memory pool and automatic memory optimization
+- **Efficient Data Loading**: Streamlined data pipeline with configurable split ratios
+- **Parallel Processing**: Enhanced CPU multiprocessing support
+
+#### 🔧 **System Enhancements**
+- **Automatic Hardware Detection**: No manual GPU configuration needed
+- **Robust Fallback Mechanisms**: Seamless CPU fallback when CUDA unavailable
+- **Flexible Ray Tracing Modes**: 'cuda', 'cpu', and 'hybrid' execution modes
+- **Advanced Subcarrier Sampling**: Improved OFDM subcarrier selection strategies
 
 #### 📊 **Configuration Benefits**
-- **Better Organization**: Easier to find and modify parameters
-- **Clear Documentation**: Each section thoroughly documented
-- **Realistic Parameters**: 5G NR compliant OFDM settings
-- **Flexible Deployment**: Support for various hardware configurations
+- **Simplified Setup**: Minimal manual configuration required
+- **Better Organization**: Logical grouping with clear documentation
+- **Production Ready**: Robust error handling and recovery mechanisms
+- **Scalable Architecture**: Support for various hardware configurations
 
 ## CUDA Acceleration Guide
 
@@ -843,18 +903,19 @@ The system will automatically:
 
 ## Configuration Examples
 
-### Example 1: High-Performance CUDA Configuration
+### Example 1: High-Performance CUDA Configuration (2025)
 ```yaml
-# System configuration for maximum performance
+# System configuration for maximum performance with automatic GPU selection
 system:
   device: 'cuda'
   batch_size: 4
   ray_tracing_mode: 'cuda'
-  fallback_to_cpu: false
+  fallback_to_cpu: true  # Always enable fallback for robustness
   gpu_memory_fraction: 0.9
   
   cuda:
-    device_id: 0
+    # No manual GPU selection needed - automatic detection
+    auto_select_gpu: true
     optimization_level: 'O3'
     benchmark_mode: true
     deterministic: false
@@ -870,28 +931,44 @@ ray_tracing:
   spatial_sampling:
     num_sampling_points: 128
     resampled_points: 64
+
+# Unified data handling
+input:
+  dataset_path: "data/sionna/sionna_5g_simulation.h5"
+  split:
+    train_ratio: 0.8
+    test_ratio: 0.2
+    random_seed: 42
+
+# Template-based output paths
+output:
+  base_dir: "results/sionna"
+  training:
+    models_dir: "{{base_dir}}/training/models"
+    checkpoint_dir: "{{base_dir}}/training/checkpoints"
 ```
 
-### Example 2: Balanced Performance Configuration
+### Example 2: Balanced Performance Configuration (2025)
 ```yaml
 # System configuration for balanced performance and stability
 system:
   device: 'cuda'
   batch_size: 2
-  ray_tracing_mode: 'hybrid'
+  ray_tracing_mode: 'hybrid'  # Neural networks on GPU, ray tracing on CPU
   fallback_to_cpu: true
   gpu_memory_fraction: 0.8
   
   cuda:
-    device_id: 0
+    auto_select_gpu: true  # Automatic GPU selection
     optimization_level: 'O2'
     benchmark_mode: true
     deterministic: false
+    memory_pool: true
   
   cpu:
     num_workers: 4
 
-# Ray tracing with medium resolution
+# Ray tracing with medium resolution (current default)
 ray_tracing:
   angular_sampling:
     azimuth_divisions: 18
@@ -901,6 +978,31 @@ ray_tracing:
   spatial_sampling:
     num_sampling_points: 64
     resampled_points: 32
+  
+  subcarrier_sampling:
+    sampling_ratio: 0.01  # Use 1% of subcarriers for efficiency
+    sampling_method: 'random'
+    antenna_consistent: true
+
+# Unified data with smaller split for faster experimentation
+input:
+  dataset_path: "data/sionna/sionna_5g_simulation.h5"
+  split:
+    train_ratio: 0.2  # Use only 20% for training
+    test_ratio: 0.1   # Use only 10% for testing
+    random_seed: 42
+
+# Template-based paths with organized structure
+output:
+  base_dir: "results/sionna"
+  training:
+    checkpoint_dir: "{{base_dir}}/training/checkpoints"
+    models_dir: "{{base_dir}}/training/models"
+    logging:
+      log_file: "{{base_dir}}/training/logs/training.log"
+  testing:
+    results_dir: "{{base_dir}}/testing/results"
+    plots_dir: "{{base_dir}}/testing/plots"
 ```
 
 ### Example 3: CPU-Only Configuration
@@ -992,9 +1094,9 @@ training:
     min_delta: 1e-7
 ```
 
-### Example 6: Multi-GPU Configuration
+### Example 6: Multi-GPU Configuration (2025)
 ```yaml
-# System configuration for multi-GPU setup
+# System configuration for multi-GPU setup with automatic selection
 system:
   device: 'cuda'
   batch_size: 16
@@ -1003,10 +1105,193 @@ system:
   gpu_memory_fraction: 0.8
   
   cuda:
-    device_id: 0  # Primary GPU
-    multi_gpu: true
-    gpu_ids: [0, 1]  # Use first two GPUs
+    auto_select_gpu: true  # Automatic GPU selection
+    multi_gpu: true        # Enable multi-GPU if available
     optimization_level: 'O2'
     benchmark_mode: true
     memory_pool: true
+
+# High-throughput data configuration
+input:
+  dataset_path: "data/sionna/sionna_5g_simulation.h5"
+  split:
+    train_ratio: 0.8  # Use most data for training
+    test_ratio: 0.2
+    random_seed: 42
+
+# Production training settings
+training:
+  learning_rate: 1e-4
+  num_epochs: 100
+  batches_per_epoch: 200
+  auto_checkpoint: true
+  checkpoint_frequency: 50
+```
+
+---
+
+## Troubleshooting Guide
+
+### Common Configuration Issues
+
+#### 1. CUDA Not Available
+**Problem**: System falls back to CPU even when GPU is available
+```
+WARNING: CUDA not available, falling back to CPU
+```
+
+**Solutions**:
+```yaml
+# Check CUDA configuration
+system:
+  device: 'cuda'
+  fallback_to_cpu: true  # Ensure fallback is enabled
+  cuda:
+    auto_select_gpu: true  # Let system choose best GPU
+```
+
+**Debugging Steps**:
+1. Verify PyTorch CUDA installation: `python -c "import torch; print(torch.cuda.is_available())"`
+2. Check GPU memory: `nvidia-smi`
+3. Enable debug logging: `log_level: 'DEBUG'`
+
+#### 2. Template Variable Errors
+**Problem**: Path template variables not resolved
+```
+ERROR: Path {{base_dir}}/training/models not found
+```
+
+**Solution**: Ensure ConfigLoader processes template variables correctly
+```yaml
+output:
+  base_dir: "results/sionna"  # Must be defined before use
+  training:
+    models_dir: "{{base_dir}}/training/models"  # Correct syntax
+```
+
+#### 3. Data Loading Issues
+**Problem**: Dataset not found or split configuration errors
+```
+ERROR: Dataset file not found: data/sionna/sionna_5g_simulation.h5
+```
+
+**Solutions**:
+```yaml
+# Check data path and split configuration
+input:
+  dataset_path: "data/sionna/sionna_5g_simulation.h5"  # Verify file exists
+  split:
+    train_ratio: 0.2  # Ensure ratios are valid (0.0 to 1.0)
+    test_ratio: 0.1
+    random_seed: 42   # For reproducible splits
+```
+
+#### 4. Memory Issues
+**Problem**: Out of memory errors during training
+```
+RuntimeError: CUDA out of memory
+```
+
+**Solutions**:
+```yaml
+system:
+  batch_size: 1  # Reduce batch size
+  gpu_memory_fraction: 0.6  # Use less GPU memory
+  
+ray_tracing:
+  spatial_sampling:
+    num_sampling_points: 32  # Reduce sampling points
+    resampled_points: 16
+  
+  subcarrier_sampling:
+    sampling_ratio: 0.005  # Use fewer subcarriers
+```
+
+#### 5. Performance Issues
+**Problem**: Training is too slow
+```
+INFO: Epoch 1 taking longer than expected...
+```
+
+**Solutions**:
+```yaml
+# Optimize for speed
+ray_tracing:
+  angular_sampling:
+    azimuth_divisions: 12    # Reduce angular resolution
+    elevation_divisions: 6
+    top_k_directions: 16     # Use fewer directions
+  
+  spatial_sampling:
+    num_sampling_points: 32  # Reduce spatial sampling
+    resampled_points: 16
+  
+  subcarrier_sampling:
+    sampling_ratio: 0.005    # Use minimal subcarriers for testing
+```
+
+### Best Practices
+
+#### 1. Development vs Production
+```yaml
+# Development (fast iteration)
+training:
+  num_epochs: 2
+  batches_per_epoch: 5
+  checkpoint_frequency: 1
+
+input:
+  split:
+    train_ratio: 0.1  # Use small subset
+    test_ratio: 0.05
+
+# Production (full training)
+training:
+  num_epochs: 100
+  batches_per_epoch: 200
+  checkpoint_frequency: 50
+
+input:
+  split:
+    train_ratio: 0.8  # Use most data
+    test_ratio: 0.2
+```
+
+#### 2. Hardware-Specific Optimization
+```yaml
+# High-end GPU (RTX 4090, A100)
+system:
+  batch_size: 8
+  gpu_memory_fraction: 0.9
+ray_tracing:
+  top_k_directions: 64
+
+# Mid-range GPU (RTX 3070, RTX 4070)
+system:
+  batch_size: 4
+  gpu_memory_fraction: 0.8
+ray_tracing:
+  top_k_directions: 32
+
+# Low-end GPU or CPU
+system:
+  batch_size: 1
+  ray_tracing_mode: 'cpu'
+ray_tracing:
+  top_k_directions: 16
+```
+
+#### 3. Monitoring and Debugging
+```yaml
+output:
+  training:
+    logging:
+      log_level: 'DEBUG'  # Enable detailed logging
+  testing:
+    logging:
+      log_level: 'INFO'   # Standard logging for testing
+
+training:
+  auto_checkpoint: true
+  checkpoint_frequency: 10  # Frequent checkpoints for debugging
 ```

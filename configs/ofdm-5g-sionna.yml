@@ -107,7 +107,7 @@ ray_tracing:
     resampled_points: 32             # Second stage: importance-based resampled points
   
   subcarrier_sampling:
-    sampling_ratio: 0.01              # Ratio of subcarriers to select (1%)
+    sampling_ratio: 0.1              # Ratio of subcarriers to select (10%)
     sampling_method: 'random'         # Sampling method: 'random' or 'uniform'
     antenna_consistent: true          # All BS antennas use same subcarriers for each UE
     antenna_specific_selection: false # Disable antenna-specific selection (deprecated)
@@ -177,7 +177,7 @@ training:
   
   # Checkpoint and recovery
   auto_checkpoint: true              # Enable automatic checkpointing
-  checkpoint_frequency: 1           # Save checkpoint every N batches
+  checkpoint_frequency: 10           # Save checkpoint every N batches
   epoch_save_interval: 1             # Save checkpoint every N epochs
   
   # Loss function
@@ -206,6 +206,8 @@ training:
     patience: 10                     # Number of epochs to wait for improvement
     min_delta: 1e-6                  # Minimum change to qualify as improvement
     restore_best_weights: true       # Restore best weights on early stopping
+  
+
 
 # Testing Configuration
 testing:
@@ -213,7 +215,7 @@ testing:
   batch_size: 1                      # Testing batch size (can be different from training)
   
   # Model configuration
-  model_path: "results/sionna/training/checkpoints/latest_batch_checkpoint.pt"    # Path to trained model for testing
+  model_path: "results/sionna/training/models/best_model.pt"    # Path to trained model for testing
   # Alternative model paths (uncomment to use):
   # model_path: "results/sionna/training/checkpoints/checkpoint_epoch_1_batch_39.pt"  # Specific epoch/batch
   # model_path: "results/sionna/training/models/best_model.pt"  # Best model
@@ -229,6 +231,8 @@ testing:
   save_predictions: true             # Save model predictions
   save_intermediate_results: true    # Save intermediate ray tracing results
   save_visualizations: true          # Save result visualizations
+  
+
 
 # Input Configuration
 input:
@@ -238,11 +242,9 @@ input:
   # Train/test split configuration
   split:
     random_seed: 42                    # Random seed for reproducible splits
-    train_ratio: 0.1                   # Training data ratio (0.0 to 1.0)
-    test_ratio: 0.1                    # Testing data ratio (0.0 to 1.0)
+    train_ratio: 0.8                   # Training data ratio (0.0 to 1.0)
+    test_ratio: 0.2                    # Testing data ratio (0.0 to 1.0)
     # Note: train_ratio + test_ratio can be < 1.0 to use only subset of data
-  
-
   
 
 # Output and Logging Configuration
@@ -254,8 +256,13 @@ output:
   training:
     checkpoint_dir: "{{base_dir}}/training/checkpoints"    # Directory for saving checkpoints
     tensorboard_dir: "{{base_dir}}/training/tensorboard"   # TensorBoard logs directory
-    models_dir: "{{base_dir}}/models"             # Saved models directory
-    logs_dir: "{{base_dir}}/training/logs"                 # Training logs directory
+    models_dir: "{{base_dir}}/training/models"             # Saved models directory
+    
+    # Training logging configuration
+    logging:
+      log_level: 'INFO'                 # Training logging level
+      log_dir: "{{base_dir}}/training/logs"                # Training logs directory
+      log_file: "{{base_dir}}/training/logs/training.log"  # Training log file path
   
   # Testing output directories (using template variables)
   testing:
@@ -263,6 +270,12 @@ output:
     plots_dir: "{{base_dir}}/testing/plots"          # Visualization plots
     predictions_dir: "{{base_dir}}/testing/predictions"  # Model predictions
     reports_dir: "{{base_dir}}/testing/reports"      # Test reports directory
+    
+    # Testing logging configuration
+    logging:
+      log_level: 'INFO'                  # Testing logging level
+      log_dir: "{{base_dir}}/testing/logs"             # Testing logs directory
+      log_file: "{{base_dir}}/testing/logs/testing.log"  # Testing log file path
   
   # File formats and compression
   format: 'hdf5'                     # Output file format
@@ -279,11 +292,5 @@ output:
   save_optimizer_state: true         # Save optimizer state in checkpoints
   save_training_history: true        # Save training history
   
-  # Logging configuration
-  logging:
-    log_level: 'INFO'                 # Logging level
-    log_file: "{{base_dir}}/logs/training.log"  # Main log file path
-    enable_progress_bar: true          # Enable progress bars
-    log_ray_tracer_stats: true         # Log ray tracer statistics
-    log_training_metrics: true         # Log training metrics
+
 

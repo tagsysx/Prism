@@ -249,9 +249,10 @@ class PrismTrainer:
             print(f"   Please check your configuration file and ensure it exists and is valid.")
             sys.exit(1)
         
-        # Get logging configuration from config file (under output section)
+        # Get logging configuration from config file (under output.training section)
         output_config = temp_config.get('output', {})
-        logging_config = output_config.get('logging', {})
+        training_config = output_config.get('training', {})
+        logging_config = training_config.get('logging', {})
         log_level_str = logging_config.get('log_level', 'INFO')
         
         # Get log file path from config (should always be available after ConfigLoader processing)
@@ -315,7 +316,7 @@ class PrismTrainer:
         # Set data path and output directory from config if not provided
         try:
             # Import data utilities
-            from src.prism.data_utils import check_dataset_compatibility
+            from prism.data_utils import check_dataset_compatibility
             
             # Check dataset configuration
             dataset_path, split_config = check_dataset_compatibility(self.config)
@@ -478,7 +479,8 @@ class PrismTrainer:
         
         # Include logging configuration in system_config for TrainingInterface
         output_config = self.config.get('output', {})
-        system_config['logging'] = output_config.get('logging', {})
+        training_output_config = output_config.get('training', {})
+        system_config['logging'] = training_output_config.get('logging', {})
         
         # Extract neural network sub-configurations
         attenuation_network = nn_config.get('attenuation_network', {})
@@ -713,6 +715,8 @@ class PrismTrainer:
             # Also update the device string for CUDA ray tracer
             if hasattr(self.ray_tracer, '_setup_cuda'):
                 self.ray_tracer._setup_cuda()
+        
+
         
         # Log configuration details
         subcarrier_sampling = ray_tracing_config.get('subcarrier_sampling', {})
@@ -972,16 +976,16 @@ class PrismTrainer:
         """Check if training is progressing normally or stuck"""
         elapsed_time = time.time() - start_time
         
-        # Check if we're taking too long on a batch
+        # # Check if we're taking too long on a batch
         if elapsed_time > self.batch_timeout:
             self.logger.warning(f"⚠️  Batch {batch_idx} taking too long ({elapsed_time:.1f}s > {self.batch_timeout}s)")
-            return False
+            # return False
         
         # Check if we're making reasonable progress
         if batch_idx > 0:
             avg_time_per_batch = elapsed_time / batch_idx
             estimated_total_time = avg_time_per_batch * total_batches
-            if estimated_total_time > 3600:  # More than 1 hour
+            if estimated_total_time > 300:  # More than 1 hour
                 self.logger.warning(f"⚠️  Slow training progress: estimated {estimated_total_time/3600:.1f} hours total")
         
         return True
@@ -1081,7 +1085,7 @@ class PrismTrainer:
         print(f"📂 Loading data from: {self.data_path}")
         
         # Use split-based data loading
-        from src.prism.data_utils import load_and_split_data
+        from prism.data_utils import load_and_split_data
         
         self.ue_positions, self.csi_data, self.bs_position, self.antenna_indices, metadata = load_and_split_data(
             dataset_path=self.data_path,
@@ -1323,13 +1327,13 @@ class PrismTrainer:
                 
                 # Debug logging for checkpoint decision (ENHANCED DEBUG)
                 # ALWAYS show debug info to debug checkpoint issue
-                self.logger.info(f"🔍 CHECKPOINT DEBUG - Batch {batch_idx}:")
-                self.logger.info(f"  📊 batch_idx: {batch_idx}")
-                self.logger.info(f"  📊 batch_idx + 1: {batch_idx + 1}")
-                self.logger.info(f"  📊 batch_save_interval: {self.batch_save_interval}")
-                self.logger.info(f"  📊 (batch_idx + 1) % batch_save_interval: {(batch_idx + 1) % self.batch_save_interval}")
-                self.logger.info(f"  📊 enable_batch_checkpoints: {self.enable_batch_checkpoints}")
-                self.logger.info(f"  📊 checkpoint_condition: {checkpoint_condition}")
+                self.logger.debug(f"🔍 CHECKPOINT DEBUG - Batch {batch_idx}:")
+                self.logger.debug(f"  📊 batch_idx: {batch_idx}")
+                self.logger.debug(f"  📊 batch_idx + 1: {batch_idx + 1}")
+                self.logger.debug(f"  📊 batch_save_interval: {self.batch_save_interval}")
+                self.logger.debug(f"  📊 (batch_idx + 1) % batch_save_interval: {(batch_idx + 1) % self.batch_save_interval}")
+                self.logger.debug(f"  📊 enable_batch_checkpoints: {self.enable_batch_checkpoints}")
+                self.logger.debug(f"  📊 checkpoint_condition: {checkpoint_condition}")
                 print(f"🔍 CHECKPOINT DEBUG - Batch {batch_idx}: condition = {checkpoint_condition}")
                 
                 if checkpoint_condition:
@@ -1492,9 +1496,11 @@ class PrismTrainer:
         print(f"💾 Saving checkpoint for epoch {epoch}...")
         
         # Save TrainingInterface checkpoint with optimizer and scheduler states
-        self.model.save_checkpoint(f'checkpoint_epoch_{epoch}.pt', 
+        checkpoint_name = f'checkpoint_epoch_{epoch}.pt'
+        self.model.save_checkpoint(checkpoint_name, 
                                   optimizer_state_dict=self.optimizer.state_dict(),
                                   scheduler_state_dict=self.scheduler.state_dict())
+        self.logger.info(f"💾 TrainingInterface checkpoint saved: {checkpoint_name}")
         
         # Save additional training state
         training_state = {
@@ -1514,15 +1520,21 @@ class PrismTrainer:
         checkpoint_dir = Path(self.model.checkpoint_dir)
         checkpoint_path = checkpoint_dir / f'training_state_epoch_{epoch}.pt'
         torch.save(training_state, checkpoint_path)
-        self.logger.info(f"Training state saved: {checkpoint_path}")
+        self.logger.info(f"💾 Training state saved: {checkpoint_path}")
+        self.logger.info(f"📊 Training state includes: epoch={epoch}, train_loss={train_loss:.6f}, val_loss={val_loss:.6f}")
         
         # Save best model
         if not hasattr(self, 'best_val_loss') or val_loss < self.best_val_loss:
+            # Store the previous best loss for logging before updating
+            previous_best = getattr(self, 'best_val_loss', float('inf'))
             self.best_val_loss = val_loss
+            
             models_dir = Path(self.config['output']['training']['models_dir'])
             models_dir.mkdir(parents=True, exist_ok=True)
             best_model_path = models_dir / 'best_model.pt'
+            
             # Save the best model directly to the models directory (not through checkpoint_dir)
+            self.logger.info(f"🏆 Saving new best model (Val Loss: {val_loss:.6f} < {previous_best:.6f})")
             torch.save({
                 'model_state_dict': self.model.state_dict(),
                 'prism_network_state_dict': self.model.prism_network.state_dict(),
@@ -1538,9 +1550,15 @@ class PrismTrainer:
                     'scene_bounds': (self.model.scene_min.tolist(), self.model.scene_max.tolist())
                 }
             }, str(best_model_path))
-            torch.save(training_state, str(best_model_path).replace('.pt', '_state.pt'))
-            self.logger.info(f"Best model saved: {best_model_path}")
+            self.logger.info(f"💾 Best model weights saved: {best_model_path}")
+            
+            # Save best model training state
+            best_model_state_path = str(best_model_path).replace('.pt', '_state.pt')
+            torch.save(training_state, best_model_state_path)
+            self.logger.info(f"💾 Best model training state saved: {best_model_state_path}")
             print(f"🏆 New best model saved! (Val Loss: {val_loss:.6f})")
+        else:
+            self.logger.info(f"📊 No new best model (Val Loss: {val_loss:.6f} >= {self.best_val_loss:.6f})")
         
         # Save latest checkpoint for resuming in checkpoint directory
         checkpoint_dir = Path(self.model.checkpoint_dir)
@@ -1548,15 +1566,24 @@ class PrismTrainer:
         self.model.save_checkpoint('latest_checkpoint.pt',
                                   optimizer_state_dict=self.optimizer.state_dict(),
                                   scheduler_state_dict=self.scheduler.state_dict())
-        torch.save(training_state, str(latest_checkpoint_path).replace('.pt', '_state.pt'))
-        self.logger.info(f"Latest checkpoint saved: {latest_checkpoint_path}")
+        self.logger.info(f"💾 Latest checkpoint saved: {latest_checkpoint_path}")
+        
+        # Save latest checkpoint training state
+        latest_state_path = str(latest_checkpoint_path).replace('.pt', '_state.pt')
+        torch.save(training_state, latest_state_path)
+        self.logger.info(f"💾 Latest checkpoint training state saved: {latest_state_path}")
         
         # Save emergency checkpoint every epoch for better recovery in checkpoint directory
         emergency_checkpoint_path = checkpoint_dir / 'emergency_checkpoint.pt'
         self.model.save_checkpoint('emergency_checkpoint.pt',
                                   optimizer_state_dict=self.optimizer.state_dict(),
                                   scheduler_state_dict=self.scheduler.state_dict())
-        torch.save(training_state, str(emergency_checkpoint_path).replace('.pt', '_state.pt'))
+        self.logger.info(f"🚨 Emergency checkpoint saved: {emergency_checkpoint_path}")
+        
+        # Save emergency checkpoint training state
+        emergency_state_path = str(emergency_checkpoint_path).replace('.pt', '_state.pt')
+        torch.save(training_state, emergency_state_path)
+        self.logger.info(f"🚨 Emergency checkpoint training state saved: {emergency_state_path}")
         
         print(f"✅ Checkpoint saved: Epoch {epoch}, Loss: {train_loss:.6f}, Val: {val_loss:.6f}")
         
@@ -1581,6 +1608,7 @@ class PrismTrainer:
             self.model.save_checkpoint(checkpoint_name,
                                       optimizer_state_dict=self.optimizer.state_dict(),
                                       scheduler_state_dict=self.scheduler.state_dict())
+            self.logger.info(f"💾 Batch TrainingInterface checkpoint saved: {checkpoint_name}")
             
             # Save batch training state to the same checkpoint directory
             batch_state = {
@@ -1594,13 +1622,18 @@ class PrismTrainer:
             
             batch_state_path = checkpoint_dir / f'training_state_epoch_{epoch}_batch_{batch_idx}.pt'
             torch.save(batch_state, batch_state_path)
+            self.logger.info(f"💾 Batch training state saved: {batch_state_path}")
             
             # Update latest batch checkpoint in checkpoint directory
             latest_batch_path = checkpoint_dir / 'latest_batch_checkpoint.pt'
             self.model.save_checkpoint('latest_batch_checkpoint.pt',
                                       optimizer_state_dict=self.optimizer.state_dict(),
                                       scheduler_state_dict=self.scheduler.state_dict())
-            torch.save(batch_state, str(latest_batch_path).replace('.pt', '_state.pt'))
+            self.logger.info(f"💾 Latest batch checkpoint updated: {latest_batch_path}")
+            
+            latest_batch_state_path = str(latest_batch_path).replace('.pt', '_state.pt')
+            torch.save(batch_state, latest_batch_state_path)
+            self.logger.info(f"💾 Latest batch checkpoint state updated: {latest_batch_state_path}")
             
             self.logger.info(f"Batch checkpoint saved: Epoch {epoch}, Batch {batch_idx}, Loss: {batch_loss:.6f}")
             print(f"💾 Batch checkpoint saved: E{epoch}B{batch_idx} (Loss: {batch_loss:.6f})")
@@ -1615,6 +1648,7 @@ class PrismTrainer:
             self.model.save_checkpoint('emergency_checkpoint.pt',
                                       optimizer_state_dict=self.optimizer.state_dict(),
                                       scheduler_state_dict=self.scheduler.state_dict())
+            self.logger.info(f"🚨 Emergency TrainingInterface checkpoint saved")
             
             # Save minimal training state for emergency recovery
             emergency_state = {
@@ -1628,6 +1662,7 @@ class PrismTrainer:
             checkpoint_dir = Path(self.model.checkpoint_dir)
             emergency_path = checkpoint_dir / 'emergency_checkpoint_state.pt'
             torch.save(emergency_state, emergency_path)
+            self.logger.info(f"🚨 Emergency checkpoint state saved: {emergency_path}")
             
         except Exception as e:
             self.logger.warning(f"Emergency checkpoint failed: {e}")
@@ -1764,7 +1799,13 @@ class PrismTrainer:
                         self.logger.info("Scheduler state loaded from separate state file")
                 
                 # Load training state
-                self.start_epoch = training_state['epoch'] + 1
+                # If we're in the middle of an epoch (batch > 0), continue from current epoch
+                # Otherwise, start from next epoch
+                current_batch = training_state.get('batch', 0)
+                if current_batch > 0:
+                    self.start_epoch = training_state['epoch']  # Continue current epoch
+                else:
+                    self.start_epoch = training_state['epoch'] + 1  # Start next epoch
                 self.best_val_loss = training_state.get('val_loss', float('inf'))
                 
                 self.logger.info(f"Resuming from epoch {self.start_epoch}")
@@ -1780,7 +1821,12 @@ class PrismTrainer:
                     self.val_losses = []
             else:
                 # Fallback to TrainingInterface state
-                self.start_epoch = self.model.current_epoch + 1
+                # Check if we're in the middle of an epoch
+                current_batch = getattr(self.model, 'current_batch', 0)
+                if current_batch > 0:
+                    self.start_epoch = self.model.current_epoch  # Continue current epoch
+                else:
+                    self.start_epoch = self.model.current_epoch + 1  # Start next epoch
                 self.best_val_loss = self.model.best_loss
                 self.train_losses = []
                 self.val_losses = []
@@ -1937,9 +1983,14 @@ class PrismTrainer:
         print(f"{'='*80}")
         print(f"   • Total epochs completed: {len(train_losses)}")
         print(f"   • Total training time: {total_training_time/3600:.2f} hours")
-        print(f"   • Final training loss: {train_losses[-1]:.6f}")
-        print(f"   • Final validation loss: {val_losses[-1]:.6f}")
-        print(f"   • Best validation loss: {min(val_losses):.6f}")
+        
+        if train_losses:
+            print(f"   • Final training loss: {train_losses[-1]:.6f}")
+            print(f"   • Final validation loss: {val_losses[-1]:.6f}")
+            print(f"   • Best validation loss: {min(val_losses):.6f}")
+        else:
+            print(f"   • No training epochs completed (resumed training may have finished immediately)")
+        
         print(f"   • Results saved to: {self.output_dir}")
         
         # Save training history

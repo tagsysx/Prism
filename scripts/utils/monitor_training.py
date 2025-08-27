@@ -15,7 +15,9 @@ def get_training_process():
     """查找训练进程"""
     for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
         try:
-            if 'python' in proc.info['name'] and 'sionna_runner.py' in ' '.join(proc.info['cmdline']):
+            cmdline = ' '.join(proc.info['cmdline'])
+            if ('python' in proc.info['name'] and 
+                ('train_prism.py' in cmdline or 'sionna_runner.py' in cmdline or 'prism_runner.py' in cmdline)):
                 return proc
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
@@ -59,10 +61,10 @@ def monitor_training(interval=30):
                         pass
                     
                     # 检查训练进度
-                    checkpoint_dir = Path('../../results/training-sionna/checkpoints')
+                    checkpoint_dir = Path('results/sionna/training/checkpoints')
                     if checkpoint_dir.exists():
                         # 检查最佳模型文件
-                        best_model = checkpoint_dir / 'best_model.pth'
+                        best_model = checkpoint_dir / 'best_model.pt'
                         if best_model.exists():
                             try:
                                 checkpoint = torch.load(best_model, map_location='cpu')
@@ -77,7 +79,7 @@ def monitor_training(interval=30):
                                 print(f"  Training Progress: Could not read checkpoint")
                         
                         # 检查epoch检查点文件
-                        checkpoints = list(checkpoint_dir.glob('checkpoint_epoch_*.pth'))
+                        checkpoints = list(checkpoint_dir.glob('checkpoint_epoch_*.pt'))
                         if checkpoints:
                             latest_checkpoint = max(checkpoints, key=lambda x: x.stat().st_mtime)
                             epoch = latest_checkpoint.stem.split('_')[-1]

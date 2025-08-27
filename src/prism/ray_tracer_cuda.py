@@ -105,8 +105,6 @@ class CUDARayTracer(RayTracer):
         # Setup PyTorch optimizations
         self._setup_pytorch_optimizations()
         
-        logger.info(f"CUDA Ray Tracer initialized with {azimuth_divisions}x{elevation_divisions} = {azimuth_divisions * elevation_divisions} directions")
-        logger.info(f"Scene size: {self.scene_size}m, boundaries: {self.scene_bounds['min']} to {self.scene_bounds['max']}")
         logger.info("✓ CUDA acceleration enabled - significant performance improvement expected")
         logger.info("🚀 All ray tracing will use GPU-optimized algorithms")
     
@@ -975,7 +973,7 @@ class CUDARayTracer(RayTracer):
             logger.debug(f"Selected directions: {directions_list[:5]}..." if len(directions_list) > 5 else f"Selected directions: {directions_list}")
             
             # Use CUDA-optimized processing for selected directions
-            logger.info(f"🚀 Using CUDA-optimized processing for {len(directions_list)} directions")
+            logger.debug(f"🚀 Using CUDA-optimized processing for {len(directions_list)} directions")
             accumulated_signals = self._accumulate_signals_cuda_optimized(
                 base_station_pos, ue_positions, selected_subcarriers, antenna_embedding, directions_list
             )
