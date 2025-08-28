@@ -108,7 +108,7 @@ ray_tracing:
   
   subcarrier_sampling:
     sampling_ratio: 0.1              # Ratio of subcarriers to select (10%)
-    sampling_method: 'uniform'         # Sampling method: 'random' or 'uniform'
+    sampling_method: 'random'         # Sampling method: 'random' or 'uniform'
     antenna_consistent: true          # All BS antennas use same subcarriers for each UE
     antenna_specific_selection: false # Disable antenna-specific selection (deprecated)
 
@@ -116,8 +116,8 @@ ray_tracing:
 system:
   # Computational settings
   device: 'cuda'                     # Primary device for computation ('cuda' or 'cpu')
-  batch_size: 2                      # Global batch size for all operations
   gpu_memory_fraction: 0.8           # GPU memory usage fraction
+  # Note: batch_size is now automatically calculated as total_samples / batches_per_epoch
   
   # Ray tracing execution mode
   ray_tracing_mode: 'cuda'           # Ray tracing mode: 'cuda', 'cpu', or 'hybrid'
@@ -164,7 +164,7 @@ system:
     # 5G NR specific settings
     subcarrier_selection:
       enabled: true                  # Enable subcarrier selection for spatial spectrum
-      selection_method: 'uniform'    # 'uniform', 'weighted', or 'custom'
+      selection_method: 'random'    # 'uniform', 'weighted', or 'custom'
       num_selected: 64               # Number of subcarriers to use (64 out of 408)
       frequency_weighting: true      # Apply frequency-dependent weighting
 
@@ -172,7 +172,7 @@ system:
 training:
   # Training parameters
   learning_rate: 1e-4                # Initial learning rate
-  num_epochs: 2                    # Number of training epochs
+  num_epochs: 4                    # Number of training epochs
   batches_per_epoch: 10              # Number of batches per epoch
   
   # Checkpoint and recovery
@@ -269,7 +269,7 @@ output:
     results_dir: "{{base_dir}}/testing/results"      # Test results and metrics
     plots_dir: "{{base_dir}}/testing/plots"          # Visualization plots
     predictions_dir: "{{base_dir}}/testing/predictions"  # Model predictions
-    reports_dir: "{{base_lsdir}}/testing/reports"      # Test reports directory
+    reports_dir: "{{base_dir}}/testing/reports"        # Test reports directory
     
     # Testing logging configuration
     logging:

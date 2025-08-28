@@ -116,8 +116,8 @@ ray_tracing:
 system:
   # Computational settings
   device: 'cuda'                     # Primary device for computation ('cuda' or 'cpu')
-  batch_size: 1                      # Global batch size for all operations
   gpu_memory_fraction: 0.8           # GPU memory usage fraction
+  # Note: batch_size is now automatically calculated as total_samples / batches_per_epoch
   
   # Ray tracing execution mode
   ray_tracing_mode: 'cuda'           # Ray tracing mode: 'cuda', 'cpu', or 'hybrid'
@@ -172,8 +172,8 @@ system:
 training:
   # Training parameters
   learning_rate: 1e-4                # Initial learning rate
-  num_epochs: 4                     # Number of training epochs
-  batches_per_epoch: 10              # Number of batches per epoch
+  num_epochs: 2                     # Number of training epochs (reduced for testing)
+  batches_per_epoch: 5               # Number of batches per epoch (reduced for testing)
   
   # Checkpoint and recovery
   auto_checkpoint: true              # Enable automatic checkpointing
@@ -260,7 +260,7 @@ output:
     
     # Training logging configuration
     logging:
-      log_level: 'DEBUG'                 # Training logging level
+      log_level: 'INFO'                  # Training logging level
       log_dir: "{{base_dir}}/training/logs"                # Training logs directory
       log_file: "{{base_dir}}/training/logs/training.log"  # Training log file path
   
@@ -269,7 +269,7 @@ output:
     results_dir: "{{base_dir}}/testing/results"      # Test results and metrics
     plots_dir: "{{base_dir}}/testing/plots"          # Visualization plots
     predictions_dir: "{{base_dir}}/testing/predictions"  # Model predictions
-    reports_dir: "{{base_lsdir}}/testing/reports"      # Test reports directory
+    reports_dir: "{{base_dir}}/testing/reports"        # Test reports directory
     
     # Testing logging configuration
     logging:

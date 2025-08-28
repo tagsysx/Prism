@@ -395,6 +395,7 @@ class PrismTrainer:
         # Initialize model and training components
         self._setup_model()
         self._setup_training()
+        self._setup_optimizer_and_scheduler()
         
         # Resume from checkpoint if specified
         if self.resume_from:
@@ -633,14 +634,11 @@ class PrismTrainer:
         
     def _setup_training(self):
         """Setup training hyperparameters and optimizers"""
-        # Training hyperparameters
-        self.batch_size = self.config.get('system', {}).get('batch_size', 2)
+        # Training hyperparameters - batch_size will be calculated after data loading
+        self.batch_size = None  # Will be set in _calculate_optimal_batch_size()
         
-        # Scale batch size for multi-GPU training
-        if self.use_multi_gpu and self.num_gpus > 1:
-            original_batch_size = self.batch_size
-            self.batch_size = self.batch_size * self.num_gpus
-            self.logger.info(f"Multi-GPU batch size scaling: {original_batch_size} × {self.num_gpus} = {self.batch_size}")
+        # Multi-GPU setup (batch_size scaling will be done after calculation)
+        # Scale batch size for multi-GPU training will be handled in _calculate_optimal_batch_size()
         
         self.learning_rate = float(self.config['training'].get('learning_rate', 1e-4))  # Read from config and convert to float
         self.num_epochs = self.config['training']['num_epochs']  # Read from config
@@ -681,7 +679,9 @@ class PrismTrainer:
                 self.logger.info("Mixed precision requested but not available (CPU mode)")
             else:
                 self.logger.info("Mixed precision training disabled")
-        
+    
+    def _setup_optimizer_and_scheduler(self):
+        """Setup optimizer and scheduler after model is created"""
         # Optimizer - now optimizing the TrainingInterface
         self.optimizer = optim.AdamW(
             self.model.parameters(),
@@ -728,12 +728,42 @@ class PrismTrainer:
             self.logger.info(f"Early stopping enabled: patience={self.early_stopping_patience}, min_delta={self.early_stopping_min_delta}")
         else:
             self.logger.info("Early stopping disabled")
+    
+    def _calculate_optimal_batch_size(self, total_samples: int) -> int:
+        """
+        Calculate optimal batch size based on total samples and batches per epoch
         
-        self.logger.info(f"Training setup: batch_size={self.batch_size}, lr={self.learning_rate}")
+        Args:
+            total_samples: Total number of training samples
+            
+        Returns:
+            Optimal batch size
+        """
+        batches_per_epoch = self.config['training'].get('batches_per_epoch', 10)
         
-        # GPU monitoring setup
-        self.gpu_monitoring_active = False
-        self.gpu_monitor_thread = None
+        # Calculate base batch size
+        base_batch_size = max(1, total_samples // batches_per_epoch)
+        
+        # Set reasonable limits for small datasets (≤10k samples)
+        min_batch_size = 1
+        max_batch_size = min(32, total_samples)  # Don't exceed 32 or total samples
+        
+        # Ensure batch size is within reasonable bounds
+        optimal_batch_size = max(min_batch_size, min(base_batch_size, max_batch_size))
+        
+        # Scale for multi-GPU training
+        if self.use_multi_gpu and self.num_gpus > 1:
+            original_batch_size = optimal_batch_size
+            optimal_batch_size = optimal_batch_size * self.num_gpus
+            self.logger.info(f"Multi-GPU batch size scaling: {original_batch_size} × {self.num_gpus} = {optimal_batch_size}")
+        
+        self.logger.info(f"📊 Batch size calculation:")
+        self.logger.info(f"   - Total samples: {total_samples}")
+        self.logger.info(f"   - Batches per epoch: {batches_per_epoch}")
+        self.logger.info(f"   - Calculated batch size: {optimal_batch_size}")
+        self.logger.info(f"   - Expected samples per epoch: {optimal_batch_size * batches_per_epoch}")
+        
+        return optimal_batch_size
     
     def _select_best_gpu(self) -> int:
         """智能选择最佳可用GPU"""
@@ -998,6 +1028,10 @@ class PrismTrainer:
         self.logger.info(f"  CSI data: {self.csi_data.shape} - {self.csi_data.dtype}")
         self.logger.info(f"  BS position: {self.bs_position.shape} - {self.bs_position.dtype}")
         self.logger.info(f"  Antenna indices: {self.antenna_indices.shape} - {self.antenna_indices.dtype}")
+        
+        # Calculate optimal batch size based on total samples
+        total_samples = len(self.ue_positions)
+        self.batch_size = self._calculate_optimal_batch_size(total_samples)
         
         # Check for data consistency
         if self.csi_data.shape[0] != self.ue_positions.shape[0]:
@@ -1550,6 +1584,43 @@ class PrismTrainer:
         except Exception as e:
             self.logger.warning(f"Emergency checkpoint failed: {e}")
     
+    def _save_best_model(self, epoch: int, train_loss: float, val_loss: float):
+        """Save the best model checkpoint"""
+        try:
+            # Save TrainingInterface best model checkpoint
+            best_model_name = 'best_model.pt'
+            self.model.save_checkpoint(best_model_name,
+                                      optimizer_state_dict=self.optimizer.state_dict(),
+                                      scheduler_state_dict=self.scheduler.state_dict())
+            self.logger.info(f"🏆 Best model TrainingInterface checkpoint saved: {best_model_name}")
+            
+            # Save best model training state
+            best_model_state = {
+                'epoch': epoch,
+                'train_loss': train_loss,
+                'val_loss': val_loss,
+                'optimizer_state_dict': self.optimizer.state_dict(),
+                'scheduler_state_dict': self.scheduler.state_dict(),
+                'config': self.config,
+                'timestamp': datetime.now().isoformat(),
+                'is_best_model': True
+            }
+            
+            checkpoint_dir = Path(self.model.checkpoint_dir)
+            best_model_path = checkpoint_dir / 'best_model_state.pt'
+            torch.save(best_model_state, best_model_path)
+            self.logger.info(f"🏆 Best model state saved: {best_model_path}")
+            
+            # Also save to models directory if it exists
+            models_dir = checkpoint_dir.parent / 'models'
+            if models_dir.exists():
+                models_best_path = models_dir / 'best_model.pt'
+                torch.save(best_model_state, models_best_path)
+                self.logger.info(f"🏆 Best model also saved to models directory: {models_best_path}")
+            
+        except Exception as e:
+            self.logger.warning(f"Best model save failed: {e}")
+    
     def _auto_detect_checkpoint(self):
         """Automatically detect the best checkpoint to resume from"""
         print("🔍 Auto-detecting checkpoints...")
@@ -1833,15 +1904,34 @@ class PrismTrainer:
             self.logger.info(f"Epoch {epoch}: Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}, LR: {current_lr:.2e}")
             self._log_metrics(epoch, train_loss, val_loss, current_lr)
             
-            # Save checkpoint
-            if epoch % self.save_interval == 0 or epoch == self.num_epochs:
+            # Save checkpoint - ensure we always save when epoch_save_interval is 1
+            should_save_checkpoint = (epoch % self.save_interval == 0 or 
+                                    epoch == self.num_epochs or 
+                                    self.save_interval == 1)  # Always save if interval is 1
+            
+            if should_save_checkpoint:
                 print(f"💾 Saving checkpoint for epoch {epoch}...")
+                self.logger.info(f"💾 Saving epoch checkpoint: epoch={epoch}, save_interval={self.save_interval}")
                 self._save_checkpoint(epoch, train_loss, val_loss)
                 print(f"✅ Checkpoint saved successfully")
+            else:
+                print(f"⏭️  Skipping checkpoint save for epoch {epoch} (save_interval={self.save_interval})")
+                self.logger.info(f"⏭️  Skipping epoch checkpoint: epoch={epoch}, save_interval={self.save_interval}")
             
             # Save emergency checkpoint every epoch for better recovery
             if epoch % 1 == 0:  # Every epoch
                 self._save_emergency_checkpoint(epoch, train_loss, val_loss)
+            
+            # Always save best model if this is the best validation loss so far
+            if not hasattr(self, 'best_val_loss_ever'):
+                self.best_val_loss_ever = float('inf')
+            
+            if val_loss < self.best_val_loss_ever:
+                self.best_val_loss_ever = val_loss
+                print(f"🏆 New best validation loss: {val_loss:.6f} - Saving best model...")
+                self.logger.info(f"🏆 New best validation loss: {val_loss:.6f} - Saving best model")
+                self._save_best_model(epoch, train_loss, val_loss)
+                print(f"✅ Best model saved successfully")
             
             # Early stopping check
             if self.early_stopping_enabled:

@@ -19,6 +19,7 @@ import os
 import json
 import time
 import sys
+import numpy as np
 
 
 from .networks.prism_network import PrismNetwork
@@ -275,6 +276,7 @@ class PrismTrainingInterface(nn.Module):
             
             logger.info(f"🚀 Creating CUDARayTracer with {len(cuda_params)} parameters")
             logger.info(f"   - prism_network: {type(self.prism_network).__name__}")
+            logger.info(f"   - direction batch size: auto-calculated based on hardware")
             return CUDARayTracer(**cuda_params)
         
         def create_cpu_ray_tracer():
@@ -346,7 +348,7 @@ class PrismTrainingInterface(nn.Module):
         num_subcarriers = self.prism_network.num_subcarriers
         num_selected = int(num_subcarriers * self.subcarrier_sampling_ratio)
         
-        logger.info(f"🚀 Forward pass: {batch_size} batches × {num_bs_antennas} BS antennas × {num_ue_antennas} UE antennas × {num_selected} selected subcarriers")
+        logger.info(f"🚀 Forward pass: {batch_size} samples × {num_bs_antennas} BS antennas × {num_ue_antennas} UE antennas × {num_selected} selected subcarriers")
         
         # Step 1: Initialize current_selection attributes directly to ensure they exist
         self.current_selection = torch.zeros(
@@ -374,34 +376,58 @@ class PrismTrainingInterface(nn.Module):
             dtype=torch.complex64, device=ue_positions.device
         )
         
-        # Step 3: Process each BS antenna
-        all_ray_results = []
-        all_signal_strengths = []
-        
+        # Step 3: Process all BS antennas using unified interface
         print(f"    🔄 Processing {num_bs_antennas} BS antennas...")
-        for bs_antenna_idx in range(num_bs_antennas):
-            if bs_antenna_idx % 5 == 0 or bs_antenna_idx == num_bs_antennas - 1:  # More frequent progress updates
-                progress = (bs_antenna_idx / num_bs_antennas) * 100
-                print(f"      📡 BS antenna {bs_antenna_idx+1}/{num_bs_antennas} ({progress:.1f}%)")
-                logger.info(f"📡 Processing BS antenna {bs_antenna_idx+1}/{num_bs_antennas} ({progress:.1f}%)")
+        logger.info(f"📡 Processing {num_bs_antennas} BS antennas using unified ray tracer interface")
+        
+        # Process all batches - ray tracer will automatically detect single vs multi-antenna
+        all_ray_results = []
+        all_signals = []
+        
+        for b in range(batch_size):
+            if batch_size > 1:
+                batch_progress = (b / batch_size) * 100
+                print(f"        🔹 Processing batch {b+1}/{batch_size} ({batch_progress:.0f}%)")
             
-            # Get antenna indices for this BS antenna
-            current_antenna_indices = antenna_indices[:, bs_antenna_idx]
+            # Prepare UE positions (all antennas share the same device position)
+            ue_device_pos = ue_positions[b].cpu()
+            ue_pos_list = [ue_device_pos] * num_ue_antennas
             
-            # Process all batches for this antenna
-            batch_ray_results, batch_signal_strengths = self._process_antenna_batches(
-                bs_antenna_idx, batch_size, num_ue_antennas, num_selected,
-                ue_positions, bs_position, current_antenna_indices
+            # Create subcarrier dictionary (same for all antennas due to antenna_consistent=True)
+            selected_subcarriers = self._create_subcarrier_dict_unified(b, num_ue_antennas, ue_pos_list)
+            
+            # Perform ray tracing - ray tracer will detect multi-antenna automatically
+            print(f"        ⚡ Ray tracing for batch {b+1}...")
+            print(f"           📡 Processing {len(ue_pos_list)} UEs with {num_bs_antennas} BS antennas")
+            
+            # Log UE positions for this batch
+            for i, ue_pos in enumerate(ue_pos_list):
+                if isinstance(ue_pos, torch.Tensor):
+                    coords = ue_pos.cpu().numpy() if ue_pos.is_cuda else ue_pos.numpy()
+                    print(f"           📍 UE {i+1}: [{coords[0]:.1f}, {coords[1]:.1f}, {coords[2]:.1f}]")
+            
+            # Call unified ray tracer interface with all antenna indices
+            ray_results = self.ray_tracer.accumulate_signals(
+                base_station_pos=bs_position,
+                ue_positions=ue_pos_list,
+                selected_subcarriers=selected_subcarriers,
+                antenna_indices=antenna_indices[b]  # All antenna indices for this batch
             )
             
-            # Update CSI predictions
-            self._update_csi_predictions(
-                csi_predictions, batch_ray_results, bs_antenna_idx, 
-                batch_size, num_ue_antennas, num_selected, ue_positions
-            )
+            # Log ray tracing results
+            if num_bs_antennas > 1:
+                logger.info(f"🔍 Multi-antenna ray tracing completed with results for {num_bs_antennas} antennas")
+            else:
+                logger.info(f"🔍 Single-antenna ray tracing completed")
             
-            all_ray_results.append(batch_ray_results)
-            all_signal_strengths.append(batch_signal_strengths)
+            all_ray_results.append(ray_results)
+            all_signals.append(ray_results)
+        
+        # Update CSI predictions using unified format
+        self._update_csi_predictions_unified(
+            csi_predictions, all_ray_results, 
+            batch_size, num_bs_antennas, num_ue_antennas, num_selected, ue_positions
+        )
         
         # Step 4: Map selected subcarrier predictions back to full subcarrier space
         full_predictions = self._create_full_predictions(
@@ -415,7 +441,7 @@ class PrismTrainingInterface(nn.Module):
         outputs = {
             'csi_predictions': full_predictions,
             'ray_results': all_ray_results,
-            'signal_strengths': all_signal_strengths,
+            'signals': all_signals,
             'subcarrier_selection': selection_info
         }
         
@@ -441,7 +467,7 @@ class PrismTrainingInterface(nn.Module):
                                 ue_positions: torch.Tensor, bs_position: torch.Tensor, current_antenna_indices: torch.Tensor):
         """Process all batches for a specific BS antenna."""
         batch_ray_results = []
-        batch_signal_strengths = []
+        batch_signals = []
         
         for b in range(batch_size):
             if batch_size > 1 and b % max(1, batch_size // 4) == 0:  # Show progress for larger batches
@@ -478,9 +504,91 @@ class PrismTrainingInterface(nn.Module):
             logger.debug(f"🔍 Result keys: {list(ray_results.keys())[:10]}...")
             
             batch_ray_results.append(ray_results)
-            batch_signal_strengths.append(ray_results)
+            batch_signals.append(ray_results)
         
-        return batch_ray_results, batch_signal_strengths
+        return batch_ray_results, batch_signals
+    
+    def _create_subcarrier_dict_unified(self, batch_idx: int, num_ue_antennas: int, ue_pos_list: list):
+        """Create subcarrier dictionary for unified processing (same for all antennas)."""
+        selected_subcarriers = {}
+        
+        # Use the first antenna's selection (they should all be the same due to antenna_consistent=True)
+        for u in range(num_ue_antennas):
+            ue_pos_tuple = tuple(ue_pos_list[u].tolist())
+            selection_tensor = self.current_selection[batch_idx, 0, u]  # Use antenna 0 as reference
+            
+            # Convert tensor to list safely
+            try:
+                if selection_tensor.numel() == 1:
+                    selected_subcarriers[ue_pos_tuple] = [int(selection_tensor.item())]
+                else:
+                    tensor_list = selection_tensor.tolist()
+                    if isinstance(tensor_list, (list, tuple)):
+                        selected_subcarriers[ue_pos_tuple] = [int(idx) for idx in tensor_list]
+                    else:
+                        logger.warning(f"⚠️ Fallback: Using default subcarrier [0] for UE at position {ue_pos_tuple}")
+                        selected_subcarriers[ue_pos_tuple] = [0]  # Fallback
+            except Exception as e:
+                logger.warning(f"Error converting subcarrier selection: {e}, using fallback")
+                selected_subcarriers[ue_pos_tuple] = [0]  # Fallback
+            
+            # Ensure we have valid subcarriers
+            if not selected_subcarriers[ue_pos_tuple]:
+                logger.warning(f"⚠️ Using fallback subcarrier [0] for UE at position {ue_pos_tuple}")
+                selected_subcarriers[ue_pos_tuple] = [0]
+        
+        return selected_subcarriers
+    
+    def _update_csi_predictions_unified(self, csi_predictions: torch.Tensor, all_ray_results: list,
+                                      batch_size: int, num_bs_antennas: int, num_ue_antennas: int, 
+                                      num_selected: int, ue_positions: torch.Tensor):
+        """Update CSI predictions using unified ray tracer results."""
+        for b, ray_results in enumerate(all_ray_results):
+            if isinstance(ray_results, dict):
+                if num_bs_antennas == 1:
+                    # Single antenna: results are in standard format
+                    self._update_single_antenna_csi_unified(
+                        csi_predictions, ray_results, b, 0,  # antenna_idx=0 for single antenna
+                        num_ue_antennas, num_selected, ue_positions
+                    )
+                else:
+                    # Multiple antennas: results have antenna keys
+                    for antenna_idx in range(num_bs_antennas):
+                        antenna_key = f"antenna_{antenna_idx}"
+                        if antenna_key in ray_results:
+                            antenna_results = ray_results[antenna_key]
+                            self._update_single_antenna_csi_unified(
+                                csi_predictions, antenna_results, b, antenna_idx,
+                                num_ue_antennas, num_selected, ue_positions
+                            )
+                        else:
+                            logger.warning(f"⚠️ Missing results for {antenna_key} in batch {b}")
+            else:
+                logger.warning(f"⚠️ Unexpected ray_results type for batch {b}: {type(ray_results)}")
+    
+    def _update_single_antenna_csi_unified(self, csi_predictions: torch.Tensor, ray_results: dict, 
+                                         batch_idx: int, antenna_idx: int, num_ue_antennas: int, 
+                                         num_selected: int, ue_positions: torch.Tensor):
+        """Update CSI predictions for a single antenna from unified results."""
+        ue_device_pos = ue_positions[batch_idx].cpu()
+        
+        for u in range(num_ue_antennas):
+            ue_pos_tuple = tuple(ue_device_pos.tolist())
+            
+            # Update CSI predictions - ray_results format is {(ue_pos_tuple, subcarrier): signal}
+            for s_idx, subcarrier_idx in enumerate(self.current_selection[batch_idx, antenna_idx, u]):
+                if s_idx < num_selected:
+                    result_key = (ue_pos_tuple, int(subcarrier_idx.item()))
+                    
+                    if result_key in ray_results:
+                        signal = ray_results[result_key]
+                        if isinstance(signal, (complex, torch.Tensor)):
+                            csi_predictions[batch_idx, antenna_idx, u, s_idx] = signal
+                        else:
+                            logger.warning(f"⚠️ Invalid signal type: {type(signal)} for key {result_key}")
+                    else:
+                        logger.warning(f"⚠️ Missing ray result for key {result_key}")
+                        logger.debug(f"   Available keys: {list(ray_results.keys())[:5]}...")  # Show first 5 keys for debugging
     
     def _create_subcarrier_dict(self, batch_idx: int, bs_antenna_idx: int, num_ue_antennas: int, ue_pos_list: list):
         """Create subcarrier dictionary for ray tracing."""
@@ -813,6 +921,32 @@ class PrismTrainingInterface(nn.Module):
             traced_predictions = torch.stack(traced_predictions)
             traced_targets = torch.stack(traced_targets)
             
+            # Check for invalid values in predictions and targets
+            pred_has_nan = torch.isnan(traced_predictions).any()
+            pred_has_inf = torch.isinf(traced_predictions).any()
+            target_has_nan = torch.isnan(traced_targets).any()
+            target_has_inf = torch.isinf(traced_targets).any()
+            
+            logger.info(f"🔍 CSI Validation:")
+            logger.info(f"   - Predictions: NaN={pred_has_nan}, Inf={pred_has_inf}")
+            logger.info(f"   - Targets: NaN={target_has_nan}, Inf={target_has_inf}")
+            logger.info(f"   - Pred range: [{torch.abs(traced_predictions).min():.6f}, {torch.abs(traced_predictions).max():.6f}]")
+            logger.info(f"   - Target range: [{torch.abs(traced_targets).min():.6f}, {torch.abs(traced_targets).max():.6f}]")
+            
+            if pred_has_nan or pred_has_inf:
+                logger.error(f"❌ CRITICAL: Invalid values in predictions!")
+                logger.error(f"   - NaN count: {torch.isnan(traced_predictions).sum()}")
+                logger.error(f"   - Inf count: {torch.isinf(traced_predictions).sum()}")
+                # Replace invalid values with zeros to prevent NaN loss
+                traced_predictions = torch.where(torch.isnan(traced_predictions) | torch.isinf(traced_predictions), 
+                                               torch.zeros_like(traced_predictions), traced_predictions)
+                logger.warning("⚠️  Replaced invalid prediction values with zeros")
+            
+            if target_has_nan or target_has_inf:
+                logger.error(f"❌ CRITICAL: Invalid values in targets!")
+                logger.error(f"   - NaN count: {torch.isnan(traced_targets).sum()}")
+                logger.error(f"   - Inf count: {torch.isinf(traced_targets).sum()}")
+            
             logger.debug(f"Computing loss on {len(traced_predictions)} traced subcarriers")
             logger.debug(f"Traced predictions shape: {traced_predictions.shape}")
             logger.debug(f"Traced targets shape: {traced_targets.shape}")
@@ -826,9 +960,27 @@ class PrismTrainingInterface(nn.Module):
                 real_loss = loss_function(traced_predictions.real, traced_targets.real)
                 imag_loss = loss_function(traced_predictions.imag, traced_targets.imag)
                 loss = real_loss + imag_loss
-                logger.debug(f"Complex loss computed: real_loss={real_loss.item():.6f}, imag_loss={imag_loss.item():.6f}")
+                logger.info(f"🔍 Complex loss computed: real_loss={real_loss.item():.6f}, imag_loss={imag_loss.item():.6f}, total={loss.item():.6f}")
+                
+                # Check if individual losses are valid
+                if torch.isnan(real_loss) or torch.isinf(real_loss):
+                    logger.error(f"❌ CRITICAL: Invalid real_loss: {real_loss}")
+                if torch.isnan(imag_loss) or torch.isinf(imag_loss):
+                    logger.error(f"❌ CRITICAL: Invalid imag_loss: {imag_loss}")
             else:
                 loss = loss_function(traced_predictions, traced_targets)
+                logger.info(f"🔍 Real loss computed: {loss.item():.6f}")
+            
+            # Final validation of computed loss
+            if torch.isnan(loss) or torch.isinf(loss):
+                logger.error(f"❌ CRITICAL: Loss computation resulted in invalid value: {loss}")
+                logger.error(f"   - Loss type: {type(loss)}")
+                logger.error(f"   - Loss requires_grad: {loss.requires_grad}")
+                logger.error(f"   - Predictions stats: mean={torch.abs(traced_predictions).mean():.6f}, std={torch.abs(traced_predictions).std():.6f}")
+                logger.error(f"   - Targets stats: mean={torch.abs(traced_targets).mean():.6f}, std={torch.abs(traced_targets).std():.6f}")
+                # Return a small positive loss to prevent training crash
+                loss = torch.tensor(1e-6, requires_grad=True, device=predictions.device)
+                logger.warning("⚠️  Replaced invalid loss with small positive value")
             
             # Validate loss is a tensor
             if not isinstance(loss, torch.Tensor):

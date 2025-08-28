@@ -183,23 +183,67 @@ class PrismNetwork(nn.Module):
         return_intermediates: bool = False
     ) -> Dict[str, torch.Tensor]:
         """
-        Forward pass through the complete Prism network.
+        Forward pass through the complete Prism network with unified antenna processing.
+        
+        This method handles both single and multi-antenna queries uniformly:
+        - Single antenna: antenna_indices shape (batch_size,) -> treated as (batch_size, 1)
+        - Multi-antenna: antenna_indices shape (batch_size, num_antennas)
         
         Args:
             sampled_positions: Voxel positions for attenuation modeling (batch_size, num_voxels, 3)
             ue_positions: UE positions (batch_size, 3) or (batch_size, num_antennas, 3)
             view_directions: Viewing directions (batch_size, 3) or (batch_size, num_antennas, 3)
             antenna_indices: BS antenna indices (batch_size,) or (batch_size, num_antennas)
+            selected_subcarriers: Optional list of subcarrier indices
             return_intermediates: Whether to return intermediate outputs
             
         Returns:
-            Dictionary containing final outputs and optionally intermediate values
+            Dictionary containing outputs with antenna dimension:
+            - All outputs have shape (..., num_antennas, ...)
+            - For single antenna case, num_antennas=1
         """
         batch_size = sampled_positions.shape[0]
-        num_voxels = sampled_positions.shape[1]
+        
+        # Normalize antenna_indices to always have antenna dimension
+        if len(antenna_indices.shape) == 1:
+            # Single antenna case: (batch_size,) -> (batch_size, 1)
+            antenna_indices = antenna_indices.unsqueeze(1)
+            is_single_antenna = True
+        else:
+            is_single_antenna = False
+            
+        num_antennas = antenna_indices.shape[1]
+        logger.debug(f"🔍 Processing {num_antennas} antenna(s) (single_mode={is_single_antenna})")
         
         # Enable mixed precision for forward pass if configured
         use_autocast = torch.cuda.is_available() and self.use_mixed_precision
+        
+        # Use unified multi-antenna processing (single antenna is just num_antennas=1)
+        outputs = self._forward_unified_antenna_processing(
+            sampled_positions, ue_positions, view_directions, antenna_indices,
+            selected_subcarriers, return_intermediates, use_autocast
+        )
+        
+        # For single antenna case, optionally squeeze the antenna dimension for backward compatibility
+        if is_single_antenna:
+            # Keep antenna dimension for consistency, but could squeeze if needed
+            pass
+            
+        return outputs
+    
+    def _process_single_antenna(
+        self,
+        sampled_positions: torch.Tensor,
+        ue_positions: torch.Tensor,
+        view_directions: torch.Tensor,
+        antenna_indices: torch.Tensor,
+        selected_subcarriers: Optional[List[int]],
+        return_intermediates: bool,
+        use_autocast: bool
+    ) -> Dict[str, torch.Tensor]:
+        """Internal method for single antenna forward pass (original implementation)."""
+        batch_size = sampled_positions.shape[0]
+        num_voxels = sampled_positions.shape[1]
         
         with torch.amp.autocast('cuda', enabled=use_autocast):
             # 1. AttenuationNetwork: Encode spatial positions
@@ -253,21 +297,25 @@ class PrismNetwork(nn.Module):
         # Stack attenuation factors: (batch_size, num_voxels, num_ue_antennas, num_subcarriers)
         attenuation_factors = torch.stack(attenuation_factors, dim=1)
         
-        # 3. AntennaEmbeddingCodebook: Get antenna embeddings (now unified to 3D output)
+        # Apply subcarrier selection if specified
+        if selected_subcarriers is not None:
+            # selected_subcarriers contains the indices of subcarriers to use
+            attenuation_factors = attenuation_factors[:, :, :, selected_subcarriers]
+            logger.debug(f"🔍 Applied subcarrier selection: {len(selected_subcarriers)} subcarriers")
+            logger.debug(f"🔍 Attenuation factors shape after selection: {attenuation_factors.shape}")
+        
+        # 3. AntennaEmbeddingCodebook: Get antenna embeddings
         if self.antenna_codebook is not None:
-            antenna_embeddings = self.antenna_codebook(antenna_indices)  # Always returns (batch_size, num_antennas, embedding_dim)
+            # antenna_indices is 1D (batch_size,) for single antenna processing
+            antenna_embeddings = self.antenna_codebook(antenna_indices.unsqueeze(1))  # Make it (batch_size, 1)
+            antenna_embeddings = antenna_embeddings.squeeze(1)  # Back to (batch_size, embedding_dim)
         else:
-            # Fallback: create random embeddings in unified 3D format
-            if antenna_indices.dim() == 1:
-                # Single antenna case: create (batch_size, 1, embedding_dim)
-                antenna_embeddings = torch.randn(batch_size, 1, self.antenna_embedding_dim, device=antenna_indices.device)
-            else:
-                # Multiple antennas case: create (batch_size, num_antennas, embedding_dim)
-                num_antennas = antenna_indices.shape[1]
-                antenna_embeddings = torch.randn(batch_size, num_antennas, self.antenna_embedding_dim, device=antenna_indices.device)
+            # Fallback: create random embeddings for single antenna
+            antenna_embeddings = torch.randn(batch_size, self.antenna_embedding_dim, device=antenna_indices.device)
         
         # 4. AntennaNetwork: Get directional importance
-        directional_importance = self.antenna_network(antenna_embeddings)
+        # AntennaNetwork expects (batch_size, num_antennas, embedding_dim)
+        directional_importance = self.antenna_network(antenna_embeddings.unsqueeze(1))
         
         # Get top-K directions for efficient sampling
         top_k_indices, top_k_importance = self.antenna_network.get_top_k_directions(
@@ -291,12 +339,27 @@ class PrismNetwork(nn.Module):
             # Convert complex features to real by taking magnitude
             mean_features = torch.abs(mean_features)
         
+        # RadianceNetwork now expects unified antenna processing format
+        # Convert antenna_embeddings from (batch_size, embedding_dim) to (batch_size, 1, embedding_dim)
+        antenna_embeddings_unified = antenna_embeddings.unsqueeze(1)  # Add antenna dimension
+        
         radiation_factors = self.radiance_network(
             encoded_ue_positions,
             encoded_view_directions,
             mean_features,
-            antenna_embeddings
+            antenna_embeddings_unified  # (batch_size, 1, embedding_dim) for single antenna
         )
+        
+        # RadianceNetwork now returns (batch_size, num_antennas, num_ue_antennas, num_subcarriers)
+        # For single antenna case, squeeze the antenna dimension: (batch_size, 1, num_ue_antennas, num_subcarriers) -> (batch_size, num_ue_antennas, num_subcarriers)
+        radiation_factors = radiation_factors.squeeze(1)
+        
+        # Apply subcarrier selection if specified
+        if selected_subcarriers is not None:
+            # selected_subcarriers contains the indices of subcarriers to use
+            radiation_factors = radiation_factors[:, :, selected_subcarriers]
+            logger.debug(f"🔍 Applied subcarrier selection to radiation factors: {len(selected_subcarriers)} subcarriers")
+            logger.debug(f"🔍 Radiation factors shape after selection: {radiation_factors.shape}")
         
         # Debug: Check the computed factors
         logger.debug(f"🔍 PrismNetwork forward outputs:")
@@ -323,6 +386,123 @@ class PrismNetwork(nn.Module):
             })
         
         return outputs
+    
+    def _forward_unified_antenna_processing(
+        self,
+        sampled_positions: torch.Tensor,
+        ue_positions: torch.Tensor,
+        view_directions: torch.Tensor,
+        antenna_indices: torch.Tensor,
+        selected_subcarriers: Optional[List[int]],
+        return_intermediates: bool,
+        use_autocast: bool
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Unified antenna processing method that handles both single and multi-antenna cases.
+        
+        This method processes each antenna individually and then stacks the results.
+        Single antenna case is just a special case where num_antennas=1.
+        """
+        batch_size = sampled_positions.shape[0]
+        num_antennas = antenna_indices.shape[1]
+        
+        logger.debug(f"🔍 Unified processing: {batch_size} samples × {num_antennas} antennas")
+        
+        # Initialize aggregated outputs
+        aggregated_outputs = {
+            'attenuation_factors': [],
+            'radiation_factors': [],
+            'directional_importance': [],
+            'top_k_directions': [],
+            'top_k_importance': []
+        }
+        
+        # If return_intermediates is requested, also aggregate intermediate results
+        if return_intermediates:
+            aggregated_outputs.update({
+                'spatial_features': [],
+                'antenna_embeddings': []
+            })
+        
+        # Process each antenna serially
+        for antenna_idx in range(num_antennas):
+            # Extract single antenna indices for this iteration
+            single_antenna_indices = antenna_indices[:, antenna_idx]  # (batch_size,)
+            
+            # Process this single antenna
+            single_antenna_output = self._process_single_antenna(
+                sampled_positions=sampled_positions,
+                ue_positions=ue_positions,
+                view_directions=view_directions,
+                antenna_indices=single_antenna_indices,
+                selected_subcarriers=selected_subcarriers,
+                return_intermediates=return_intermediates,
+                use_autocast=use_autocast
+            )
+            
+            # Aggregate the outputs
+            for key in ['attenuation_factors', 'radiation_factors', 'directional_importance', 
+                       'top_k_directions', 'top_k_importance']:
+                if key in single_antenna_output:
+                    aggregated_outputs[key].append(single_antenna_output[key])
+            
+            # Aggregate intermediate outputs if requested
+            if return_intermediates:
+                for key in ['spatial_features', 'antenna_embeddings']:
+                    if key in single_antenna_output:
+                        aggregated_outputs[key].append(single_antenna_output[key])
+        
+        # Stack the results along the antenna dimension (dim=1)
+        final_outputs = {}
+        logger.debug(f"🔍 Stacking results for {len(aggregated_outputs)} keys")
+        
+        for key, value_list in aggregated_outputs.items():
+            if not value_list:
+                continue
+                
+            try:
+                final_outputs[key] = self._stack_antenna_outputs(key, value_list, num_antennas)
+                logger.debug(f"✅ Stacked {key}: {final_outputs[key].shape}")
+            except Exception as e:
+                logger.error(f"❌ Failed to stack {key}: {e}")
+                final_outputs[key] = value_list
+        
+        return final_outputs
+    
+    def _stack_antenna_outputs(self, key: str, value_list: List[torch.Tensor], num_antennas: int) -> torch.Tensor:
+        """
+        Stack antenna outputs along the antenna dimension.
+        
+        Args:
+            key: Output key name
+            value_list: List of tensors from each antenna
+            num_antennas: Number of antennas
+            
+        Returns:
+            Stacked tensor with antenna dimension at dim=1
+        """
+        if key == 'attenuation_factors':
+            # Special handling for attenuation_factors which has shape (batch, 64, ue_antennas, subcarriers)
+            # We need to select the correct antenna index from each tensor
+            stacked_tensors = []
+            for antenna_idx, tensor in enumerate(value_list):
+                # Select the specific antenna from the 64 BS antennas
+                antenna_tensor = tensor[:, antenna_idx:antenna_idx+1, :, :]  # Keep dim for concatenation
+                stacked_tensors.append(antenna_tensor)
+            return torch.cat(stacked_tensors, dim=1)
+            
+        elif key in ['directional_importance', 'top_k_directions', 'top_k_importance']:
+            # These tensors have an extra singleton dimension that needs to be squeezed first
+            squeezed_tensors = []
+            for tensor in value_list:
+                # Remove the singleton dimension at position 1
+                squeezed = tensor.squeeze(1)
+                squeezed_tensors.append(squeezed)
+            return torch.stack(squeezed_tensors, dim=1)
+            
+        else:
+            # Standard stacking for radiation_factors and other tensors
+            return torch.stack(value_list, dim=1)
     
     def get_network_info(self) -> Dict[str, Any]:
         """Get information about the network architecture."""

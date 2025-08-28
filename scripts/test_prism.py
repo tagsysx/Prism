@@ -24,6 +24,13 @@ import json
 import time
 from typing import Dict, List, Tuple, Optional
 
+# GPU monitoring imports
+try:
+    import GPUtil
+    GPU_AVAILABLE = True
+except ImportError:
+    GPU_AVAILABLE = False
+
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -43,6 +50,163 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+
+class TestingProgressMonitor:
+    """Real-time testing progress monitor with GPU utilization tracking"""
+    
+    def __init__(self, total_samples: int, batch_size: int):
+        """Initialize testing progress monitor"""
+        self.total_samples = total_samples
+        self.batch_size = batch_size
+        self.total_batches = (total_samples + batch_size - 1) // batch_size
+        
+        # Timing
+        self.start_time = None
+        self.batch_start_time = None
+        self.batch_times = []
+        
+        # Progress tracking
+        self.current_batch = 0
+        self.processed_samples = 0
+        
+        # Performance metrics
+        self.gpu_utilization_history = []
+        self.memory_usage_history = []
+        
+        logger.info(f"🔍 Testing Progress Monitor initialized:")
+        logger.info(f"   • Total samples: {self.total_samples:,}")
+        logger.info(f"   • Batch size: {self.batch_size}")
+        logger.info(f"   • Total batches: {self.total_batches}")
+    
+    def start_testing(self):
+        """Start testing monitoring"""
+        self.start_time = time.time()
+        print(f"\n🧪 Starting CSI Inference Progress Monitoring")
+        print(f"{'='*80}")
+        print(f"📊 Total Samples: {self.total_samples:,}")
+        print(f"📦 Batch Size: {self.batch_size}")
+        print(f"🔄 Total Batches: {self.total_batches}")
+        print(f"{'='*80}")
+    
+    def start_batch(self, batch_idx: int, batch_size: int):
+        """Start batch processing"""
+        self.current_batch = batch_idx + 1
+        self.batch_start_time = time.time()
+        self.processed_samples = min(batch_idx * self.batch_size + batch_size, self.total_samples)
+        
+        # Show batch start info
+        progress_percent = (self.processed_samples / self.total_samples) * 100
+        print(f"\n🔄 Batch {self.current_batch}/{self.total_batches} ({progress_percent:.1f}%)")
+        print(f"    📦 Processing samples {batch_idx * self.batch_size + 1} to {self.processed_samples}")
+    
+    def update_batch_progress(self, batch_idx: int, batch_size: int):
+        """Update batch progress with performance metrics"""
+        batch_time = time.time() - self.batch_start_time
+        total_time = time.time() - self.start_time
+        
+        # Calculate progress
+        progress_percent = (self.processed_samples / self.total_samples) * 100
+        
+        # Calculate timing estimates
+        avg_batch_time = np.mean(self.batch_times[-10:]) if len(self.batch_times) >= 10 else (total_time / self.current_batch)
+        remaining_batches = self.total_batches - self.current_batch
+        eta = avg_batch_time * remaining_batches
+        
+        # Get GPU info
+        gpu_info = self._get_gpu_info()
+        memory_info = self._get_memory_info()
+        
+        # Calculate throughput
+        samples_per_second = self.processed_samples / total_time if total_time > 0 else 0
+        
+        # Display progress
+        print(f"    ✅ Batch {self.current_batch}/{self.total_batches} completed in {batch_time:.1f}s")
+        print(f"    📊 Progress: {progress_percent:.1f}% ({self.processed_samples:,}/{self.total_samples:,} samples)")
+        print(f"    ⚡ Throughput: {samples_per_second:.1f} samples/s")
+        print(f"    ⏱️  Timing: Batch {batch_time:.1f}s | Total {total_time:.1f}s | ETA {eta:.1f}s")
+        print(f"    🔍 GPU: {gpu_info} | Memory: {memory_info}")
+        
+        # Store metrics
+        self.batch_times.append(batch_time)
+        self.gpu_utilization_history.append(gpu_info)
+        self.memory_usage_history.append(memory_info)
+        
+        # Show heartbeat for longer batches
+        if batch_time > 30:  # If batch takes more than 30 seconds
+            current_time = time.strftime('%H:%M:%S')
+            print(f"    💓 Heartbeat: {current_time} - Testing is alive and running!")
+    
+    def end_testing(self):
+        """End testing monitoring and show summary"""
+        total_time = time.time() - self.start_time
+        
+        print(f"\n✅ CSI Inference Completed!")
+        print(f"{'='*80}")
+        print(f"📊 Testing Summary:")
+        print(f"   • Total samples processed: {self.processed_samples:,}")
+        print(f"   • Total batches: {self.current_batch}")
+        print(f"   • Total time: {total_time:.1f}s ({total_time/60:.1f}m)")
+        
+        if len(self.batch_times) > 0:
+            avg_batch_time = np.mean(self.batch_times)
+            avg_samples_per_second = self.processed_samples / total_time
+            print(f"   • Average batch time: {avg_batch_time:.1f}s")
+            print(f"   • Average throughput: {avg_samples_per_second:.1f} samples/s")
+        
+        # Show performance summary
+        if len(self.batch_times) > 1:
+            fastest_batch = min(self.batch_times)
+            slowest_batch = max(self.batch_times)
+            print(f"   • Fastest batch: {fastest_batch:.1f}s")
+            print(f"   • Slowest batch: {slowest_batch:.1f}s")
+        
+        print(f"{'='*80}")
+    
+    def _get_gpu_info(self):
+        """Get current GPU utilization information"""
+        if not GPU_AVAILABLE or not torch.cuda.is_available():
+            return "N/A"
+        
+        try:
+            gpus = GPUtil.getGPUs()
+            if gpus:
+                gpu = gpus[0]  # Use first GPU
+                return f"{gpu.load*100:.1f}%"
+            else:
+                return "No GPU"
+        except Exception:
+            return "Error"
+    
+    def _get_memory_info(self):
+        """Get current memory usage information"""
+        if not torch.cuda.is_available():
+            return "CPU"
+        
+        try:
+            memory_allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+            memory_reserved = torch.cuda.memory_reserved() / 1024**3   # GB
+            return f"{memory_allocated:.1f}GB/{memory_reserved:.1f}GB"
+        except Exception:
+            return "Error"
+    
+    def get_performance_summary(self):
+        """Get performance summary for final reporting"""
+        if not self.batch_times:
+            return "No performance data available"
+        
+        total_time = time.time() - self.start_time if self.start_time else 0
+        
+        return {
+            'total_time': total_time,
+            'total_samples': self.processed_samples,
+            'total_batches': self.current_batch,
+            'avg_batch_time': np.mean(self.batch_times),
+            'avg_throughput': self.processed_samples / total_time if total_time > 0 else 0,
+            'fastest_batch': min(self.batch_times),
+            'slowest_batch': max(self.batch_times),
+            'gpu_utilization_avg': np.mean([float(gpu.replace('%', '')) for gpu in self.gpu_utilization_history if gpu != "N/A" and gpu != "Error"]) if self.gpu_utilization_history else 0
+        }
 
 class PrismTester:
     """Main tester class for Prism network using TrainingInterface"""
@@ -352,7 +516,6 @@ class PrismTester:
             
             self.model = PrismTrainingInterface(
                 prism_network=self.prism_network,
-                ray_tracer=self.ray_tracer,
                 ray_tracing_config=ray_tracing_config,
                 system_config=system_config,
                 user_equipment_config=ue_config,
@@ -1194,12 +1357,22 @@ class PrismTester:
             
             logger.info(f"Processing {num_samples} samples in batches of {batch_size}")
             
+            # Initialize progress monitor
+            progress_monitor = TestingProgressMonitor(num_samples, batch_size)
+            progress_monitor.start_testing()
+            
             with torch.no_grad():
                 for i in range(0, num_samples, batch_size):
                     end_idx = min(i + batch_size, num_samples)
+                    actual_batch_size = end_idx - i
+                    batch_idx = i // batch_size
+                    
+                    # Start batch monitoring
+                    progress_monitor.start_batch(batch_idx, actual_batch_size)
+                    
                     batch_ue_pos = self.ue_positions[i:end_idx]
-                    batch_bs_pos = self.bs_position.expand(end_idx - i, -1)
-                    batch_antenna_idx = self.antenna_indices.expand(end_idx - i, -1)
+                    batch_bs_pos = self.bs_position.expand(actual_batch_size, -1)
+                    batch_antenna_idx = self.antenna_indices.expand(actual_batch_size, -1)
                     
                     try:
                         # Use TrainingInterface forward pass for CSI prediction
@@ -1213,13 +1386,22 @@ class PrismTester:
                         # Store predictions (move to CPU to save GPU memory)
                         predictions.append(batch_predictions.cpu())
                         
-                        # Log progress
-                        if (i // batch_size + 1) % 10 == 0 or end_idx == num_samples:
-                            logger.info(f"Processed batch {i//batch_size + 1}/{(num_samples + batch_size - 1)//batch_size}")
+                        # Update progress monitor
+                        progress_monitor.update_batch_progress(batch_idx, actual_batch_size)
+                        
+                        # Log progress (less frequent now due to progress monitor)
+                        if (batch_idx + 1) % 5 == 0 or end_idx == num_samples:
+                            logger.info(f"Processed batch {batch_idx + 1}/{(num_samples + batch_size - 1)//batch_size}")
                         
                     except Exception as e:
-                        logger.error(f"❌ Error in batch {i//batch_size}: {e}")
+                        logger.error(f"❌ Error in batch {batch_idx}: {e}")
                         raise
+            
+            # End progress monitoring
+            progress_monitor.end_testing()
+            
+            # Store progress monitor for later use
+            self.progress_monitor = progress_monitor
             
             if not predictions:
                 raise RuntimeError("No successful predictions made")
@@ -1512,6 +1694,18 @@ class PrismTester:
             logger.info(f"   • Total test samples: {len(self.ue_positions)}")
             logger.info(f"   • Model parameters: {sum(p.numel() for p in self.prism_network.parameters()):,}")
             logger.info(f"   • Predictions saved for later analysis")
+            
+            # Show performance summary from progress monitor
+            if hasattr(self, 'progress_monitor') and self.progress_monitor is not None:
+                perf_summary = self.progress_monitor.get_performance_summary()
+                if isinstance(perf_summary, dict):
+                    logger.info(f"   • Average batch time: {perf_summary['avg_batch_time']:.1f}s")
+                    logger.info(f"   • Average throughput: {perf_summary['avg_throughput']:.1f} samples/s")
+                    logger.info(f"   • Fastest batch: {perf_summary['fastest_batch']:.1f}s")
+                    logger.info(f"   • Slowest batch: {perf_summary['slowest_batch']:.1f}s")
+                    if perf_summary['gpu_utilization_avg'] > 0:
+                        logger.info(f"   • Average GPU utilization: {perf_summary['gpu_utilization_avg']:.1f}%")
+            
             for stat_name, stat_value in inference_stats.items():
                 logger.info(f"   • {stat_name}: {stat_value}")
             logger.info("=" * 80)
@@ -1699,6 +1893,17 @@ class PrismTester:
             logger.info(f"   • Model parameters: {sum(p.numel() for p in self.prism_network.parameters()):,}")
             logger.info(f"   • Best loss from checkpoint: {self.checkpoint_info.get('best_loss', 'N/A')}")
             
+            # Show performance summary from progress monitor
+            if hasattr(self, 'progress_monitor') and self.progress_monitor is not None:
+                perf_summary = self.progress_monitor.get_performance_summary()
+                if isinstance(perf_summary, dict):
+                    logger.info(f"   • Average batch time: {perf_summary['avg_batch_time']:.1f}s")
+                    logger.info(f"   • Average throughput: {perf_summary['avg_throughput']:.1f} samples/s")
+                    logger.info(f"   • Fastest batch: {perf_summary['fastest_batch']:.1f}s")
+                    logger.info(f"   • Slowest batch: {perf_summary['slowest_batch']:.1f}s")
+                    if perf_summary['gpu_utilization_avg'] > 0:
+                        logger.info(f"   • Average GPU utilization: {perf_summary['gpu_utilization_avg']:.1f}%")
+            
             # Show key metrics from analysis
             if 'rmse_total' in combined_metrics:
                 logger.info(f"   • Total RMSE: {combined_metrics['rmse_total']:.6f}")
@@ -1745,7 +1950,7 @@ def main():
         else:
             logger.info("🧪 Starting full testing process...")
         tester.test()
-            logger.info("✅ Full testing completed successfully")
+        logger.info("✅ Full testing completed successfully")
         
     except (FileNotFoundError, PermissionError) as e:
         logger.error(f"❌ FATAL ERROR - Model file issue: {e}")
