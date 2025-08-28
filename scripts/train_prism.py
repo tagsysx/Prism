@@ -1585,16 +1585,33 @@ class PrismTrainer:
             self.logger.warning(f"Emergency checkpoint failed: {e}")
     
     def _save_best_model(self, epoch: int, train_loss: float, val_loss: float):
-        """Save the best model checkpoint"""
+        """Save the best model checkpoint to the correct models directory"""
         try:
-            # Save TrainingInterface best model checkpoint
-            best_model_name = 'best_model.pt'
-            self.model.save_checkpoint(best_model_name,
-                                      optimizer_state_dict=self.optimizer.state_dict(),
-                                      scheduler_state_dict=self.scheduler.state_dict())
-            self.logger.info(f"🏆 Best model TrainingInterface checkpoint saved: {best_model_name}")
+            # Get the models directory (not checkpoint directory) - this is the correct location
+            models_dir = Path(self.config['output']['training']['models_dir'])
+            models_dir.mkdir(parents=True, exist_ok=True)
             
-            # Save best model training state
+            # Save best model to models directory (primary location)
+            best_model_path = models_dir / 'best_model.pt'
+            best_model_data = {
+                'model_state_dict': self.model.state_dict(),
+                'prism_network_state_dict': self.model.prism_network.state_dict(),
+                'current_epoch': self.model.current_epoch,
+                'current_batch': self.model.current_batch,
+                'best_loss': self.model.best_loss,
+                'training_history': self.model.training_history,
+                'current_selection': self.model.current_selection,
+                'current_selection_mask': self.model.current_selection_mask,
+                'training_config': {
+                    'num_sampling_points': self.model.num_sampling_points,
+                    'subcarrier_sampling_ratio': self.model.subcarrier_sampling_ratio,
+                    'scene_bounds': (self.model.scene_min.tolist(), self.model.scene_max.tolist())
+                }
+            }
+            torch.save(best_model_data, best_model_path)
+            self.logger.info(f"🏆 Best model saved to models directory: {best_model_path}")
+            
+            # Save best model training state (with optimizer/scheduler info)
             best_model_state = {
                 'epoch': epoch,
                 'train_loss': train_loss,
@@ -1606,17 +1623,15 @@ class PrismTrainer:
                 'is_best_model': True
             }
             
-            checkpoint_dir = Path(self.model.checkpoint_dir)
-            best_model_path = checkpoint_dir / 'best_model_state.pt'
-            torch.save(best_model_state, best_model_path)
-            self.logger.info(f"🏆 Best model state saved: {best_model_path}")
+            best_model_state_path = models_dir / 'best_model_state.pt'
+            torch.save(best_model_state, best_model_state_path)
+            self.logger.info(f"🏆 Best model training state saved: {best_model_state_path}")
             
-            # Also save to models directory if it exists
-            models_dir = checkpoint_dir.parent / 'models'
-            if models_dir.exists():
-                models_best_path = models_dir / 'best_model.pt'
-                torch.save(best_model_state, models_best_path)
-                self.logger.info(f"🏆 Best model also saved to models directory: {models_best_path}")
+            # Also save a copy to checkpoint directory for backup (optional)
+            checkpoint_dir = Path(self.model.checkpoint_dir)
+            backup_best_path = checkpoint_dir / 'best_model_backup.pt'
+            torch.save(best_model_data, backup_best_path)
+            self.logger.info(f"🏆 Best model backup saved to checkpoint directory: {backup_best_path}")
             
         except Exception as e:
             self.logger.warning(f"Best model save failed: {e}")
