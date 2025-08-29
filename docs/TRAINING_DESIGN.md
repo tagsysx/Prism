@@ -17,8 +17,8 @@ The Prism model consists of four main neural network components that are trained
 - **Output**: 128-dimensional feature vector
 
 #### 1.1.2 AttenuationDecoder
-- **Purpose**: Converts 128D spatial features into `N_BS × N_UE` attenuation factors
-- **Architecture**: `N_UE` independent 3-layer MLPs
+- **Purpose**: Converts 128D spatial features into $N_\text{BS} \times N_\text{UE}$ attenuation factors
+- **Architecture**: $N_\text{UE}$ independent 3-layer MLPs
 - **Input**: 128D features from AttenuationNetwork
 - **Output**: Attenuation factors for each BS-UE antenna combination
 
@@ -56,7 +56,7 @@ The training process follows this workflow:
 2. **Forward Pass**: Process data through all four network components
 3. **BS-Centric Ray Tracing**: Start ray tracing from each BS antenna
 4. **AntennaNetwork Direction Selection**: Use AntennaNetwork to suggest important directions for ray tracing
-5. **Subcarrier Sampling**: Randomly select `K' < K` subcarriers per antenna for computational efficiency
+5. **Subcarrier Sampling**: Randomly select $K'<K$ subcarriers per antenna for computational efficiency
 6. **CSI Prediction**: Calculate predicted CSI for selected subcarriers on each BS antenna
 7. **Loss Computation**: Compute MSE between predicted CSI and ground truth CSI from real measurements
 8. **Backward Pass**: Compute gradients and update model parameters
@@ -76,7 +76,7 @@ The choice of loss function is critical for training neural networks to predict 
 \mathcal{L}_{\text{CMSE}} = \frac{1}{N} \sum_{i=1}^{N} \left\| \mathbf{H}_{\text{pred}}^{(i)} - \mathbf{H}_{\text{true}}^{(i)} \right\|_F^2 = \frac{1}{N} \sum_{i=1}^{N} \left( |\Delta \mathbf{H}_i| \right)^2
 ```
 
-where `Δ H_i = H_pred^(i) - H_true^(i)` is the complex error.
+where $\Delta \mathbf{H}_i = \mathbf{H}_{\text{pred}}^{(i)} - \mathbf{H}_{\text{true}}^{(i)}$ is the complex error.
 
 **Advantages:**
 - Simple computation with clear physical meaning (Euclidean distance between complex vectors)
@@ -94,13 +94,13 @@ Separate handling of magnitude and phase components with adjustable weighting.
 \mathcal{L}_{\text{Mag+Phase}} = \alpha \cdot \frac{1}{N} \sum_{i=1}^{N} \left( |\mathbf{H}_{\text{pred}}^{(i)}| - |\mathbf{H}_{\text{true}}^{(i)}| \right)^2 + \beta \cdot \frac{1}{N} \sum_{i=1}^{N} \mathcal{L}_{\text{Phase}}^{(i)}
 ```
 
-The **phase loss `L_Phase` is critical** and can be defined in two ways:
+The **phase loss $\mathcal{L}_{\text{Phase}}$ is critical** and can be defined in two ways:
 
-**Option 1: Corrected Phase Difference MSE** (handles `2π` wrapping):
+**Option 1: Corrected Phase Difference MSE** (handles $2\pi$ wrapping):
 ```math
 \mathcal{L}_{\text{Phase}}^{(i)} = \left( \arctan2\left( \sin(\Delta\theta_i), \cos(\Delta\theta_i) \right) \right)^2
 ```
-where `Δθ_i = ∠ H_pred^(i) - ∠ H_true^(i)`.
+where $\Delta\theta_i = \angle \mathbf{H}_{\text{pred}}^{(i)} - \angle \mathbf{H}_{\text{true}}^{(i)}$.
 
 **Option 2: Complex Cosine Similarity** (more stable):
 ```math
@@ -112,7 +112,7 @@ where `Δθ_i = ∠ H_pred^(i) - ∠ H_true^(i)`.
 - Suitable for applications where phase accuracy is critical (e.g., beamforming)
 
 **Disadvantages:**
-- Requires manual tuning of hyperparameters `α` and `β`
+- Requires manual tuning of hyperparameters $\alpha$ and $\beta$
 
 #### 3.1.3 Correlation-Based Loss
 
@@ -123,7 +123,7 @@ Focuses on structural similarity between CSI vectors rather than absolute errors
 ```
 
 **Advantages:**
-- Invariant to global magnitude scaling (same loss for `H_pred` and `k · H_pred`)
+- Invariant to global magnitude scaling (same loss for $H_{\text{pred}}$ and $k \cdot H_{\text{pred}}$)
 - Emphasizes **structural similarity**, directly related to communication performance metrics
 - Robust to amplitude variations while preserving phase relationships
 
@@ -139,10 +139,10 @@ For optimal performance, we recommend combining the strengths of multiple approa
 ```
 
 **Rationale:**
-- `L_CMSE` ensures **absolute value accuracy**
-- `L_Corr` ensures **structural similarity**, critical for application performance
+- $\mathcal{L}_{\text{CMSE}}$ ensures **absolute value accuracy**
+- $\mathcal{L}_{\text{Corr}}$ ensures **structural similarity**, critical for application performance
 - The combination provides both stability and effectiveness
-- Typically `λ₁ = λ₂ = 1` works well in practice
+- Typically $\lambda_1 = \lambda_2 = 1$ works well in practice
 
 ### 3.2 PDP Loss Functions
 
@@ -154,8 +154,8 @@ The PDP loss computation follows this workflow for comparing **predicted CSI** a
 
 1. **Zero Padding**: Pad both predicted and true CSI to the same complete frequency sequence (e.g., 1024 points)
 2. **PDP Calculation**: Apply IFFT to zero-padded frequency data and compute power delay profile
-   - `PDP_pred = |IFFT(CSI_pred,padded)|²`
-   - `PDP_true = |IFFT(CSI_true,padded)|²`
+   - $\text{PDP}_{\text{pred}} = |\text{IFFT}(\text{CSI}_{\text{pred,padded}})|^2$
+   - $\text{PDP}_{\text{true}} = |\text{IFFT}(\text{CSI}_{\text{true,padded}})|^2$
 3. **PDP Comparison**: Calculate differences between the two PDPs as loss function or evaluation metric
 
 ```mermaid
@@ -197,7 +197,7 @@ Focuses on shape similarity rather than absolute values:
 ```math
 \mathcal{L}_{\text{PDP,corr}} = 1 - \rho
 ```
-where ideally `ρ = 1` and `L_PDP,corr = 0`.
+where ideally $\rho = 1$ and $\mathcal{L}_{\text{PDP,corr}} = 0$.
 
 **Advantages:**
 - Robust to absolute power scaling differences
@@ -211,9 +211,9 @@ where ideally `ρ = 1` and `L_PDP,corr = 0`.
 #### 3.2.4 Dominant Path Feature Loss
 
 Extracts and compares key characteristics:
-- **Dominant path delay error**: `L_delay = |argmax(PDP_pred) - argmax(PDP_true)|`
-- **RMS delay spread error**: `L_spread = |σ_pred - σ_true|`
-- **Dominant path power ratio error**: `L_power = |max(PDP_pred)/∑PDP_pred - max(PDP_true)/∑PDP_true|`
+- **Dominant path delay error**: $\mathcal{L}_{\text{delay}} = |\arg\max(\text{PDP}_{\text{pred}}) - \arg\max(\text{PDP}_{\text{true}})|$
+- **RMS delay spread error**: $\mathcal{L}_{\text{spread}} = |\sigma_{\text{pred}} - \sigma_{\text{true}}|$
+- **Dominant path power ratio error**: $\mathcal{L}_{\text{power}} = \left|\frac{\max(\text{PDP}_{\text{pred}})}{\sum \text{PDP}_{\text{pred}}} - \frac{\max(\text{PDP}_{\text{true}})}{\sum \text{PDP}_{\text{true}}}\right|$
 
 **Advantages:**
 - Focuses on physically meaningful parameters
@@ -233,11 +233,11 @@ For optimal performance, we recommend combining multiple PDP loss approaches:
 ```
 
 **Rationale:**
-- `L_PDP,MSE` ensures **detailed delay profile accuracy**
-- `L_PDP,corr` ensures **structural similarity** in time domain
-- `L_delay` ensures **dominant path timing accuracy**
+- $\mathcal{L}_{\text{PDP,MSE}}$ ensures **detailed delay profile accuracy**
+- $\mathcal{L}_{\text{PDP,corr}}$ ensures **structural similarity** in time domain
+- $\mathcal{L}_{\text{delay}}$ ensures **dominant path timing accuracy**
 - The combination provides comprehensive time-domain validation
-- Typically `α = 0.5`, `β = 0.3`, `γ = 0.2` works well in practice
+- Typically $\alpha = 0.5$, $\beta = 0.3$, $\gamma = 0.2$ works well in practice
 
 **Advantages:**
 - Comprehensive time-domain validation
@@ -252,8 +252,8 @@ For optimal performance, we recommend combining multiple PDP loss approaches:
 
 **Normalization Requirements:**
 Before comparison, PDPs must be **normalized** to the same total energy or peak energy to focus on shape rather than absolute power:
-- Peak normalization: `PDP_norm = PDP / max(PDP)`
-- Energy normalization: `PDP_norm = PDP / ∑(PDP)`
+- Peak normalization: $\text{PDP}_{\text{norm}} = \text{PDP} / \max(\text{PDP})$
+- Energy normalization: $\text{PDP}_{\text{norm}} = \text{PDP} / \sum(\text{PDP})$
 
 **Subcarrier Alignment:**
 Ensure that predicted and true CSI come from **identical subcarrier indices** with identical zero-padding patterns.
@@ -276,12 +276,12 @@ PDP loss functions offer several advantages over frequency-domain comparisons:
 
 | Application Focus | Recommended Loss Function |
 |:-----------------|:-------------------------|
-| **General Purpose** | **Complex MSE** (`L_CMSE`) |
-| **Phase Accuracy Critical** | **Magnitude + Phase Loss** (`L_Mag+Phase`) |
-| **Beamforming/Correlation** | **Correlation Loss** (`L_Corr`) |
-| **Best Performance** | **Hybrid CSI Loss** (`L_CMSE + L_Corr`) |
-| **Time-domain Validation** | **PDP Loss** (`L_PDP`) |
-| **Comprehensive Validation** | **Hybrid PDP Loss** (`L_PDP,total`) |
-| **Production Use** | **Hybrid CSI+PDP Loss** (`L_total`) |
+| **General Purpose** | **Complex MSE** ($\mathcal{L}_{\text{CMSE}}$) |
+| **Phase Accuracy Critical** | **Magnitude + Phase Loss** ($\mathcal{L}_{\text{Mag+Phase}}$) |
+| **Beamforming/Correlation** | **Correlation Loss** ($\mathcal{L}_{\text{Corr}}$) |
+| **Best Performance** | **Hybrid CSI Loss** ($\mathcal{L}_{\text{CMSE}} + \mathcal{L}_{\text{Corr}}$) |
+| **Time-domain Validation** | **PDP Loss** ($\mathcal{L}_{\text{PDP}}$) |
+| **Comprehensive Validation** | **Hybrid PDP Loss** ($\mathcal{L}_{\text{PDP,total}}$) |
+| **Production Use** | **Hybrid CSI+PDP Loss** ($\mathcal{L}_{\text{total}}$) |
 
 
