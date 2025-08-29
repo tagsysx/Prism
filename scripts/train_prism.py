@@ -1115,9 +1115,9 @@ class PrismTrainer:
             dataloader_iter = iter(self.dataloader)
             
             # Determine starting batch index for this epoch
-            if epoch == start_epoch and start_batch > 0:
+            if epoch == self._current_start_epoch and hasattr(self, '_current_start_batch') and self._current_start_batch > 0:
                 # If resuming in the middle of an epoch, start from the correct batch
-                batch_start = start_batch
+                batch_start = self._current_start_batch
                 self.logger.info(f"Resuming epoch {epoch} from batch {batch_start + 1}/{self.batches_per_epoch}")
                 # Skip the batches that were already processed
                 for _ in range(batch_start):
@@ -1883,6 +1883,10 @@ class PrismTrainer:
             val_losses = []
             self.logger.info("Starting training from epoch 1")
             print("🆕 Starting training from epoch 1")
+        
+        # Store as instance variables for use in _train_epoch
+        self._current_start_epoch = start_epoch
+        self._current_start_batch = start_batch
         
         print(f"\n📈 Training Configuration:")
         print(f"   • Total epochs: {self.num_epochs}")
