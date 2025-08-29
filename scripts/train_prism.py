@@ -720,8 +720,8 @@ class PrismTrainer:
         early_stopping_config = self.config.get('training', {}).get('early_stopping', {})
         self.early_stopping_enabled = early_stopping_config.get('enabled', True)
         if self.early_stopping_enabled:
-            self.early_stopping_patience = early_stopping_config.get('patience', 10)
-            self.early_stopping_min_delta = early_stopping_config.get('min_delta', 1e-6)
+            self.early_stopping_patience = int(early_stopping_config.get('patience', 10))
+            self.early_stopping_min_delta = float(early_stopping_config.get('min_delta', 1e-6))
             self.early_stopping_restore_best = early_stopping_config.get('restore_best_weights', True)
             self.early_stopping_counter = 0
             self.best_val_loss = float('inf')
