@@ -235,10 +235,11 @@ class TrainingProgressMonitor:
 class PrismTrainer:
     """Main trainer class for Prism network using TrainingInterface"""
     
-    def __init__(self, config_path: str, data_path: str = None, output_dir: str = None, resume_from: str = None):
+    def __init__(self, config_path: str, data_path: str = None, output_dir: str = None, resume_from: str = None, gpu_id: int = None):
         """Initialize trainer with configuration and optional data/output paths (will read from config if not provided)"""
         # Load config first to get logging configuration
         self.config_path = config_path
+        self.gpu_id = gpu_id  # Store GPU ID for device setup
         
         try:
             config_loader = ConfigLoader(config_path)
@@ -351,12 +352,24 @@ class PrismTrainer:
         cuda_config = self.config.get('system', {}).get('cuda', {})
         
         if device_config == 'cuda' and torch.cuda.is_available():
-            # Intelligent GPU selection
+            # GPU selection: use specified GPU ID or auto-select
             self.num_gpus = torch.cuda.device_count()
-            selected_device_id = self._select_best_gpu()
+            
+            if self.gpu_id is not None:
+                # Use specified GPU ID
+                if self.gpu_id >= self.num_gpus or self.gpu_id < 0:
+                    self.logger.error(f"❌ Invalid GPU ID {self.gpu_id}. Available GPUs: 0-{self.num_gpus-1}")
+                    raise ValueError(f"Invalid GPU ID {self.gpu_id}. Available GPUs: 0-{self.num_gpus-1}")
+                selected_device_id = self.gpu_id
+                self.logger.info(f"🎯 Using specified GPU: {selected_device_id}")
+            else:
+                # Auto-select best GPU
+                selected_device_id = self._select_best_gpu()
+                self.logger.info(f"🔍 Auto-selected GPU: {selected_device_id}")
+            
             self.device = torch.device(f'cuda:{selected_device_id}')
             
-            self.logger.info(f"🔍 GPU Auto-Selection Results:")
+            self.logger.info(f"🔍 GPU Selection Results:")
             self.logger.info(f"  • Total GPUs detected: {self.num_gpus}")
             self.logger.info(f"  • Selected GPU: {selected_device_id}")
             self.logger.info(f"  • GPU Name: {torch.cuda.get_device_name(selected_device_id)}")
@@ -426,39 +439,7 @@ class PrismTrainer:
         # Display batch checkpoint settings
         self._display_batch_checkpoint_info()
     
-    def _complex_mse_loss(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """Custom MSE loss for complex-valued tensors that always returns a tensor."""
-        # Handle complex tensors by separating real and imaginary parts
-        if predictions.is_complex():
-            pred_real = predictions.real
-            pred_imag = predictions.imag
-        else:
-            pred_real = predictions
-            pred_imag = torch.zeros_like(predictions)
-        
-        if targets.is_complex():
-            target_real = targets.real
-            target_imag = targets.imag
-        else:
-            target_real = targets
-            target_imag = torch.zeros_like(targets)
-        
-        # Compute MSE for real and imaginary parts
-        real_loss = nn.functional.mse_loss(pred_real, target_real, reduction='mean')
-        imag_loss = nn.functional.mse_loss(pred_imag, target_imag, reduction='mean')
-        
-        # Combine losses
-        total_loss = real_loss + imag_loss
-        
-        # Ensure we return a tensor with gradients
-        if not isinstance(total_loss, torch.Tensor):
-            # Create tensor that maintains gradients
-            total_loss = torch.tensor(total_loss, device=predictions.device, dtype=predictions.dtype, requires_grad=True)
-        elif not total_loss.requires_grad:
-            # If tensor exists but doesn't have gradients, ensure it does
-            total_loss.requires_grad_(True)
-        
-        return total_loss
+
     
 
     
@@ -663,8 +644,24 @@ class PrismTrainer:
         self.batch_timeout = 600  # 10 minutes per batch
         self.progress_check_interval = 30  # Check progress every 30 seconds
         
-        # Loss function for complex-valued outputs - ensure it returns tensors
-        self.criterion = self._complex_mse_loss
+        # Import and setup loss function
+        from prism.loss_functions import PrismLossFunction, DEFAULT_LOSS_CONFIG
+        
+        # Create loss configuration
+        loss_config = DEFAULT_LOSS_CONFIG.copy()
+        # Override with any config-specific settings if needed
+        training_config = self.config.get('training', {})
+        if 'loss' in training_config:
+            loss_config.update(training_config['loss'])
+        
+        # Initialize loss function
+        self.criterion = PrismLossFunction(loss_config)
+        
+        logger.info(f"🎯 Initialized Hybrid CSI+PDP Loss Function:")
+        logger.info(f"   CSI Weight: {loss_config['csi_weight']}")
+        logger.info(f"   PDP Weight: {loss_config['pdp_weight']}")
+        logger.info(f"   CSI Type: {loss_config['csi_loss']['type']}")
+        logger.info(f"   PDP Type: {loss_config['pdp_loss']['type']}")
         
         # Setup mixed precision training
         mixed_precision_config = self.config.get('system', {}).get('mixed_precision', {})
@@ -2253,10 +2250,10 @@ class PrismTrainer:
 def main():
     """Main function"""
     parser = argparse.ArgumentParser(description='Train Prism Network using TrainingInterface')
-    parser.add_argument('--config', type=str, default='configs/ofdm-5g-sionna.yml',
-                       help='Path to configuration file')
-
-
+    parser.add_argument('--config', type=str, required=True,
+                       help='Path to configuration file (required)')
+    parser.add_argument('--gpu', type=int, default=None,
+                       help='GPU device ID to use (e.g., 0, 1, 2). If not specified, will auto-select based on available memory')
     parser.add_argument('--resume', type=str, default=None,
                        help='Path to checkpoint file to resume training from')
     
@@ -2264,7 +2261,7 @@ def main():
     
     # Create trainer and start training
     # Create trainer and run training (data path and output directory from config)
-    trainer = PrismTrainer(args.config, None, None, args.resume)
+    trainer = PrismTrainer(args.config, None, None, args.resume, args.gpu)
     trainer.train()
 
 if __name__ == '__main__':

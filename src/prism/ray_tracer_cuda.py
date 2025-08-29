@@ -409,9 +409,9 @@ class CUDARayTracer(RayTracer):
         return importance_weights
     
     def _importance_based_resampling(self, 
-                                   uniform_positions: torch.Tensor,
-                                   importance_weights: torch.Tensor,
-                                   num_samples: int) -> torch.Tensor:
+                                        uniform_positions: torch.Tensor,
+                                        importance_weights: torch.Tensor,
+                                        num_samples: int) -> torch.Tensor:
         """
         Importance-based resampling using multinomial sampling.
         
@@ -623,7 +623,7 @@ class CUDARayTracer(RayTracer):
         if not selected_subcarrier_indices:
             logger.warning(f"⚠️  No valid subcarrier indices found in subcarrier_list!")
             return torch.zeros(len(ue_subcarriers), dtype=torch.complex64, device=sampled_positions.device)
-
+        
         try:
             # Use the same mapped indices for radiation_factors (which now only contains selected subcarriers)
             # radiation_factors shape: (batch, num_antennas, num_ue_antennas, num_selected_subcarriers)
@@ -1467,11 +1467,11 @@ class CUDARayTracer(RayTracer):
         return merged_outputs
     
     def _accumulate_signals_optimized(self, 
-                                    base_station_pos: torch.Tensor,
-                                    ue_positions: List[torch.Tensor],
-                                    selected_subcarriers: Union[Dict, torch.Tensor, List[int]],
-                                    antenna_indices: torch.Tensor,
-                                    directions_list: List[Tuple[int, int]]) -> Dict:
+                                         base_station_pos: torch.Tensor,
+                                         ue_positions: List[torch.Tensor],
+                                         selected_subcarriers: Union[Dict, torch.Tensor, List[int]],
+                                         antenna_indices: torch.Tensor,
+                                         directions_list: List[Tuple[int, int]]) -> Dict:
         """
         Optimized signal accumulation for selected directions.
         
@@ -1503,7 +1503,7 @@ class CUDARayTracer(RayTracer):
                     accumulated_signals[key] += signal_strength
         
         return accumulated_signals
-
+    
     def _convert_indices_to_vectors(self, direction_indices: torch.Tensor) -> torch.Tensor:
         """
         Convert direction indices to actual 3D direction vectors.

@@ -36,9 +36,8 @@ from .spatial_spectrum import (
 from .loss_functions import (
     PrismLossFunction,
     CSILoss,
+    PDPLoss,
     SpatialSpectrumLoss,
-    compute_csi_metrics,
-    compute_spectrum_metrics,
     DEFAULT_LOSS_CONFIG
 )
 
@@ -85,9 +84,8 @@ __all__ = [
     # Loss functions
     'PrismLossFunction',
     'CSILoss',
+    'PDPLoss',
     'SpatialSpectrumLoss',
-    'compute_csi_metrics',
-    'compute_spectrum_metrics',
     'DEFAULT_LOSS_CONFIG',
     
     # Neural networks

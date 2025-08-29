@@ -64,212 +64,204 @@ The training process follows this workflow:
 
 ## 3. Loss Functions and Optimization
 
-### 3.1 Complex-Valued CSI Loss Functions
+### 3.1 CSI Loss Functions
 
-The system uses specialized loss functions designed for complex-valued CSI predictions that handle both magnitude and phase components:
+The choice of loss function is critical for training neural networks to predict complex-valued Channel State Information (CSI). This section presents several loss function approaches, from simple to sophisticated, for optimizing CSI prediction accuracy.
 
-```python
-class PrismCSILoss(nn.Module):
-    """
-    Specialized loss function for complex CSI predictions from Prism networks
-    """
-    def __init__(self, loss_type='mse', magnitude_weight=1.0, phase_weight=0.5,
-                 frequency_weights=None, subcarrier_sampling_weight=1.0):
-        super().__init__()
-        self.loss_type = loss_type
-        self.magnitude_weight = magnitude_weight
-        self.phase_weight = phase_weight
-        self.frequency_weights = frequency_weights
-        self.subcarrier_sampling_weight = subcarrier_sampling_weight
+#### 3.1.1 Complex MSE
+
+**The most commonly used and direct approach** that simultaneously optimizes both magnitude and phase components.
+
+$$\mathcal{L}_{\text{CMSE}} = \frac{1}{N} \sum_{i=1}^{N} \left\| \mathbf{H}_{\text{pred}}^{(i)} - \mathbf{H}_{\text{true}}^{(i)} \right\|_F^2 = \frac{1}{N} \sum_{i=1}^{N} \left( |\Delta \mathbf{H}_i| \right)^2$$
+
+where $\Delta \mathbf{H}_i = \mathbf{H}_{\text{pred}}^{(i)} - \mathbf{H}_{\text{true}}^{(i)}$ is the complex error.
+
+**Advantages:**
+- Simple computation with clear physical meaning (Euclidean distance between complex vectors)
+- Naturally handles both magnitude and phase optimization
+- Stable gradients and well-behaved optimization
+
+**Disadvantages:**
+- Equal weighting for magnitude and phase errors may not be optimal for all applications
+
+#### 3.1.2 Magnitude + Phase Loss
+
+Separate handling of magnitude and phase components with adjustable weighting.
+
+$$\mathcal{L}_{\text{Mag+Phase}} = \alpha \cdot \frac{1}{N} \sum_{i=1}^{N} \left( |\mathbf{H}_{\text{pred}}^{(i)}| - |\mathbf{H}_{\text{true}}^{(i)}| \right)^2 + \beta \cdot \frac{1}{N} \sum_{i=1}^{N} \mathcal{L}_{\text{Phase}}^{(i)}$$
+
+The **phase loss $\mathcal{L}_{\text{Phase}}$ is critical** and can be defined in two ways:
+
+**Option 1: Corrected Phase Difference MSE** (handles $2\pi$ wrapping):
+$$\mathcal{L}_{\text{Phase}}^{(i)} = \left( \arctan2\left( \sin(\Delta\theta_i), \cos(\Delta\theta_i) \right) \right)^2$$
+where $\Delta\theta_i = \angle \mathbf{H}_{\text{pred}}^{(i)} - \angle \mathbf{H}_{\text{true}}^{(i)}$.
+
+**Option 2: Complex Cosine Similarity** (more stable):
+$$\mathcal{L}_{\text{Phase}}^{(i)} = 1 - \frac{ | \langle \mathbf{H}_{\text{pred}}^{(i)}, \mathbf{H}_{\text{true}}^{(i)} \rangle | }{ |\mathbf{H}_{\text{pred}}^{(i)}| \cdot |\mathbf{H}_{\text{true}}^{(i)}| } = 1 - |\cos(\Delta\theta_i)|$$
+
+**Advantages:**
+- Flexible weighting between magnitude and phase importance
+- Suitable for applications where phase accuracy is critical (e.g., beamforming)
+
+**Disadvantages:**
+- Requires manual tuning of hyperparameters $\alpha$ and $\beta$
+
+#### 3.1.3 Correlation-Based Loss
+
+Focuses on structural similarity between CSI vectors rather than absolute errors.
+
+$$\mathcal{L}_{\text{Corr}} = 1 - \frac{ | \langle \mathbf{H}_{\text{pred}}, \mathbf{H}_{\text{true}} \rangle | }{ \|\mathbf{H}_{\text{pred}}\|_F \cdot \|\mathbf{H}_{\text{true}}\|_F } = 1 - \frac{ | \sum_{i=1}^{N} \mathbf{H}_{\text{pred}}^{(i)} \cdot (\mathbf{H}_{\text{true}}^{(i)})^* | }{ \sqrt{ \sum |\mathbf{H}_{\text{pred}}^{(i)}|^2 } \cdot \sqrt{ \sum |\mathbf{H}_{\text{true}}^{(i)}|^2 } }$$
+
+**Advantages:**
+- Invariant to global magnitude scaling (same loss for $H_{\text{pred}}$ and $k \cdot H_{\text{pred}}$)
+- Emphasizes **structural similarity**, directly related to communication performance metrics
+- Robust to amplitude variations while preserving phase relationships
+
+**Disadvantages:**
+- May need combination with other losses if absolute magnitude values are important
+
+#### 3.1.4 Hybrid CSI Loss Function (Recommended)
+
+For optimal performance, we recommend combining the strengths of multiple approaches:
+
+$$\mathcal{L}_{\text{Total}} = \lambda_1 \cdot \mathcal{L}_{\text{CMSE}} + \lambda_2 \cdot \mathcal{L}_{\text{Corr}}$$
+
+**Rationale:**
+- $\mathcal{L}_{\text{CMSE}}$ ensures **absolute value accuracy**
+- $\mathcal{L}_{\text{Corr}}$ ensures **structural similarity**, critical for application performance
+- The combination provides both stability and effectiveness
+- Typically $\lambda_1 = \lambda_2 = 1$ works well in practice
+
+### 3.2 PDP Loss Functions
+
+Power Delay Profile (PDP) loss functions provide a time-domain perspective for validating CSI predictions by comparing the delay-domain characteristics of predicted and true CSI. This approach is particularly valuable for ensuring that the predicted CSI maintains correct temporal structure, which is crucial for applications like positioning and beamforming.
+
+#### 3.2.1 Core Computation Flow
+
+The PDP loss computation follows this workflow for comparing **predicted CSI** and **true CSI** (both on randomly selected subcarriers):
+
+1. **Zero Padding**: Pad both predicted and true CSI to the same complete frequency sequence (e.g., 1024 points)
+2. **PDP Calculation**: Apply IFFT to zero-padded frequency data and compute power delay profile
+   - $\text{PDP}_{\text{pred}} = |\text{IFFT}(\text{CSI}_{\text{pred,padded}})|^2$
+   - $\text{PDP}_{\text{true}} = |\text{IFFT}(\text{CSI}_{\text{true,padded}})|^2$
+3. **PDP Comparison**: Calculate differences between the two PDPs as loss function or evaluation metric
+
+```mermaid
+flowchart TD
+    A[Predicted CSI<br/>Random Subcarriers] --> B[Frequency Domain<br/>Zero Padding]
+    C[True CSI<br/>Same Subcarriers] --> D[Frequency Domain<br/>Zero Padding]
     
-    def forward(self, predictions, targets, selected_subcarriers=None):
-        """
-        Compute loss between predicted and target CSI values
-        
-        Args:
-            predictions: (batch_size, num_selected, num_ue, num_bs) - complex
-            targets: (batch_size, num_total_subcarriers, num_ue, num_bs) - complex
-            selected_subcarriers: Indices of selected subcarriers
-        
-        Returns:
-            Total loss value
-        """
-        # Extract target values for selected subcarriers
-        if selected_subcarriers is not None:
-            targets_selected = targets[:, selected_subcarriers, :, :]
-        else:
-            targets_selected = targets
-        
-        # Magnitude loss
-        pred_magnitude = torch.abs(predictions)
-        target_magnitude = torch.abs(targets_selected)
-        magnitude_loss = F.mse_loss(pred_magnitude, target_magnitude)
-        
-        # Phase loss
-        pred_phase = torch.angle(predictions)
-        target_phase = torch.angle(targets_selected)
-        # Handle phase wrapping
-        phase_diff = torch.angle(torch.exp(1j * (pred_phase - target_phase)))
-        phase_loss = F.mse_loss(phase_diff, torch.zeros_like(phase_diff))
-        
-        # Frequency weighting
-        if self.frequency_weights is not None:
-            freq_weights = self.frequency_weights[selected_subcarriers].view(1, -1, 1, 1)
-            magnitude_loss = magnitude_loss * freq_weights
-            phase_loss = phase_loss * freq_weights
-        
-        # Subcarrier sampling compensation
-        total_loss = (self.magnitude_weight * magnitude_loss + 
-                     self.phase_weight * phase_loss) * self.subcarrier_sampling_weight
-        
-        return total_loss.mean()
+    B --> E[Compute PDP<br/>IFFT + Power]
+    D --> F[Compute PDP<br/>IFFT + Power]
+    
+    E --> G[Compare PDP Differences]
+    F --> G
+    
+    G --> H[Calculate PDP Loss]
 ```
 
-### 3.2 Training Step Implementation
+#### 3.2.2 Mean Squared Error (MSE) PDP Loss
 
-Complete training step integrating network and ray tracing:
+The most direct approach, computing MSE between PDPs at each delay bin:
+$$\mathcal{L}_{\text{PDP,MSE}} = \frac{1}{M} \sum_{m=1}^{M} \left( \text{PDP}_{\text{pred,norm}}[m] - \text{PDP}_{\text{true,norm}}[m] \right)^2$$
 
-```python
-def training_step(prism_network, ray_tracer, batch_data, loss_fn, optimizer):
-    """
-    Complete training step with integrated network and ray tracing
-    """
-    # Extract batch data
-    bs_positions = batch_data['bs_positions']      # (batch_size, 3)
-    ue_positions = batch_data['ue_positions']      # (batch_size, num_ue, 3)
-    antenna_indices = batch_data['antenna_indices'] # (batch_size, num_bs)
-    target_csi = batch_data['target_csi']          # (batch_size, num_subcarriers, num_ue, num_bs)
-    selected_subcarriers = batch_data['selected_subcarriers']  # (num_selected,)
-    
-    # Forward pass
-    optimizer.zero_grad()
-    
-    # Integrated prediction
-    csi_predictions = integrated_forward_pass(
-        prism_network=prism_network,
-        ray_tracer=ray_tracer,
-        bs_positions=bs_positions,
-        ue_positions=ue_positions,
-        antenna_indices=antenna_indices,
-        selected_subcarriers=selected_subcarriers
-    )
-    
-    # Compute loss
-    loss = loss_fn(
-        predictions=csi_predictions,
-        targets=target_csi,
-        selected_subcarriers=selected_subcarriers
-    )
-    
-    # Backward pass
-    loss.backward()
-    optimizer.step()
-    
-    return loss.item(), csi_predictions
-```
+**Advantages:**
+- Simple computation and implementation
+- Direct comparison of delay-domain characteristics
+- Well-suited for applications requiring precise delay profile matching
 
-### 3.3 Loss Function Features
+**Disadvantages:**
+- Sensitive to normalization choices
+- May be affected by zero-padding artifacts
 
-**Complex Signal Modeling**:
-- Full complex-valued CSI predictions with magnitude and phase
-- Proper handling of RF signal propagation physics
-- Phase-aware loss functions for accurate wireless channel modeling
+#### 3.2.3 Correlation-Based PDP Loss
 
-**Frequency-Aware Processing**:
-- BS-Centric Ray Tracing: Ray tracing starts from each BS antenna as the center
-- AntennaNetwork-Guided Direction Selection: Rays are traced along directions suggested by the AntennaNetwork
-- Subcarrier Sampling: For each antenna, K' subcarriers are randomly selected to reduce computational complexity
-- CSI Computation: CSI is calculated for selected subcarriers on each BS antenna
-- MSE Loss: Mean squared error between predicted CSI and ground truth CSI from real measurements
+Focuses on shape similarity rather than absolute values:
+$$\rho = \text{corrcoef}(\text{PDP}_{\text{pred}}, \text{PDP}_{\text{true}})$$
+$$\mathcal{L}_{\text{PDP,corr}} = 1 - \rho$$
+where ideally $\rho = 1$ and $\mathcal{L}_{\text{PDP,corr}} = 0$.
 
-### 3.4 Optimization Strategy
+**Advantages:**
+- Robust to absolute power scaling differences
+- Emphasizes structural similarity in delay domain
+- Less sensitive to normalization artifacts
 
-- **Adam Optimizer**: Adaptive learning rate optimization with configurable parameters
-- **Learning Rate Scheduling**: Step-based or cosine annealing scheduling
-- **Gradient Clipping**: Prevents exploding gradients for training stability
-- **Weight Decay**: L2 regularization to prevent overfitting
+**Disadvantages:**
+- May ignore important absolute timing information
+- Requires careful handling of noise and artifacts
 
-## 4. Training Configuration
+#### 3.2.4 Dominant Path Feature Loss
 
-### 4.1 Configuration File Structure
+Extracts and compares key characteristics:
+- **Dominant path delay error**: $\mathcal{L}_{\text{delay}} = |\arg\max(\text{PDP}_{\text{pred}}) - \arg\max(\text{PDP}_{\text{true}})|$
+- **RMS delay spread error**: $\mathcal{L}_{\text{spread}} = |\sigma_{\text{pred}} - \sigma_{\text{true}}|$
+- **Dominant path power ratio error**: $\mathcal{L}_{\text{power}} = \left|\frac{\max(\text{PDP}_{\text{pred}})}{\sum \text{PDP}_{\text{pred}}} - \frac{\max(\text{PDP}_{\text{true}})}{\sum \text{PDP}_{\text{true}}}\right|$
 
-Training parameters are configured through YAML configuration files with sections for:
+**Advantages:**
+- Focuses on physically meaningful parameters
+- Directly relates to communication performance metrics
+- Robust to detailed shape variations
 
-- **Basic Parameters**: Number of epochs, batch size, learning rate
-- **Optimization Settings**: Optimizer type, scheduler, gradient clipping
-- **Loss Configuration**: Loss type and subcarrier weights
-- **Training Strategies**: Early stopping, checkpoint saving, validation intervals
+**Disadvantages:**
+- May miss important multipath structure details
+- Requires domain expertise for parameter selection
 
-### 4.2 Hyperparameter Tuning
+#### 3.2.5 Hybrid PDP Loss Function (Recommended)
 
-- **Learning Rate**: 1e-4 (empirically determined for stable convergence)
-- **Batch Size**: 32-64 (balanced between memory constraints and training efficiency)
-- **Network Architecture**: 256 hidden dimensions, 8 layers (optimal for spatial encoding)
+For optimal performance, we recommend combining multiple PDP loss approaches:
 
-## 5. Training Strategies
+$$\mathcal{L}_{\text{PDP,total}} = \alpha \cdot \mathcal{L}_{\text{PDP,MSE}} + \beta \cdot \mathcal{L}_{\text{PDP,corr}} + \gamma \cdot \mathcal{L}_{\text{delay}}$$
 
-### 5.1 Curriculum Learning
+**Rationale:**
+- $\mathcal{L}_{\text{PDP,MSE}}$ ensures **detailed delay profile accuracy**
+- $\mathcal{L}_{\text{PDP,corr}}$ ensures **structural similarity** in time domain
+- $\mathcal{L}_{\text{delay}}$ ensures **dominant path timing accuracy**
+- The combination provides comprehensive time-domain validation
+- Typically $\alpha = 0.5$, $\beta = 0.3$, $\gamma = 0.2$ works well in practice
 
-Progressive training strategy for complex RF environments:
+**Advantages:**
+- Comprehensive time-domain validation
+- Balances detailed accuracy with structural correctness
+- Robust to various types of prediction errors
 
-- **Stage 0**: Simple environments with few obstacles (20% of training)
-- **Stage 1**: Medium complexity with moderate obstacles (30% of training)
-- **Stage 2**: Complex environments with dense obstacles (50% of training)
+**Disadvantages:**
+- Requires tuning of multiple hyperparameters
+- Higher computational cost than individual methods
 
-### 5.2 Regularization Techniques
+**Implementation Considerations:**
 
-- **Weight Decay**: L2 regularization (default: 1e-4)
-- **Dropout**: Random feature masking (0.1 for early layers, 0.2 for later layers)
-- **Batch Normalization**: Training stability and convergence improvement
+**Normalization Requirements:**
+Before comparison, PDPs must be **normalized** to the same total energy or peak energy to focus on shape rather than absolute power:
+- Peak normalization: $\text{PDP}_{\text{norm}} = \text{PDP} / \max(\text{PDP})$
+- Energy normalization: $\text{PDP}_{\text{norm}} = \text{PDP} / \sum(\text{PDP})$
 
-## 6. Performance Optimization
+**Subcarrier Alignment:**
+Ensure that predicted and true CSI come from **identical subcarrier indices** with identical zero-padding patterns.
 
-### 6.1 Memory Management
+**Handling Artifacts:**
+Zero-padding introduces sidelobe effects in both predicted and true PDPs. The loss remains valid as long as:
+- Both PDPs exhibit consistent artifact patterns
+- Relative positions and strengths of true multipath peaks are preserved
 
-- **Gradient Checkpointing**: Memory efficiency for large models (30-50% memory savings)
-- **Mixed Precision**: FP16 training for memory efficiency (40-60% reduction)
-- **Efficient Data Loading**: Optimized DataLoader with prefetching
+**Physical Significance:**
+PDP loss functions offer several advantages over frequency-domain comparisons:
+- **Time-domain validation**: Ensures predicted CSI maintains correct **delay-domain structure**
+- **Physical meaningfulness**: Directly relates to multipath propagation characteristics
+- **Application relevance**: Critical for positioning, beamforming, and channel modeling applications
+- **Robustness**: Less sensitive to individual subcarrier errors while emphasizing overall temporal structure
 
-### 6.2 Computational Optimization
+**Recommendation:** Use PDP loss as a complementary validation metric alongside frequency-domain CSI losses. This dual-domain approach ensures both numerical accuracy and physical correctness of the predicted channel characteristics.
 
-- **Model Parallelism**: Split large models across multiple GPUs
-- **Data Parallelism**: Process multiple batches simultaneously
-- **Pipeline Parallelism**: Overlap computation and communication
+### 3.3 Loss Function Selection Guide
 
-## 7. Training Results and Evaluation
+| Application Focus | Recommended Loss Function |
+|:-----------------|:-------------------------|
+| **General Purpose** | **Complex MSE** ($\mathcal{L}_{\text{CMSE}}$) |
+| **Phase Accuracy Critical** | **Magnitude + Phase Loss** ($\mathcal{L}_{\text{Mag+Phase}}$) |
+| **Beamforming/Correlation** | **Correlation Loss** ($\mathcal{L}_{\text{Corr}}$) |
+| **Best Performance** | **Hybrid CSI Loss** ($\mathcal{L}_{\text{CMSE}} + \mathcal{L}_{\text{Corr}}$) |
+| **Time-domain Validation** | **PDP Loss** ($\mathcal{L}_{\text{PDP}}$) |
+| **Comprehensive Validation** | **Hybrid PDP Loss** ($\mathcal{L}_{\text{PDP,total}}$) |
+| **Production Use** | **Hybrid CSI+PDP Loss** ($\mathcal{L}_{\text{total}}$) |
 
-### 7.1 Training Metrics
 
-Key metrics tracked during training:
-
-- **Loss Functions**: Training and validation loss across epochs
-- **CSI Accuracy**: MSE between predicted CSI and ground truth CSI for selected subcarriers on each BS antenna
-- **Spatial Accuracy**: Position and direction prediction accuracy
-- **AntennaNetwork Performance**: Directional importance prediction accuracy and top-K directional sampling efficiency
-- **Subcarrier Sampling Efficiency**: Impact of K' subcarrier selection on computational complexity and accuracy
-
-### 7.2 Evaluation Metrics
-
-- **MSE Loss**: Mean squared error between predicted and ground truth CSI
-- **Correlation Coefficient**: Linear correlation between predictions and ground truth
-- **Directional Accuracy**: AntennaNetwork directional importance prediction accuracy
-- **Computational Efficiency**: Training and inference performance metrics
-
-## 8. Future Enhancements
-
-### 8.1 Advanced Training Techniques
-
-- **Meta-learning**: Adapt to new environments with few-shot learning
-- **Adversarial Training**: Improve robustness against environmental variations
-- **Reinforcement Learning**: Optimize ray tracing strategies dynamically
-- **Federated Learning**: Train across distributed RF environments
-
-### 8.2 Scalability Improvements
-
-- **Distributed Training**: Multi-node training for large-scale models
-- **Model Parallelism**: Split large models across multiple GPUs
-- **Data Parallelism**: Process multiple batches simultaneously
-
----
-
-*This document describes the comprehensive training design for the Prism project. For implementation details and technical specifications, refer to the source code and configuration files.*

@@ -953,23 +953,19 @@ class PrismTrainingInterface(nn.Module):
             logger.debug(f"Subcarrier sampling ratio: {self.subcarrier_sampling_ratio}")
             logger.debug(f"Expected selected subcarriers per antenna-UE pair: {int(self.prism_network.num_subcarriers * self.subcarrier_sampling_ratio)}")
             
-            # Compute MSE loss only on traced subcarriers
-            # Handle complex numbers by computing loss on real and imaginary parts separately
-            if traced_predictions.dtype.is_complex:
-                # For complex numbers, compute MSE on both real and imaginary parts
-                real_loss = loss_function(traced_predictions.real, traced_targets.real)
-                imag_loss = loss_function(traced_predictions.imag, traced_targets.imag)
-                loss = real_loss + imag_loss
-                logger.info(f"🔍 Complex loss computed: real_loss={real_loss.item():.6f}, imag_loss={imag_loss.item():.6f}, total={loss.item():.6f}")
-                
-                # Check if individual losses are valid
-                if torch.isnan(real_loss) or torch.isinf(real_loss):
-                    logger.error(f"❌ CRITICAL: Invalid real_loss: {real_loss}")
-                if torch.isnan(imag_loss) or torch.isinf(imag_loss):
-                    logger.error(f"❌ CRITICAL: Invalid imag_loss: {imag_loss}")
-            else:
-                loss = loss_function(traced_predictions, traced_targets)
-                logger.info(f"🔍 Real loss computed: {loss.item():.6f}")
+            # Compute hybrid CSI+PDP loss using PrismLossFunction
+            predictions_dict = {'csi': traced_predictions}
+            targets_dict = {'csi': traced_targets}
+            
+            loss, loss_components = loss_function(predictions_dict, targets_dict)
+            
+            # Log detailed loss components
+            logger.info(f"🔍 Hybrid CSI+PDP Loss computed:")
+            logger.info(f"   Total Loss: {loss.item():.6f}")
+            if 'csi_loss' in loss_components:
+                logger.info(f"   CSI Loss: {loss_components['csi_loss']:.6f}")
+            if 'pdp_loss' in loss_components:
+                logger.info(f"   PDP Loss: {loss_components['pdp_loss']:.6f}")
             
             # Final validation of computed loss
             if torch.isnan(loss) or torch.isinf(loss):

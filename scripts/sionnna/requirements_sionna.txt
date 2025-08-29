@@ -1,0 +1,7 @@
+# Sionna simulation requirements
+sionna>=0.18.0
+numpy>=1.21.0
+h5py>=3.7.0
+matplotlib>=3.5.0
+torch>=1.12.0
+tensorflow>=2.8.0

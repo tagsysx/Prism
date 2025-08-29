@@ -211,9 +211,10 @@ class TestingProgressMonitor:
 class PrismTester:
     """Main tester class for Prism network using TrainingInterface"""
     
-    def __init__(self, config_path: str, model_path: str = None, data_path: str = None, output_dir: str = None):
+    def __init__(self, config_path: str, model_path: str = None, data_path: str = None, output_dir: str = None, gpu_id: int = None):
         """Initialize tester with configuration and optional model/data/output paths"""
         self.config_path = config_path
+        self.gpu_id = gpu_id  # Store GPU ID for device setup
         
         # Load configuration first using ConfigLoader to process template variables
         try:
@@ -378,14 +379,23 @@ class PrismTester:
             gpu_free = torch.cuda.memory_reserved(i) / 1024**3
             logger.info(f"  GPU {i}: {gpu_name} ({gpu_memory:.1f}GB, {gpu_free:.1f}GB free)")
         
-        # Select GPU 0 for testing (can be made configurable)
-        selected_gpu = 0
-        logger.info(f"✅ Selected GPU {selected_gpu} for testing")
+        # GPU selection: use specified GPU ID or auto-select
+        if self.gpu_id is not None:
+            # Use specified GPU ID
+            if self.gpu_id >= gpu_count or self.gpu_id < 0:
+                logger.error(f"❌ Invalid GPU ID {self.gpu_id}. Available GPUs: 0-{gpu_count-1}")
+                raise ValueError(f"Invalid GPU ID {self.gpu_id}. Available GPUs: 0-{gpu_count-1}")
+            selected_gpu = self.gpu_id
+            logger.info(f"🎯 Using specified GPU {selected_gpu} for testing")
+        else:
+            # Auto-select GPU 0 for testing
+            selected_gpu = 0
+            logger.info(f"🔍 Auto-selected GPU {selected_gpu} for testing")
         
         device = torch.device(f'cuda:{selected_gpu}')
         torch.cuda.set_device(device)
         
-        logger.info("🔍 GPU Auto-Selection for Testing:")
+        logger.info("🔍 GPU Selection for Testing:")
         logger.info(f"  • Selected GPU: {selected_gpu}")
         logger.info(f"  • GPU Name: {torch.cuda.get_device_name(selected_gpu)}")
         logger.info(f"  • GPU Memory: {torch.cuda.get_device_properties(selected_gpu).total_memory / 1024**3:.1f}GB")
@@ -479,6 +489,14 @@ class PrismTester:
             ray_tracing_config = self.config.get('ray_tracing', {})
             system_config = self.config.get('system', {})
             
+            # Override subcarrier sampling configuration for full subcarrier tracking in testing
+            subcarrier_sampling = ray_tracing_config.get('subcarrier_sampling', {})
+            
+            # Modify subcarrier sampling to uniform with 1.0 sampling ratio for testing
+            subcarrier_sampling['method'] = 'uniform'
+            subcarrier_sampling['sampling_ratio'] = 1.0
+            ray_tracing_config['subcarrier_sampling'] = subcarrier_sampling
+            
             # Get ray tracing execution settings from system config
             ray_tracing_mode = system_config.get('ray_tracing_mode', 'cuda')
             fallback_to_cpu = system_config.get('fallback_to_cpu', True)
@@ -487,6 +505,16 @@ class PrismTester:
             logger.info(f"  - Ray tracing mode: {ray_tracing_mode}")
             logger.info(f"  - CUDA available: {torch.cuda.is_available()}")
             logger.info(f"  - Fallback to CPU: {fallback_to_cpu}")
+            
+            # Log subcarrier sampling configuration
+            subcarrier_ratio = subcarrier_sampling.get('sampling_ratio', 1.0)
+            total_subcarriers = self.prism_network.num_subcarriers
+            selected_subcarriers = int(total_subcarriers * subcarrier_ratio)
+            
+            logger.info(f"🔧 Modified subcarrier sampling configuration for testing:")
+            logger.info(f"   - Method: {subcarrier_sampling['method']} (changed to uniform)")
+            logger.info(f"   - Sampling ratio: {subcarrier_ratio} (changed to 1.0 for full tracking)")
+            logger.info(f"   - Selected subcarriers: {selected_subcarriers}/{total_subcarriers} (all subcarriers)")
             
             # Calculate max ray length from scene bounds
             scene_bounds = ray_tracing_config.get('scene_bounds', {})
@@ -1927,8 +1955,10 @@ class PrismTester:
 def main():
     """Main function"""
     parser = argparse.ArgumentParser(description='Test Prism Network')
-    parser.add_argument('--config', type=str, default='configs/ofdm-5g-sionna.yml',
-                       help='Path to configuration file')
+    parser.add_argument('--config', type=str, required=True,
+                       help='Path to configuration file (required)')
+    parser.add_argument('--gpu', type=int, default=None,
+                       help='GPU device ID to use (e.g., 0, 1, 2). If not specified, will auto-select based on available memory')
     parser.add_argument('--model', type=str, default=None,
                        help='Path to trained model checkpoint (optional, will read from config if not provided)')
     parser.add_argument('--inference-only', action='store_true',
@@ -1939,7 +1969,7 @@ def main():
     try:
         # Create tester and start testing
         logger.info("🚀 Initializing Prism Tester...")
-        tester = PrismTester(args.config, args.model, None, None)
+        tester = PrismTester(args.config, args.model, None, None, args.gpu)
         logger.info("✅ Prism Tester initialized successfully")
         
         if args.inference_only:

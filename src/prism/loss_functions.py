@@ -5,9 +5,10 @@ This module provides specialized loss functions for CSI (Channel State Informati
 and spatial spectrum estimation tasks, all supporting automatic differentiation.
 
 Classes:
-- PrismLossFunction: Main loss function class with CSI and spatial spectrum losses
+- PrismLossFunction: Main loss function class with CSI and PDP losses
 - CSILoss: Specialized CSI loss functions
-- SpatialSpectrumLoss: Specialized spatial spectrum loss functions
+- PDPLoss: Power Delay Profile loss functions
+- SpatialSpectrumLoss: Spatial spectrum loss functions (reserved for future use)
 
 All loss functions are designed to work with PyTorch tensors and support backpropagation.
 """
@@ -19,28 +20,57 @@ from typing import Dict, Optional, Tuple, Union
 import numpy as np
 
 
+# Default configuration for loss functions
+DEFAULT_LOSS_CONFIG = {
+    'csi_weight': 0.7,
+    'pdp_weight': 0.3,
+    'regularization_weight': 0.01,
+    'csi_loss': {
+        'type': 'hybrid',  # 'mse', 'mae', 'complex_mse', 'magnitude_phase', 'correlation', 'hybrid'
+        'phase_weight': 1.0,
+        'magnitude_weight': 1.0,
+        'cmse_weight': 1.0,
+        'correlation_weight': 1.0
+    },
+    'pdp_loss': {
+        'type': 'hybrid',  # 'mse', 'correlation', 'delay', 'hybrid'
+        'fft_size': 1024,
+        'normalize_pdp': True,
+        'mse_weight': 0.5,
+        'correlation_weight': 0.3,
+        'delay_weight': 0.2
+    }
+}
+
+
 class CSILoss(nn.Module):
     """
     CSI (Channel State Information) Loss Functions
     
     Provides various loss functions for comparing complex-valued CSI matrices,
-    including magnitude, phase, and combined losses.
+    including magnitude, phase, correlation, and hybrid losses.
     """
     
     def __init__(self, loss_type: str = 'mse', phase_weight: float = 1.0, 
-                 magnitude_weight: float = 1.0):
+                 magnitude_weight: float = 1.0, cmse_weight: float = 1.0,
+                 correlation_weight: float = 1.0):
         """
         Initialize CSI loss function
         
         Args:
-            loss_type: Type of loss ('mse', 'mae', 'complex_mse', 'magnitude_phase')
+            loss_type: Type of loss ('mse', 'mae', 'complex_mse', 'magnitude_phase', 
+                      'correlation', 'hybrid')
             phase_weight: Weight for phase component in combined losses
             magnitude_weight: Weight for magnitude component in combined losses
+            cmse_weight: Weight for CMSE component in hybrid loss
+            correlation_weight: Weight for correlation component in hybrid loss
         """
         super(CSILoss, self).__init__()
         self.loss_type = loss_type
         self.phase_weight = phase_weight
         self.magnitude_weight = magnitude_weight
+        self.cmse_weight = cmse_weight
+        self.correlation_weight = correlation_weight
         
     def forward(self, predicted_csi: torch.Tensor, target_csi: torch.Tensor, 
                 mask: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -103,6 +133,19 @@ class CSILoss(nn.Module):
             correlation = self._complex_correlation(predicted_csi, target_csi)
             loss = 1.0 - torch.abs(correlation)
             
+        elif self.loss_type == 'hybrid':
+            # Hybrid CSI Loss: CMSE + Correlation
+            # 1. Complex MSE Loss
+            diff = predicted_csi - target_csi
+            cmse_loss = torch.mean(torch.abs(diff)**2)
+            
+            # 2. Correlation Loss
+            correlation = self._complex_correlation(predicted_csi, target_csi)
+            corr_loss = 1.0 - torch.abs(correlation)
+            
+            # Combine losses
+            loss = self.cmse_weight * cmse_loss + self.correlation_weight * corr_loss
+            
         else:
             raise ValueError(f"Unknown loss type: {self.loss_type}")
         
@@ -140,12 +183,188 @@ class CSILoss(nn.Module):
         return correlation
 
 
+class PDPLoss(nn.Module):
+    """
+    Power Delay Profile (PDP) Loss Functions
+    
+    Provides time-domain validation by comparing PDPs derived from CSI data.
+    Supports MSE, correlation, delay, and hybrid PDP losses.
+    """
+    
+    def __init__(self, loss_type: str = 'hybrid', fft_size: int = 1024,
+                 normalize_pdp: bool = True, mse_weight: float = 0.5,
+                 correlation_weight: float = 0.3, delay_weight: float = 0.2):
+        """
+        Initialize PDP loss function
+        
+        Args:
+            loss_type: Type of PDP loss ('mse', 'correlation', 'delay', 'hybrid')
+            fft_size: FFT size for PDP computation
+            normalize_pdp: Whether to normalize PDPs before comparison
+            mse_weight: Weight for MSE component in hybrid loss
+            correlation_weight: Weight for correlation component in hybrid loss
+            delay_weight: Weight for delay component in hybrid loss
+        """
+        super(PDPLoss, self).__init__()
+        self.loss_type = loss_type
+        self.fft_size = fft_size
+        self.normalize_pdp = normalize_pdp
+        self.mse_weight = mse_weight
+        self.correlation_weight = correlation_weight
+        self.delay_weight = delay_weight
+        
+    def forward(self, predicted_csi: torch.Tensor, target_csi: torch.Tensor) -> torch.Tensor:
+        """
+        Compute PDP loss between predicted and target CSI
+        
+        Args:
+            predicted_csi: Predicted CSI tensor (complex)
+                          Shape: (N,) - selected subcarriers
+            target_csi: Target CSI tensor (complex)
+                       Shape: (N,) - selected subcarriers
+        
+        Returns:
+            loss: Computed PDP loss value (scalar tensor)
+        """
+        # Ensure complex tensors
+        if not predicted_csi.is_complex():
+            predicted_csi = predicted_csi.to(torch.complex64)
+        if not target_csi.is_complex():
+            target_csi = target_csi.to(torch.complex64)
+            
+        # Compute PDPs
+        pdp_pred = self._compute_pdp(predicted_csi)
+        pdp_target = self._compute_pdp(target_csi)
+        
+        # Normalize PDPs if required
+        if self.normalize_pdp:
+            pdp_pred = self._normalize_pdp(pdp_pred)
+            pdp_target = self._normalize_pdp(pdp_target)
+        
+        if self.loss_type == 'mse':
+            # PDP MSE Loss
+            loss = F.mse_loss(pdp_pred, pdp_target)
+            
+        elif self.loss_type == 'correlation':
+            # PDP Correlation Loss
+            loss = self._compute_pdp_correlation_loss(pdp_pred, pdp_target)
+            
+        elif self.loss_type == 'delay':
+            # Dominant Path Delay Loss
+            loss = self._compute_delay_loss(pdp_pred, pdp_target)
+            
+        elif self.loss_type == 'hybrid':
+            # Hybrid PDP Loss: MSE + Correlation + Delay
+            mse_loss = F.mse_loss(pdp_pred, pdp_target)
+            corr_loss = self._compute_pdp_correlation_loss(pdp_pred, pdp_target)
+            delay_loss = self._compute_delay_loss(pdp_pred, pdp_target)
+            
+            loss = (self.mse_weight * mse_loss + 
+                   self.correlation_weight * corr_loss + 
+                   self.delay_weight * delay_loss)
+            
+        else:
+            raise ValueError(f"Unknown PDP loss type: {self.loss_type}")
+        
+        return loss
+    
+    def _compute_pdp(self, csi_data: torch.Tensor) -> torch.Tensor:
+        """
+        Compute Power Delay Profile from CSI data
+        
+        Args:
+            csi_data: Complex CSI values (N,) - selected subcarriers
+            
+        Returns:
+            PDP: Power delay profile (fft_size,)
+        """
+        device = csi_data.device
+        N = csi_data.shape[0]
+        
+        # Zero-pad to fft_size
+        if N >= self.fft_size:
+            # If we have more data than FFT size, truncate
+            padded_csi = csi_data[:self.fft_size]
+        else:
+            # Zero-pad to fft_size
+            padded_csi = torch.zeros(self.fft_size, dtype=csi_data.dtype, device=device)
+            padded_csi[:N] = csi_data
+        
+        # Compute IFFT
+        time_domain = torch.fft.ifft(padded_csi)
+        
+        # Compute power delay profile
+        pdp = torch.abs(time_domain) ** 2
+        
+        return pdp
+    
+    def _normalize_pdp(self, pdp: torch.Tensor) -> torch.Tensor:
+        """
+        Normalize PDP (peak normalization)
+        """
+        max_val = torch.max(pdp)
+        if max_val < 1e-8:
+            return pdp
+        return pdp / max_val
+    
+    def _compute_pdp_correlation_loss(self, pdp_pred: torch.Tensor, 
+                                     pdp_target: torch.Tensor) -> torch.Tensor:
+        """
+        Compute correlation loss for PDPs
+        """
+        # Compute correlation coefficient
+        pred_mean = torch.mean(pdp_pred)
+        target_mean = torch.mean(pdp_target)
+        
+        pred_centered = pdp_pred - pred_mean
+        target_centered = pdp_target - target_mean
+        
+        numerator = torch.sum(pred_centered * target_centered)
+        denominator = torch.sqrt(torch.sum(pred_centered ** 2) * 
+                                torch.sum(target_centered ** 2))
+        
+        if denominator < 1e-8:
+            return torch.tensor(1.0, device=pdp_pred.device)
+        
+        correlation = numerator / denominator
+        
+        # Return 1 - |correlation|
+        return 1.0 - torch.abs(correlation)
+    
+    def _compute_delay_loss(self, pdp_pred: torch.Tensor, 
+                           pdp_target: torch.Tensor) -> torch.Tensor:
+        """
+        Compute dominant path delay loss using soft argmax for differentiability
+        """
+        # Use soft argmax to maintain differentiability
+        indices = torch.arange(len(pdp_pred), dtype=torch.float32, device=pdp_pred.device)
+        
+        # Soft argmax for predicted PDP
+        pred_weights = torch.softmax(pdp_pred * 10, dim=0)  # Temperature scaling
+        pred_soft_idx = torch.sum(indices * pred_weights)
+        
+        # Soft argmax for target PDP  
+        target_weights = torch.softmax(pdp_target * 10, dim=0)
+        target_soft_idx = torch.sum(indices * target_weights)
+        
+        # Compute delay difference (normalized by FFT size)
+        delay_diff = torch.abs(pred_soft_idx - target_soft_idx) / self.fft_size
+        
+        return delay_diff
+
+
+
+
+
 class SpatialSpectrumLoss(nn.Module):
     """
     Spatial Spectrum Loss Functions
     
     Provides loss functions for comparing spatial spectrum matrices,
     including peak-aware losses and angular distribution losses.
+    
+    Note: Currently not used in the main training pipeline, but reserved
+    for future spatial spectrum-based training scenarios.
     """
     
     def __init__(self, loss_type: str = 'mse', peak_weight: float = 2.0,
@@ -330,7 +549,7 @@ class PrismLossFunction(nn.Module):
     """
     Main Loss Function Class for Prism Framework
     
-    Combines CSI and spatial spectrum losses with configurable weights
+    Combines CSI and PDP losses with configurable weights
     and provides a unified interface for training.
     """
     
@@ -345,24 +564,32 @@ class PrismLossFunction(nn.Module):
         
         # Extract configuration with reasonable defaults for loss weights
         # These are algorithm parameters, not critical system config
-        self.csi_weight = config.get('csi_weight', 1.0)
-        self.spectrum_weight = config.get('spectrum_weight', 1.0)
+        self.csi_weight = config.get('csi_weight', 0.7)
+        self.pdp_weight = config.get('pdp_weight', 0.3)
         self.regularization_weight = config.get('regularization_weight', 0.01)
         
         # Initialize component losses with reasonable defaults
         csi_config = config.get('csi_loss', {})
         self.csi_loss = CSILoss(
-            loss_type=csi_config.get('type', 'mse'),
+            loss_type=csi_config.get('type', 'hybrid'),
             phase_weight=csi_config.get('phase_weight', 1.0),
-            magnitude_weight=csi_config.get('magnitude_weight', 1.0)
+            magnitude_weight=csi_config.get('magnitude_weight', 1.0),
+            cmse_weight=csi_config.get('cmse_weight', 1.0),
+            correlation_weight=csi_config.get('correlation_weight', 1.0)
         )
         
-        spectrum_config = config.get('spectrum_loss', {})
-        self.spectrum_loss = SpatialSpectrumLoss(
-            loss_type=spectrum_config.get('type', 'mse'),
-            peak_weight=spectrum_config.get('peak_weight', 2.0),
-            angular_smoothness_weight=spectrum_config.get('angular_smoothness_weight', 0.1)
+        # Initialize PDP loss
+        pdp_config = config.get('pdp_loss', {})
+        self.pdp_loss = PDPLoss(
+            loss_type=pdp_config.get('type', 'hybrid'),
+            fft_size=pdp_config.get('fft_size', 1024),
+            normalize_pdp=pdp_config.get('normalize_pdp', True),
+            mse_weight=pdp_config.get('mse_weight', 0.5),
+            correlation_weight=pdp_config.get('correlation_weight', 0.3),
+            delay_weight=pdp_config.get('delay_weight', 0.2)
         )
+        
+
         
         # Loss components tracking
         self.loss_components = {}
@@ -376,10 +603,8 @@ class PrismLossFunction(nn.Module):
         Args:
             predictions: Dictionary containing predicted values
                         - 'csi': Predicted CSI tensor
-                        - 'spectrum': Predicted spatial spectrum (optional)
             targets: Dictionary containing target values
                     - 'csi': Target CSI tensor
-                    - 'spectrum': Target spatial spectrum (optional)
             masks: Optional masks for selective loss computation
         
         Returns:
@@ -392,7 +617,7 @@ class PrismLossFunction(nn.Module):
         if masks is None:
             masks = {}
         
-        # CSI loss
+        # CSI loss (hybrid: CMSE + Correlation)
         if 'csi' in predictions and 'csi' in targets:
             csi_loss_val = self.csi_loss(
                 predictions['csi'], 
@@ -402,15 +627,16 @@ class PrismLossFunction(nn.Module):
             total_loss += self.csi_weight * csi_loss_val
             loss_components['csi_loss'] = csi_loss_val.item()
         
-        # Spatial spectrum loss
-        if 'spectrum' in predictions and 'spectrum' in targets:
-            spectrum_loss_val = self.spectrum_loss(
-                predictions['spectrum'], 
-                targets['spectrum'], 
-                masks.get('spectrum')
+        # PDP loss (hybrid: MSE + Correlation + Delay)
+        if 'csi' in predictions and 'csi' in targets and self.pdp_weight > 0:
+            pdp_loss_val = self.pdp_loss(
+                predictions['csi'], 
+                targets['csi']
             )
-            total_loss += self.spectrum_weight * spectrum_loss_val
-            loss_components['spectrum_loss'] = spectrum_loss_val.item()
+            total_loss += self.pdp_weight * pdp_loss_val
+            loss_components['pdp_loss'] = pdp_loss_val.item()
+        
+
         
         # Regularization losses
         if 'regularization' in predictions:
@@ -433,105 +659,7 @@ class PrismLossFunction(nn.Module):
         return self.loss_components.copy()
 
 
-# Utility functions for loss computation
-def compute_csi_metrics(predicted_csi: torch.Tensor, target_csi: torch.Tensor) -> Dict[str, float]:
-    """
-    Compute various CSI evaluation metrics
-    
-    Args:
-        predicted_csi: Predicted CSI tensor
-        target_csi: Target CSI tensor
-        
-    Returns:
-        metrics: Dictionary of computed metrics
-    """
-    with torch.no_grad():
-        # MSE - compute manually for complex numbers
-        diff = predicted_csi - target_csi
-        mse = torch.mean(torch.abs(diff)**2).item()
-        
-        # MAE
-        mae = torch.mean(torch.abs(predicted_csi - target_csi)).item()
-        
-        # RMSE
-        rmse = np.sqrt(mse)
-        
-        # Complex correlation
-        csi_loss = CSILoss(loss_type='correlation')
-        correlation = 1.0 - csi_loss._complex_correlation(predicted_csi, target_csi).abs().item()
-        
-        # Magnitude error
-        pred_mag = torch.abs(predicted_csi)
-        target_mag = torch.abs(target_csi)
-        magnitude_error = F.mse_loss(pred_mag, target_mag).item()
-        
-        # Phase error
-        pred_phase = torch.angle(predicted_csi)
-        target_phase = torch.angle(target_csi)
-        phase_diff = torch.remainder(pred_phase - target_phase + np.pi, 2*np.pi) - np.pi
-        phase_error = torch.mean(phase_diff**2).item()
-    
-    return {
-        'mse': mse,
-        'mae': mae,
-        'rmse': rmse,
-        'correlation_loss': correlation,
-        'magnitude_error': magnitude_error,
-        'phase_error': phase_error
-    }
 
 
-def compute_spectrum_metrics(predicted_spectrum: torch.Tensor, 
-                           target_spectrum: torch.Tensor) -> Dict[str, float]:
-    """
-    Compute spatial spectrum evaluation metrics
-    
-    Args:
-        predicted_spectrum: Predicted spatial spectrum
-        target_spectrum: Target spatial spectrum
-        
-    Returns:
-        metrics: Dictionary of computed metrics
-    """
-    with torch.no_grad():
-        # MSE
-        mse = F.mse_loss(predicted_spectrum, target_spectrum).item()
-        
-        # MAE
-        mae = F.l1_loss(predicted_spectrum, target_spectrum).item()
-        
-        # Peak detection accuracy
-        spectrum_loss = SpatialSpectrumLoss()
-        pred_peaks = spectrum_loss._detect_peaks(predicted_spectrum)
-        target_peaks = spectrum_loss._detect_peaks(target_spectrum)
-        peak_accuracy = (pred_peaks == target_peaks).float().mean().item()
-        
-        # Energy preservation
-        pred_energy = torch.sum(predicted_spectrum, dim=(-2, -1))
-        target_energy = torch.sum(target_spectrum, dim=(-2, -1))
-        energy_error = F.mse_loss(pred_energy, target_energy).item()
-    
-    return {
-        'mse': mse,
-        'mae': mae,
-        'peak_accuracy': peak_accuracy,
-        'energy_error': energy_error
-    }
 
 
-# Example configuration for loss functions
-DEFAULT_LOSS_CONFIG = {
-    'csi_weight': 1.0,
-    'spectrum_weight': 1.0,
-    'regularization_weight': 0.01,
-    'csi_loss': {
-        'type': 'magnitude_phase',  # 'mse', 'mae', 'complex_mse', 'magnitude_phase', 'correlation'
-        'phase_weight': 1.0,
-        'magnitude_weight': 1.0
-    },
-    'spectrum_loss': {
-        'type': 'combined',  # 'mse', 'mae', 'peak_aware', 'kl_divergence', 'angular_weighted', 'combined'
-        'peak_weight': 2.0,
-        'angular_smoothness_weight': 0.1
-    }
-}
