@@ -144,43 +144,56 @@ For optimal performance, we recommend combining the strengths of multiple approa
 - The combination provides both stability and effectiveness
 - Typically $\lambda_1 = \lambda_2 = 1$ works well in practice
 
-#### 3.1.5 CSI Loss Function Comparison
+#### 3.1.5 CSI Loss Function Analysis
 
-The following diagram illustrates the relationships and differences between various CSI loss function approaches:
+The following diagram provides a comprehensive analysis of CSI loss function computation methods and their mathematical properties:
 
 ```mermaid
 flowchart TD
-    A["CSI Loss Function Comparison"] --> B["1. Complex MSE (CMSE)"]
-    A --> C["2. Magnitude + Phase Loss"]
-    A --> D["3. Hybrid Loss (Recommended)"]
+    A["CSI Loss Function Analysis"] --> B["1. Input Processing"]
+    A --> C["2. Loss Computation Methods"]
+    A --> D["3. Mathematical Properties"]
     
-    B --> B1["Computation: |H_pred - H_true|²<br/>Advantages: Simple and direct<br/>Disadvantages: Equal weighting for magnitude and phase"]
+    B --> B1["Predicted CSI<br/>(Complex-valued H_pred)"]
+    B --> B2["Target CSI<br/>(Complex-valued H_true)"]
+    B1 --> B3["Real: a + jb"]
+    B2 --> B4["Real: c + jd"]
+    B3 --> B5["Magnitude: |H_pred| = √(a²+b²)<br/>Phase: ∠H_pred = arctan(b/a)"]
+    B4 --> B6["Magnitude: |H_true| = √(c²+d²)<br/>Phase: ∠H_true = arctan(d/c)"]
     
-    C --> C1["Magnitude Loss: |mag_pred - mag_true|²"]
-    C --> C2["Phase Loss: |phase_pred - phase_true|²"]
-    C1 --> C3["Combined: α×mag_loss + β×phase_loss<br/>Advantages: Adjustable weighting<br/>Disadvantages: Requires hyperparameter tuning"]
-    C2 --> C3
+    C --> C1["Complex MSE<br/>L = |H_pred - H_true|²<br/>= (a-c)² + (b-d)²"]
+    C --> C2["Magnitude Loss<br/>L_mag = ||H_pred| - |H_true||²"]
+    C --> C3["Phase Loss<br/>L_phase = |∠H_pred - ∠H_true|²<br/>with 2π wrapping handling"]
+    C --> C4["Correlation Loss<br/>L_corr = 1 - |⟨H_pred, H_true⟩|<br/>/ (||H_pred|| × ||H_true||)"]
+    C --> C5["Hybrid Combination<br/>L = λ₁×CMSE + λ₂×Corr"]
     
-    D --> D1["CMSE Loss: |H_pred - H_true|²"]
-    D --> D2["Correlation Loss: 1 - |correlation|"]
-    D1 --> D3["Combined: λ₁×CMSE + λ₂×Corr<br/>Advantages: Balances accuracy and structure<br/>Default config: λ₁=λ₂=1.0"]
-    D2 --> D3
+    D --> D1["Optimization Paths<br/>Different gradient flows"]
+    D --> D2["Physical Meaning<br/>Euclidean vs Polar coordinates"]
+    D --> D3["Weighting Control<br/>Adjustable importance factors"]
+    D --> D4["Stability Properties<br/>Gradient behavior analysis"]
     
-    E["Mathematical Relationship Analysis"] --> F["CMSE ≠ Mag+Phase"]
-    F --> F1["CMSE: |a+jb - c+jd|² = (a-c)² + (b-d)²"]
-    F --> F2["Mag+Phase: |√(a²+b²) - √(c²+d²)|² + |∠(a+jb) - ∠(c+jd)|²"]
-    F1 --> F3["Different mathematical expressions<br/>Different optimization paths"]
-    F2 --> F3
+    E["Implementation Features"] --> E1["✓ Gradient-friendly computation"]
+    E --> E2["✓ Batch processing support"]
+    E --> E3["✓ Complex tensor operations"]
+    E --> E4["✓ Numerical stability handling"]
+    
+    F["Applications"] --> F1["MIMO channel estimation"]
+    F --> F2["Beamforming optimization"]
+    F --> F3["Signal reconstruction"]
+    F --> F4["Communication performance"]
     
     style A fill:#e1f5fe
-    style D fill:#e8f5e8
-    style F3 fill:#fff3e0
+    style C5 fill:#e8f5e8
+    style E fill:#f3e5f5
+    style F fill:#fff3e0
 ```
 
-**Key Insights:**
-- **Complex MSE** and **Magnitude+Phase** losses are mathematically distinct and lead to different optimization paths
-- **Hybrid Loss** combines the benefits of absolute accuracy (CMSE) and structural similarity (Correlation)
-- The choice of loss function significantly impacts training dynamics and final model performance
+**Key Features:**
+- **Comprehensive Processing**: Detailed breakdown from complex input to loss computation
+- **Multiple Methods**: Complete coverage of all implemented loss function types
+- **Mathematical Rigor**: Explicit formulations showing the relationship between Cartesian and polar representations
+- **Implementation Ready**: Practical considerations for gradient computation and numerical stability
+- **Application Focused**: Direct relevance to RF communication and channel modeling tasks
 
 ### 3.2 PDP Loss Functions
 

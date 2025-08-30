@@ -198,7 +198,7 @@ training:
     # PDP Loss Configuration  
     pdp_loss:
       type: 'hybrid'                 # Loss type: 'mse', 'correlation', 'delay', 'hybrid'
-      fft_size: 1024                 # FFT size for PDP computation
+      fft_size: 512                 # FFT size for PDP computation
       normalize_pdp: true            # Whether to normalize PDPs before comparison
       mse_weight: 0.5                # Weight for MSE component in hybrid loss
       correlation_weight: 0.3        # Weight for correlation component in hybrid loss
