@@ -138,7 +138,7 @@ ray_tracing:
 ### Spatial Sampling
 ```yaml
 ray_tracing:
-  spatial_sampling:
+  radial_sampling:
     num_sampling_points: 64          # Number of sampling points per ray (uniform_samples)
     resampled_points: 32             # Second stage: importance-based resampled points
 ```
@@ -928,7 +928,7 @@ ray_tracing:
     elevation_divisions: 18
     top_k_directions: 64
   
-  spatial_sampling:
+  radial_sampling:
     num_sampling_points: 128
     resampled_points: 64
 
@@ -975,7 +975,7 @@ ray_tracing:
     elevation_divisions: 9
     top_k_directions: 32
   
-  spatial_sampling:
+  radial_sampling:
     num_sampling_points: 64
     resampled_points: 32
   
@@ -1024,7 +1024,7 @@ ray_tracing:
     elevation_divisions: 6
     top_k_directions: 16
   
-  spatial_sampling:
+  radial_sampling:
     num_sampling_points: 32
     resampled_points: 16
 ```
@@ -1199,7 +1199,7 @@ system:
   gpu_memory_fraction: 0.6  # Use less GPU memory
   
 ray_tracing:
-  spatial_sampling:
+  radial_sampling:
     num_sampling_points: 32  # Reduce sampling points
     resampled_points: 16
   
@@ -1222,7 +1222,7 @@ ray_tracing:
     elevation_divisions: 6
     top_k_directions: 16     # Use fewer directions
   
-  spatial_sampling:
+  radial_sampling:
     num_sampling_points: 32  # Reduce spatial sampling
     resampled_points: 16
   

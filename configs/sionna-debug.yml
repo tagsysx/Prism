@@ -102,7 +102,7 @@ ray_tracing:
     total_directions: 162            # 18 × 9 = 162 angle combinations
     top_k_directions: 8              # Number of top-K directions to select (further reduced)
   
-  spatial_sampling:
+  radial_sampling:
     num_sampling_points: 16          # Number of sampling points per ray (further reduced)
     resampled_points: 16             # Second stage: importance-based resampled points (further reduced)
   

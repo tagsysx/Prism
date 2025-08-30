@@ -134,7 +134,7 @@ class CSILoss(nn.Module):
             loss = 1.0 - torch.abs(correlation)
             
         elif self.loss_type == 'hybrid':
-            # Hybrid CSI Loss: CMSE + Correlation
+            # Comprehensive Hybrid CSI Loss: CMSE + Correlation + Magnitude + Phase
             # 1. Complex MSE Loss
             diff = predicted_csi - target_csi
             cmse_loss = torch.mean(torch.abs(diff)**2)
@@ -143,8 +143,24 @@ class CSILoss(nn.Module):
             correlation = self._complex_correlation(predicted_csi, target_csi)
             corr_loss = 1.0 - torch.abs(correlation)
             
-            # Combine losses
-            loss = self.cmse_weight * cmse_loss + self.correlation_weight * corr_loss
+            # 3. Magnitude Loss
+            pred_mag = torch.abs(predicted_csi)
+            target_mag = torch.abs(target_csi)
+            magnitude_loss = F.mse_loss(pred_mag, target_mag)
+            
+            # 4. Phase Loss (handle zero magnitudes)
+            pred_phase = torch.angle(predicted_csi + 1e-8)
+            target_phase = torch.angle(target_csi + 1e-8)
+            
+            # Circular phase difference
+            phase_diff = torch.remainder(pred_phase - target_phase + np.pi, 2*np.pi) - np.pi
+            phase_loss = torch.mean(phase_diff**2)
+            
+            # Combine all four loss components
+            loss = (self.cmse_weight * cmse_loss + 
+                   self.correlation_weight * corr_loss +
+                   self.magnitude_weight * magnitude_loss + 
+                   self.phase_weight * phase_loss)
             
         else:
             raise ValueError(f"Unknown loss type: {self.loss_type}")
@@ -163,8 +179,9 @@ class CSILoss(nn.Module):
             correlation: Complex correlation coefficient
         """
         # Flatten tensors for correlation computation
-        x_flat = x.view(-1)
-        y_flat = y.view(-1)
+        # Use .reshape() instead of .view() to handle non-contiguous tensors
+        x_flat = x.reshape(-1)
+        y_flat = y.reshape(-1)
         
         # Compute means
         x_mean = torch.mean(x_flat)

@@ -466,7 +466,7 @@ class PrismTrainer:
         
         # Extract ray tracing sub-configurations
         angular_sampling = ray_tracing_config.get('angular_sampling', {})
-        spatial_sampling = ray_tracing_config.get('spatial_sampling', {})
+        radial_sampling = ray_tracing_config.get('radial_sampling', {})
         subcarrier_sampling = ray_tracing_config.get('subcarrier_sampling', {})
         scene_bounds = ray_tracing_config.get('scene_bounds', {})
 
@@ -1365,13 +1365,15 @@ class PrismTrainer:
             raise RuntimeError(f"Epoch {epoch} failed - no successful batches")
         
         avg_loss = total_loss / num_batches
-        self.logger.info(f"Epoch {epoch} completed: {num_batches} batches, avg loss: {avg_loss:.6f}")
+        # Convert tensor to float for JSON serialization
+        avg_loss_float = float(avg_loss.item()) if isinstance(avg_loss, torch.Tensor) else float(avg_loss)
+        self.logger.info(f"Epoch {epoch} completed: {num_batches} batches, avg loss: {avg_loss_float:.6f}")
         
         # End epoch monitoring if progress monitor is available
         if hasattr(self, 'progress_monitor') and self.progress_monitor is not None:
-            self.progress_monitor.end_epoch(avg_loss)
+            self.progress_monitor.end_epoch(avg_loss_float)
         
-        return avg_loss
+        return avg_loss_float
     
     def _validate(self, epoch: int):
         """Validate model on a subset of data using TrainingInterface"""
@@ -1420,7 +1422,7 @@ class PrismTrainer:
                         self.logger.error(f"Shapes - csi_pred: {csi_pred.shape}, csi_target: {csi_target.shape}")
                         raise
                     
-                    total_loss += batch_loss
+                    total_loss += loss
                     num_batches += 1
                     
                 except Exception as e:

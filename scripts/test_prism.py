@@ -1561,6 +1561,20 @@ class PrismTester:
         pred_np = self.predictions.numpy()
         target_np = self.csi_target.cpu().numpy()
         
+        # Handle UE antenna dimension mismatch between predictions and targets
+        if pred_np.shape[2] != target_np.shape[2]:
+            logger.info(f"🔧 UE antenna dimension mismatch detected in CSI analysis:")
+            logger.info(f"   Predictions UE antennas: {pred_np.shape[2]}")
+            logger.info(f"   Targets UE antennas: {target_np.shape[2]}")
+            
+            if target_np.shape[2] > pred_np.shape[2]:
+                # Use only the first UE antenna from targets to match predictions
+                target_np = target_np[:, :, :pred_np.shape[2], :]
+                logger.info(f"   ✅ Adjusted targets to use first {pred_np.shape[2]} UE antenna(s)")
+                logger.info(f"   New target shape: {target_np.shape}")
+            else:
+                raise ValueError(f"Cannot match dimensions: targets have {target_np.shape[2]} UE antennas but predictions have {pred_np.shape[2]}")
+        
         # Calculate magnitude and phase errors
         pred_mag = np.abs(pred_np)
         target_mag = np.abs(target_np)

@@ -38,6 +38,7 @@ class CUDARayTracer(RayTracer):
     def __init__(self, 
                  # CUDA-specific parameters
                  use_mixed_precision: bool = True,
+                 gpu_memory_fraction: float = 0.6,
                  # Common parameters (passed to base class)
                  azimuth_divisions: int = 18,
                  elevation_divisions: int = 9,
@@ -55,6 +56,7 @@ class CUDARayTracer(RayTracer):
         
         CUDA-specific Args:
             use_mixed_precision: Enable mixed precision computation
+            gpu_memory_fraction: GPU memory fraction to use (0.1 to 1.0)
             
         Common Args (passed to base class):
             azimuth_divisions: Number of azimuth divisions (0° to 360°)
@@ -88,6 +90,7 @@ class CUDARayTracer(RayTracer):
         
         # Store CUDA-specific parameters
         self.use_mixed_precision = use_mixed_precision
+        self.gpu_memory_fraction = gpu_memory_fraction
         self.uniform_samples = uniform_samples
         self.resampled_points = resampled_points
         
@@ -117,6 +120,10 @@ class CUDARayTracer(RayTracer):
         logger.info("🔧 Setting up PyTorch GPU optimizations...")
         
         if torch.cuda.is_available():
+            # Enable memory fragmentation reduction
+            import os
+            os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+            logger.info("   ✓ CUDA memory fragmentation reduction enabled")
             # Enable mixed precision
             logger.info("   ✓ Mixed precision enabled")
             
@@ -126,9 +133,9 @@ class CUDARayTracer(RayTracer):
             # Enable gradient checkpointing
             logger.info("   ✓ Gradient checkpointing enabled")
             
-            # Set GPU memory fraction
-            torch.cuda.set_per_process_memory_fraction(0.95)
-            logger.info("   ✓ GPU memory fraction set to 95%")
+            # Set GPU memory fraction from configuration
+            torch.cuda.set_per_process_memory_fraction(self.gpu_memory_fraction)
+            logger.info(f"   ✓ GPU memory fraction set to {self.gpu_memory_fraction*100:.0f}% ({self.gpu_memory_fraction*80:.1f}GB on A100)")
             
             # Enable cuDNN benchmarking
             torch.backends.cudnn.benchmark = True

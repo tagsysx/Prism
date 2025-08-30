@@ -177,10 +177,10 @@ class ConfigLoader:
         ray_tracing_config = self.get_ray_tracing_config()
         return ray_tracing_config.get('angular_sampling', {})
     
-    def get_spatial_sampling_config(self) -> Dict[str, Any]:
-        """Get spatial sampling configuration."""
+    def get_radial_sampling_config(self) -> Dict[str, Any]:
+        """Get radial sampling configuration."""
         ray_tracing_config = self.get_ray_tracing_config()
-        return ray_tracing_config.get('spatial_sampling', {})
+        return ray_tracing_config.get('radial_sampling', {})
     
     def get_subcarrier_sampling_config(self) -> Dict[str, Any]:
         """Get subcarrier sampling configuration."""
@@ -271,7 +271,7 @@ class ConfigLoader:
         """
         ray_tracing_config = self.get_ray_tracing_config()
         angular_sampling = self.get_angular_sampling_config()
-        spatial_sampling = self.get_spatial_sampling_config()
+        radial_sampling = self.get_radial_sampling_config()
         cpu_config = self.get_cpu_config()
         scene_bounds = self.get_scene_bounds_config()
         
@@ -287,8 +287,8 @@ class ConfigLoader:
             'signal_threshold': ray_tracing_config.get('signal_threshold', 1e-6),
             'enable_early_termination': ray_tracing_config.get('enable_early_termination', True),
             'top_k_directions': angular_sampling.get('top_k_directions', 32),
-            'uniform_samples': spatial_sampling.get('num_sampling_points', 64),
-            'resampled_points': spatial_sampling.get('resampled_points', 32)
+            'uniform_samples': radial_sampling.get('num_sampling_points', 64),
+            'resampled_points': radial_sampling.get('resampled_points', 32)
         }
         
         return kwargs
@@ -302,7 +302,7 @@ class ConfigLoader:
         """
         ray_tracing_config = self.get_ray_tracing_config()
         angular_sampling = self.get_angular_sampling_config()
-        spatial_sampling = self.get_spatial_sampling_config()
+        radial_sampling = self.get_radial_sampling_config()
         mixed_precision = self.get_mixed_precision_config()
         scene_bounds = self.get_scene_bounds_config()
         
@@ -318,8 +318,8 @@ class ConfigLoader:
             'signal_threshold': ray_tracing_config.get('signal_threshold', 1e-6),
             'enable_early_termination': ray_tracing_config.get('enable_early_termination', True),
             'top_k_directions': angular_sampling.get('top_k_directions', 32),
-            'uniform_samples': spatial_sampling.get('num_sampling_points', 64),
-            'resampled_points': spatial_sampling.get('resampled_points', 32)
+            'uniform_samples': radial_sampling.get('num_sampling_points', 64),
+            'resampled_points': radial_sampling.get('resampled_points', 32)
         }
         
         return kwargs
@@ -519,7 +519,7 @@ class ConfigLoader:
             'mixed_precision_enabled': self.is_mixed_precision_enabled(),
             'scene_bounds': self.get_scene_bounds_config(),
             'angular_sampling': self.get_angular_sampling_config(),
-            'spatial_sampling': self.get_spatial_sampling_config(),
+            'radial_sampling': self.get_radial_sampling_config(),
             'subcarrier_sampling': self.get_subcarrier_sampling_config()
         }
         

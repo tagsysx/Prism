@@ -22,7 +22,7 @@ neural_networks:
     hidden_dim: 256               # Hidden layer dimension
     num_hidden_layers: 3          # Number of hidden layers
     output_dim: 408               # Number of subcarriers
-    num_ue_antennas: 4            # Number of UE antennas
+    num_ue_antennas: 1            # Number of UE antennas (reduced for memory optimization)
     activation: 'relu'            # Activation function
     
   # Antenna Codebook
@@ -39,6 +39,7 @@ neural_networks:
     output_dim: 162               # A × B directions (18 × 9 = 162)
     activation: 'relu'            # Activation function
     dropout_rate: 0.1             # Dropout rate for regularization
+    max_chunk_size: 256           # Maximum neural network chunk size for memory optimization
     
   # Radiance Network
   radiance_network:
@@ -49,6 +50,7 @@ neural_networks:
     hidden_dim: 256               # Hidden layer dimension
     num_hidden_layers: 4          # Number of hidden layers
     output_dim: 408               # Number of subcarriers
+    num_ue_antennas: 1            # Number of UE antennas (reduced for memory optimization)
     activation: 'relu'            # Activation function
 
 # Base Station Configuration
@@ -78,8 +80,8 @@ base_station:
 
 # User Equipment Configuration
 user_equipment:
-  num_ue_antennas: 4                 # Number of UE antennas per device
-  antenna_config: '4x64'             # 4 UE antennas per device, 64 BS antennas
+  num_ue_antennas: 1                 # Number of UE antennas per device (reduced for memory optimization)
+  antenna_config: '1x64'             # 1 UE antenna per device, 64 BS antennas
   position_range: [-150.0, 150.0]    # UE position range in meters
   height_range: [1.0, 2.0]           # UE height range in meters
 
@@ -98,16 +100,16 @@ ray_tracing:
   # Sampling configuration
   angular_sampling:
     azimuth_divisions: 36            # Number of azimuth divisions (0° to 360°)
-    elevation_divisions: 28           # Number of elevation divisions (-90° to +90°)
-    total_directions: 162            # 18 × 9 = 162 angle combinations
-    top_k_directions: 32              # Number of top-K directions to select (further reduced for CUDA memory)
+    elevation_divisions: 18           # Number of elevation divisions (-90° to +90°)
+    total_directions: 648            # 18 × 9 = 162 angle combinations
+    top_k_directions: 32              # Number of top-K directions to select (increased for better spatial resolution)
   
-  spatial_sampling:
-    num_sampling_points: 16          # Number of sampling points per ray (further reduced for CUDA memory)
-    resampled_points: 16             # Second stage: importance-based resampled points (further reduced for CUDA memory)
+  radial_sampling:
+    num_sampling_points: 16           # Number of sampling points per ray (memory optimized)
+    resampled_points: 16              # Second stage: importance-based resampled points (memory optimized)
   
   subcarrier_sampling:
-    sampling_ratio: 0.7              # Ratio of subcarriers to select (70%) - increased for better accuracy
+    sampling_ratio: 0.8              # Ratio of subcarriers to select (80%) - improved frequency domain learning
     sampling_method: 'uniform'         # Sampling method: 'random' or 'uniform'
     antenna_consistent: true          # All BS antennas use same subcarriers for each UE
     antenna_specific_selection: false # Disable antenna-specific selection (deprecated)
@@ -116,7 +118,7 @@ ray_tracing:
 system:
   # Computational settings
   device: 'cuda'                     # Primary device for computation ('cuda' or 'cpu')
-  gpu_memory_fraction: 0.2           # GPU memory usage fraction (very conservative for stability)
+  gpu_memory_fraction: 0.3           # GPU memory usage fraction (ultra-conservative for stability)
   # Note: batch_size is now automatically calculated as total_samples / batches_per_epoch
   
   # Ray tracing execution mode
@@ -143,7 +145,7 @@ system:
   
   # Mixed Precision Configuration
   mixed_precision:
-    enabled: false                   # Disable mixed precision due to ComplexHalf experimental warnings
+    enabled: true                    # Enable mixed precision for memory optimization on A100
     autocast_enabled: true           # Enable autocast for forward pass
     grad_scaler_enabled: true        # Enable gradient scaler for training
     loss_scale: "dynamic"            # "dynamic" or fixed number (e.g., 2048)
@@ -151,9 +153,10 @@ system:
 # Training Configuration
 training:
   # Training parameters
-  learning_rate: 1e-5                # Initial learning rate (reduced for stability)
-  num_epochs: 10                    # Number of training epochs
-  batches_per_epoch: 40              # Number of batches per epoch (very small batch size for CUDA memory)
+  learning_rate: 2e-4                # Initial learning rate (increased for faster convergence)
+  num_epochs: 5                    # Number of training epochs (increased for better learning)
+  batches_per_epoch: 40              # Number of batches per epoch (1 sample per batch for memory optimization)
+  gradient_accumulation_steps: 4      # Accumulate gradients over 4 steps (effective batch size = 4)
   
   # Checkpoint and recovery
   auto_checkpoint: true              # Enable automatic checkpointing
@@ -170,10 +173,10 @@ training:
     # CSI Loss Configuration
     csi_loss:
       type: 'hybrid'                 # Loss type: 'mse', 'mae', 'complex_mse', 'magnitude_phase', 'correlation', 'hybrid'
-      phase_weight: 1.0              # Weight for phase component in combined losses
-      magnitude_weight: 1.0          # Weight for magnitude component in combined losses
-      cmse_weight: 1.0               # Weight for CMSE component in hybrid loss
-      correlation_weight: 1.0        # Weight for correlation component in hybrid loss
+      phase_weight: 2.0              # Weight for phase component (increased for RF/beamforming applications)
+      magnitude_weight: 1.0          # Weight for magnitude component (maintained)
+      cmse_weight: 0.5               # Weight for CMSE component (reduced to balance)
+      correlation_weight: 0.5        # Weight for correlation component (reduced to balance)
     
     # PDP Loss Configuration  
     pdp_loss:

@@ -94,9 +94,9 @@ class PrismTrainingInterface(nn.Module):
         
         # Get configuration parameters from config dictionaries - fail fast if missing
         try:
-            spatial_sampling = self.ray_tracing_config['spatial_sampling']
+            radial_sampling = self.ray_tracing_config['radial_sampling']
         except KeyError:
-            error_msg = "❌ FATAL: Missing required config 'ray_tracing.spatial_sampling'"
+            error_msg = "❌ FATAL: Missing required config 'ray_tracing.radial_sampling'"
             logger.error(error_msg)
             logger.error("   Please check your configuration file.")
             print(error_msg)
@@ -115,12 +115,12 @@ class PrismTrainingInterface(nn.Module):
         
         # Store configuration parameters - fail fast if missing
         try:
-            self.num_sampling_points = spatial_sampling['num_sampling_points']
+            self.num_sampling_points = radial_sampling['num_sampling_points']
         except KeyError:
-            error_msg = "❌ FATAL: Missing required config 'ray_tracing.spatial_sampling.num_sampling_points'"
+            error_msg = "❌ FATAL: Missing required config 'ray_tracing.radial_sampling.num_sampling_points'"
             logger.error(error_msg)
             print(error_msg)
-            raise ValueError("Missing required configuration: ray_tracing.spatial_sampling.num_sampling_points")
+            raise ValueError("Missing required configuration: ray_tracing.radial_sampling.num_sampling_points")
         
         try:
             self.subcarrier_sampling_ratio = subcarrier_sampling['sampling_ratio']
@@ -225,7 +225,7 @@ class PrismTrainingInterface(nn.Module):
         # Extract common configuration parameters
         try:
             angular_sampling = self.ray_tracing_config['angular_sampling']
-            spatial_sampling = self.ray_tracing_config['spatial_sampling']
+            radial_sampling = self.ray_tracing_config['radial_sampling']
             mixed_precision = self.system_config['mixed_precision']
             cpu_config = self.system_config['cpu']
         except KeyError as e:
@@ -254,8 +254,8 @@ class PrismTrainingInterface(nn.Module):
                 'signal_threshold': self.ray_tracing_config['signal_threshold'],
                 'enable_early_termination': self.ray_tracing_config['enable_early_termination'],
                 'top_k_directions': angular_sampling['top_k_directions'],
-                'uniform_samples': spatial_sampling['num_sampling_points'],
-                'resampled_points': spatial_sampling['resampled_points']
+                'uniform_samples': radial_sampling['num_sampling_points'],
+                'resampled_points': radial_sampling['resampled_points']
             }
         except KeyError as e:
             logger.error(f"❌ FATAL: Missing required config parameter: {e.args[0]}")
@@ -271,9 +271,13 @@ class PrismTrainingInterface(nn.Module):
                 logger.error("   Please check your configuration file.")
                 sys.exit(1)
             
+            # Get GPU memory fraction from system config
+            gpu_memory_fraction = self.system_config.get('gpu_memory_fraction', 0.6)
+            
             # Create CUDA-specific parameters
             cuda_params = {
                 'use_mixed_precision': use_mixed_precision,
+                'gpu_memory_fraction': gpu_memory_fraction,
                 'device': str(self.device),  # Pass the specific CUDA device
                 'prism_network': self.prism_network,  # Pass the neural network
                 **common_params
@@ -861,14 +865,42 @@ class PrismTrainingInterface(nn.Module):
         # Debug logging
         logger.debug(f"compute_loss called with predictions shape: {predictions.shape}, targets shape: {targets.shape}")
         
+        # Validate shapes - targets are in format (batch_size, num_subcarriers, num_ue_antennas, num_bs_antennas)
+        batch_size, num_subcarriers, target_ue_antennas, num_bs_antennas = targets.shape
+        pred_batch_size, pred_subcarriers, pred_ue_antennas, pred_bs_antennas = predictions.shape
+        
+        # Handle UE antenna dimension mismatch between predictions and targets FIRST
+        if target_ue_antennas != pred_ue_antennas:
+            logger.info(f"🔧 UE antenna dimension mismatch detected:")
+            logger.info(f"   Predictions UE antennas: {pred_ue_antennas}")
+            logger.info(f"   Targets UE antennas: {target_ue_antennas}")
+            
+            if target_ue_antennas > pred_ue_antennas:
+                # Use only the first N UE antennas from targets to match predictions
+                targets = targets[:, :, :pred_ue_antennas, :]
+                logger.info(f"   ✅ Adjusted targets to use first {pred_ue_antennas} UE antenna(s)")
+                logger.info(f"   New targets shape: {targets.shape}")
+                # Update target dimensions after adjustment
+                target_ue_antennas = pred_ue_antennas
+            else:
+                raise ValueError(f"Cannot match dimensions: targets have {target_ue_antennas} UE antennas but predictions have {pred_ue_antennas}")
+        
+        # Now validate that all dimensions match
+        expected_pred_shape = (batch_size, num_subcarriers, target_ue_antennas, num_bs_antennas)
+        
+        if predictions.shape != expected_pred_shape:
+            logger.error(f"Predictions shape mismatch. Expected: {expected_pred_shape}, Got: {predictions.shape}")
+            raise ValueError(f"Predictions shape mismatch. Expected: {expected_pred_shape}, Got: {predictions.shape}")
+        
         # Check if current_selection attributes exist, if not, initialize them
+        # Note: This initialization happens AFTER UE antenna dimension adjustment
         if not hasattr(self, 'current_selection') or self.current_selection is None:
             logger.warning("current_selection not found, initializing with default values")
-            batch_size, num_subcarriers, num_ue_antennas, num_bs_antennas = targets.shape
+            # Use the adjusted target dimensions (after UE antenna matching)
             num_selected = int(num_subcarriers * self.subcarrier_sampling_ratio)
-            self._initialize_selection_variables(batch_size, num_ue_antennas, num_bs_antennas, num_subcarriers)
+            self._initialize_selection_variables(batch_size, target_ue_antennas, num_bs_antennas, num_subcarriers)
             # Create default selection for all antennas
-            selection_info = self._select_subcarriers(batch_size, num_ue_antennas, num_bs_antennas, num_subcarriers, num_selected)
+            selection_info = self._select_subcarriers(batch_size, target_ue_antennas, num_bs_antennas, num_subcarriers, num_selected)
             self.current_selection = selection_info['selected_indices']
             self.current_selection_mask = selection_info['selection_mask']
         
@@ -879,16 +911,6 @@ class PrismTrainingInterface(nn.Module):
             logger.error(f"current_selection: {self.current_selection}")
             logger.error(f"current_selection_mask: {self.current_selection_mask}")
             raise ValueError("No subcarrier selection available even after initialization.")
-        
-        # Validate shapes - targets are in format (batch_size, num_subcarriers, num_ue_antennas, num_bs_antennas)
-        batch_size, num_subcarriers, num_ue_antennas, num_bs_antennas = targets.shape
-        
-        # Since we're using all subcarriers, predictions should have shape (batch_size, num_subcarriers, num_ue_antennas, num_bs_antennas)
-        expected_pred_shape = (batch_size, num_subcarriers, num_ue_antennas, num_bs_antennas)
-        
-        if predictions.shape != expected_pred_shape:
-            logger.error(f"Predictions shape mismatch. Expected: {expected_pred_shape}, Got: {predictions.shape}")
-            raise ValueError(f"Predictions shape mismatch. Expected: {expected_pred_shape}, Got: {predictions.shape}")
         
         # Extract only the traced/selected subcarriers from both predictions and targets
         # and compute MSE loss only on those values, completely ignoring untraced subcarriers
@@ -901,7 +923,7 @@ class PrismTrainingInterface(nn.Module):
             zero_csi_count = 0  # Track zero CSI predictions
             for b in range(batch_size):
                 for bs_antenna_idx in range(num_bs_antennas):
-                    for u in range(num_ue_antennas):
+                    for u in range(target_ue_antennas):
                         if self.current_selection is not None:
                             selected_indices = self.current_selection[b, bs_antenna_idx, u]
                             for k in selected_indices:
@@ -1179,7 +1201,7 @@ class PrismTrainingInterface(nn.Module):
             'scene_bounds': (self.scene_min.tolist(), self.scene_max.tolist()),
             'current_epoch': self.current_epoch,
             'current_batch': self.current_batch,
-            'best_loss': self.best_loss,
+            'best_loss': float(self.best_loss.item()) if isinstance(self.best_loss, torch.Tensor) else float(self.best_loss),
             'training_history_length': len(self.training_history),
             'checkpoint_dir': self.checkpoint_dir,
             'prism_network_config': {
@@ -1194,7 +1216,7 @@ class PrismTrainingInterface(nn.Module):
         try:
             # Get configuration values
             angular_sampling = self.ray_tracing_config.get('angular_sampling', {})
-            spatial_sampling = self.ray_tracing_config.get('spatial_sampling', {})
+            radial_sampling = self.ray_tracing_config.get('radial_sampling', {})
             subcarrier_sampling = self.ray_tracing_config.get('subcarrier_sampling', {})
             
             # Use default training configuration since we don't have access to training config
@@ -1205,8 +1227,8 @@ class PrismTrainingInterface(nn.Module):
             top_k_directions = angular_sampling.get('top_k_directions', 32)
             azimuth_divisions = angular_sampling.get('azimuth_divisions', 18)
             elevation_divisions = angular_sampling.get('elevation_divisions', 9)
-            num_sampling_points = spatial_sampling.get('num_sampling_points', 64)
-            resampled_points = spatial_sampling.get('resampled_points', 32)
+            num_sampling_points = radial_sampling.get('num_sampling_points', 64)
+            resampled_points = radial_sampling.get('resampled_points', 32)
             
             # Get subcarrier configuration
             sampling_ratio = subcarrier_sampling.get('sampling_ratio', 0.01)
