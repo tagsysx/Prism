@@ -97,18 +97,18 @@ ray_tracing:
   
   # Sampling configuration
   angular_sampling:
-    azimuth_divisions: 18            # Number of azimuth divisions (0° to 360°)
-    elevation_divisions: 9           # Number of elevation divisions (-90° to +90°)
+    azimuth_divisions: 36            # Number of azimuth divisions (0° to 360°)
+    elevation_divisions: 28           # Number of elevation divisions (-90° to +90°)
     total_directions: 162            # 18 × 9 = 162 angle combinations
-    top_k_directions: 8              # Number of top-K directions to select (further reduced for CUDA memory)
+    top_k_directions: 32              # Number of top-K directions to select (further reduced for CUDA memory)
   
   spatial_sampling:
     num_sampling_points: 16          # Number of sampling points per ray (further reduced for CUDA memory)
     resampled_points: 16             # Second stage: importance-based resampled points (further reduced for CUDA memory)
   
   subcarrier_sampling:
-    sampling_ratio: 0.1              # Ratio of subcarriers to select (10%)
-    sampling_method: 'random'         # Sampling method: 'random' or 'uniform'
+    sampling_ratio: 0.7              # Ratio of subcarriers to select (70%) - increased for better accuracy
+    sampling_method: 'uniform'         # Sampling method: 'random' or 'uniform'
     antenna_consistent: true          # All BS antennas use same subcarriers for each UE
     antenna_specific_selection: false # Disable antenna-specific selection (deprecated)
 
@@ -147,26 +147,6 @@ system:
     autocast_enabled: true           # Enable autocast for forward pass
     grad_scaler_enabled: true        # Enable gradient scaler for training
     loss_scale: "dynamic"            # "dynamic" or fixed number (e.g., 2048)
-  
-  # Spatial Spectrum Configuration
-  spatial_spectrum:
-    enabled: true                    # Enable spatial spectrum calculation
-    default_algorithm: 'bartlett'    # Default spatial spectrum algorithm
-    default_fusion_method: 'average' # Default subcarrier fusion method
-    angle_resolution:
-      theta_points: 60               # Number of elevation angle points
-      phi_points: 120                # Number of azimuth angle points
-      theta_range: [-60, 60]         # Elevation angle range in degrees
-      phi_range: [0, 360]            # Azimuth angle range in degrees
-    peak_detection:
-      num_peaks: 3                   # Number of peaks to detect
-      min_distance: 5                # Minimum distance between peaks (pixels)
-    # 5G NR specific settings
-    subcarrier_selection:
-      enabled: true                  # Enable subcarrier selection for spatial spectrum
-      selection_method: 'random'    # 'uniform', 'weighted', or 'custom'
-      num_selected: 64               # Number of subcarriers to use (64 out of 408)
-      frequency_weighting: true      # Apply frequency-dependent weighting
 
 # Training Configuration
 training:
