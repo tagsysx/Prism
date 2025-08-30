@@ -1,0 +1,314 @@
+# Configuration for Prism: Neural Network-Based Electromagnetic Ray Tracing System
+# Cleaned and reorganized configuration with clear separation of concerns
+
+
+# Neural Network Configuration
+neural_networks:
+  # Enable neural network-based processing
+  enabled: true
+  
+  # Attenuation Network
+  attenuation_network:
+    input_dim: 3                  # 3D spatial position
+    hidden_dim: 256               # Hidden layer dimension
+    num_hidden_layers: 8          # Number of hidden layers
+    feature_dim: 128              # Output feature dimension
+    activation: 'relu'            # Activation function
+    use_shortcut: true            # Enable shortcut connections
+    
+  # Attenuation Decoder
+  attenuation_decoder:
+    input_dim: 128                # Feature dimension from AttenuationNetwork
+    hidden_dim: 256               # Hidden layer dimension
+    num_hidden_layers: 3          # Number of hidden layers
+    output_dim: 408               # Number of subcarriers
+    num_ue_antennas: 4            # Number of UE antennas
+    activation: 'relu'            # Activation function
+    
+  # Antenna Codebook
+  antenna_codebook:
+    num_antennas: 64              # Number of BS antennas
+    embedding_dim: 64             # Antenna embedding dimension
+    learnable: true               # Learnable embeddings
+    
+  # Antenna Network (MLP-based direction sampling)
+  antenna_network:
+    input_dim: 64                 # Antenna embedding dimension
+    hidden_dim: 128               # Hidden layer dimension
+    num_hidden_layers: 2          # Number of hidden layers
+    output_dim: 162               # A × B directions (18 × 9 = 162)
+    activation: 'relu'            # Activation function
+    dropout_rate: 0.1             # Dropout rate for regularization
+    
+  # Radiance Network
+  radiance_network:
+    ue_pos_dim: 3                 # UE position dimension
+    view_dir_dim: 3               # Viewing direction dimension
+    spatial_feature_dim: 128      # Spatial feature dimension
+    antenna_embedding_dim: 64     # Antenna embedding dimension
+    hidden_dim: 256               # Hidden layer dimension
+    num_hidden_layers: 4          # Number of hidden layers
+    output_dim: 408               # Number of subcarriers
+    activation: 'relu'            # Activation function
+
+# Base Station Configuration
+base_station:
+  default_position: [0.0, 0.0, 0.0]  # Base station at origin
+  num_antennas: 64                   # Number of BS antennas
+  antenna_embedding_dim: 64          # Antenna embedding dimension
+  antenna_type: 'mimo'               # MIMO antenna configuration
+  polarization: 'dual'               # Dual polarization support
+  
+  # OFDM System Parameters
+  ofdm:
+    center_frequency: 3.5e9          # Center frequency in Hz (3.5 GHz - mid-band 5G)
+    bandwidth: 100.0e6               # Bandwidth in Hz (100 MHz - 5G NR standard)
+    num_subcarriers: 408             # Total number of subcarriers
+    subcarrier_spacing: 245.1e3      # Subcarrier spacing in Hz (100MHz/408 ≈ 245.1 kHz)
+    guard_band_ratio: 0.1            # Guard band ratio (10% of bandwidth)
+    fft_size: 512                    # OFDM FFT size
+    num_guard_carriers: 52           # Number of guard carriers ((512-408)/2)
+    
+  # Antenna Array Configuration
+  antenna_array:
+    configuration: '8x8'              # Antenna array configuration (M x N)
+    element_spacing: 'half_wavelength' # Element spacing type
+    custom_spacing: null              # Custom spacing in meters (if not half_wavelength)
+    beamforming_enabled: true         # Enable beamforming capabilities
+
+# User Equipment Configuration
+user_equipment:
+  num_ue_antennas: 4                 # Number of UE antennas per device
+  antenna_config: '4x64'             # 4 UE antennas per device, 64 BS antennas
+  position_range: [-150.0, 150.0]    # UE position range in meters
+  height_range: [1.0, 2.0]           # UE height range in meters
+
+# Ray Tracing Configuration
+ray_tracing:
+  # Physical parameters
+  max_ray_length: 200.0              # Maximum ray length in meters
+  signal_threshold: 1e-6             # Signal strength threshold for early termination
+  enable_early_termination: true     # Enable early termination optimization
+  
+  # Scene configuration (shared by training and testing)
+  scene_bounds:
+    min: [-500.0, -500.0, -200.0]      # Scene minimum bounds [x, y, z] (expanded to include all sampling)
+    max: [500.0, 500.0, 250.0]       # Scene maximum bounds [x, y, z] (expanded to include all sampling)
+  
+  # Sampling configuration
+  angular_sampling:
+    azimuth_divisions: 18            # Number of azimuth divisions (0° to 360°)
+    elevation_divisions: 9           # Number of elevation divisions (-90° to +90°)
+    total_directions: 162            # 18 × 9 = 162 angle combinations
+    top_k_directions: 8              # Number of top-K directions to select (further reduced for CUDA memory)
+  
+  spatial_sampling:
+    num_sampling_points: 16          # Number of sampling points per ray (further reduced for CUDA memory)
+    resampled_points: 16             # Second stage: importance-based resampled points (further reduced for CUDA memory)
+  
+  subcarrier_sampling:
+    sampling_ratio: 0.1              # Ratio of subcarriers to select (10%)
+    sampling_method: 'random'         # Sampling method: 'random' or 'uniform'
+    antenna_consistent: true          # All BS antennas use same subcarriers for each UE
+    antenna_specific_selection: false # Disable antenna-specific selection (deprecated)
+
+# System Configuration
+system:
+  # Computational settings
+  device: 'cuda'                     # Primary device for computation ('cuda' or 'cpu')
+  gpu_memory_fraction: 0.2           # GPU memory usage fraction (very conservative for stability)
+  # Note: batch_size is now automatically calculated as total_samples / batches_per_epoch
+  
+  # Ray tracing execution mode
+  ray_tracing_mode: 'cuda'           # Ray tracing mode: 'cuda', 'cpu', or 'hybrid' (back to CUDA with compatibility fix)
+  # - 'cuda': Pure CUDA acceleration (fastest, neural networks + ray tracing on GPU)
+  # - 'cpu': Pure CPU with multiprocessing (stable, reliable)
+  # - 'hybrid': Neural networks on CUDA, ray tracing on CPU (balanced)
+  fallback_to_cpu: true              # Fallback to CPU if CUDA not available
+  
+  # CUDA-specific settings
+  cuda:
+    # GPU selection is now automatic - system will scan and select the best available GPU
+    # No need to manually specify device_id or gpu_ids
+    optimization_level: 'O2'         # CUDA optimization level ('O0', 'O1', 'O2', 'O3')
+    benchmark_mode: true             # Enable CUDA benchmark mode for optimal performance
+    deterministic: false             # Disable deterministic mode for better performance
+    multi_gpu: false                 # Enable/disable multi-GPU CUDA operations
+    memory_pool: true                # Enable CUDA memory pool for better memory management
+    auto_select_gpu: true            # Enable automatic GPU selection (default: true)
+  
+  # CPU-specific settings
+  cpu:
+    num_workers: 4                   # Number of worker processes for CPU ray tracer
+  
+  # Mixed Precision Configuration
+  mixed_precision:
+    enabled: false                   # Disable mixed precision due to ComplexHalf experimental warnings
+    autocast_enabled: true           # Enable autocast for forward pass
+    grad_scaler_enabled: true        # Enable gradient scaler for training
+    loss_scale: "dynamic"            # "dynamic" or fixed number (e.g., 2048)
+  
+  # Spatial Spectrum Configuration
+  spatial_spectrum:
+    enabled: true                    # Enable spatial spectrum calculation
+    default_algorithm: 'bartlett'    # Default spatial spectrum algorithm
+    default_fusion_method: 'average' # Default subcarrier fusion method
+    angle_resolution:
+      theta_points: 60               # Number of elevation angle points
+      phi_points: 120                # Number of azimuth angle points
+      theta_range: [-60, 60]         # Elevation angle range in degrees
+      phi_range: [0, 360]            # Azimuth angle range in degrees
+    peak_detection:
+      num_peaks: 3                   # Number of peaks to detect
+      min_distance: 5                # Minimum distance between peaks (pixels)
+    # 5G NR specific settings
+    subcarrier_selection:
+      enabled: true                  # Enable subcarrier selection for spatial spectrum
+      selection_method: 'random'    # 'uniform', 'weighted', or 'custom'
+      num_selected: 64               # Number of subcarriers to use (64 out of 408)
+      frequency_weighting: true      # Apply frequency-dependent weighting
+
+# Training Configuration
+training:
+  # Training parameters
+  learning_rate: 1e-5                # Initial learning rate (reduced for stability)
+  num_epochs: 10                    # Number of training epochs
+  batches_per_epoch: 40              # Number of batches per epoch (very small batch size for CUDA memory)
+  
+  # Checkpoint and recovery
+  auto_checkpoint: true              # Enable automatic checkpointing
+  checkpoint_frequency: 5           # Save checkpoint every N batches
+  epoch_save_interval: 1             # Save checkpoint every N epochs
+  
+  # Loss function configuration
+  loss:
+    # Overall loss weights
+    csi_weight: 0.7                  # Weight for CSI prediction loss
+    pdp_weight: 300.0                # Weight for PDP loss (increased to balance scale difference)
+    regularization_weight: 0.01      # Weight for regularization terms
+    
+    # CSI Loss Configuration
+    csi_loss:
+      type: 'hybrid'                 # Loss type: 'mse', 'mae', 'complex_mse', 'magnitude_phase', 'correlation', 'hybrid'
+      phase_weight: 1.0              # Weight for phase component in combined losses
+      magnitude_weight: 1.0          # Weight for magnitude component in combined losses
+      cmse_weight: 1.0               # Weight for CMSE component in hybrid loss
+      correlation_weight: 1.0        # Weight for correlation component in hybrid loss
+    
+    # PDP Loss Configuration  
+    pdp_loss:
+      type: 'hybrid'                 # Loss type: 'mse', 'correlation', 'delay', 'hybrid'
+      fft_size: 1024                 # FFT size for PDP computation
+      normalize_pdp: true            # Whether to normalize PDPs before comparison
+      mse_weight: 0.5                # Weight for MSE component in hybrid loss
+      correlation_weight: 0.3        # Weight for correlation component in hybrid loss
+      delay_weight: 0.2              # Weight for delay component in hybrid loss
+  
+  # Optimizer
+  optimizer: 'adam'                  # Optimizer type
+  optimizer_params:
+    beta1: 0.9                       # Adam beta1 parameter
+    beta2: 0.999                     # Adam beta2 parameter
+    weight_decay: 1e-5               # Weight decay for regularization
+  
+  # Learning rate scheduling
+  lr_scheduler:
+    enabled: true                    # Enable learning rate scheduling
+    type: 'step'                     # Scheduler type
+    step_size: 30                    # Step size for StepLR
+    gamma: 0.1                       # Multiplicative factor for LR decay
+  
+  # Early stopping
+  early_stopping:
+    enabled: true                    # Enable early stopping
+    patience: 10                     # Number of epochs to wait for improvement
+    min_delta: 1e-6                  # Minimum change to qualify as improvement
+    restore_best_weights: true       # Restore best weights on early stopping
+  
+
+
+# Testing Configuration
+testing:
+  # Testing parameters
+  batch_size: 1                      # Testing batch size (can be different from training)
+  
+  # Model configuration
+  model_path: "results/sionna/training/models/best_model.pt"    # Path to trained model for testing
+  # Alternative model paths (uncomment to use):
+  # model_path: "results/sionna/training/checkpoints/checkpoint_epoch_1_batch_39.pt"  # Specific epoch/batch
+  # model_path: "results/sionna/training/models/best_model.pt"  # Best model
+  
+  # Evaluation metrics
+  metrics:
+    - 'mse'                          # Mean Squared Error
+    - 'mae'                          # Mean Absolute Error
+    - 'rmse'                         # Root Mean Squared Error
+    - 'complex_correlation'          # Complex correlation coefficient
+  
+  # Output configuration
+  save_predictions: true             # Save model predictions
+  save_intermediate_results: true    # Save intermediate ray tracing results
+  save_visualizations: true          # Save result visualizations
+  
+
+
+# Input Configuration
+input:
+  # Single dataset configuration for train/test split
+  dataset_path: "data/sionna/sionna_5g_simulation.h5"    # Single HDF5 file containing all data
+  
+  # Train/test split configuration
+  split:
+    random_seed: 42                    # Random seed for reproducible splits
+    train_ratio: 0.8                   # Training data ratio (0.0 to 1.0)
+    test_ratio: 0.2                    # Testing data ratio (0.0 to 1.0)
+    # Note: train_ratio + test_ratio can be < 1.0 to use only subset of data
+  
+
+# Output and Logging Configuration
+output:
+  # Base directories (all paths relative to project root)
+  base_dir: "results/sionna"                           # Base results directory
+  
+  # Training output directories (using template variables)
+  training:
+    checkpoint_dir: "{{base_dir}}/training/checkpoints"    # Directory for saving checkpoints
+    tensorboard_dir: "{{base_dir}}/training/tensorboard"   # TensorBoard logs directory
+    models_dir: "{{base_dir}}/training/models"             # Saved models directory
+    
+    # Training logging configuration
+    logging:
+      log_level: 'INFO'                 # Training logging level
+      log_dir: "{{base_dir}}/training/logs"                # Training logs directory
+      log_file: "{{base_dir}}/training/logs/training.log"  # Training log file path
+  
+  # Testing output directories (using template variables)
+  testing:
+    results_dir: "{{base_dir}}/testing/results"      # Test results and metrics
+    plots_dir: "{{base_dir}}/testing/plots"          # Visualization plots
+    predictions_dir: "{{base_dir}}/testing/predictions"  # Model predictions
+    reports_dir: "{{base_dir}}/testing/reports"        # Test reports directory
+    
+    # Testing logging configuration
+    logging:
+      log_level: 'INFO'                  # Testing logging level
+      log_dir: "{{base_dir}}/testing/logs"             # Testing logs directory
+      log_file: "{{base_dir}}/testing/logs/testing.log"  # Testing log file path
+  
+  # File formats and compression
+  format: 'hdf5'                     # Output file format
+  compression_level: 6               # Compression level for output files
+  
+  # What to save
+  save_results: true                 # Save ray tracing results
+  save_training_outputs: true        # Save training interface outputs
+  save_ray_tracer_results: true      # Save ray tracer intermediate results
+  save_csi_predictions: true         # Save CSI predictions
+  
+  # Checkpoint configuration
+  checkpoint_format: 'pytorch'       # Checkpoint file format
+  save_optimizer_state: true         # Save optimizer state in checkpoints
+  save_training_history: true        # Save training history
+  
+
+
