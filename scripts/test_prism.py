@@ -472,7 +472,7 @@ class PrismTester:
             
             self.prism_network = PrismNetwork(
                 num_subcarriers=nn_config['attenuation_decoder']['output_dim'],
-                num_ue_antennas=ue_config.get('num_ue_antennas', 4),
+                num_ue_antennas=ue_config.get('num_ue_antennas', 1),
                 num_bs_antennas=nn_config['antenna_codebook']['num_antennas'],
                 position_dim=nn_config['attenuation_network']['input_dim'],
                 hidden_dim=nn_config['attenuation_network']['hidden_dim'],
@@ -645,13 +645,17 @@ class PrismTester:
         logger.info(f"Loading test data from {self.data_path}")
         
         try:
+            # Get target antenna index from config
+            target_antenna_index = self.config.get('user_equipment', {}).get('target_antenna_index', 0)
+            
             # Use split-based data loading
             self.ue_positions, self.csi_target, self.bs_position, self.antenna_indices, metadata = load_and_split_data(
                 dataset_path=self.data_path,
                 train_ratio=self.split_config['train_ratio'],
                 test_ratio=self.split_config['test_ratio'],
                 random_seed=self.split_config['random_seed'],
-                mode='test'
+                mode='test',
+                target_antenna_index=target_antenna_index
             )
             
             # Log split information

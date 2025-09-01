@@ -1251,7 +1251,7 @@ class PrismTrainingInterface(nn.Module):
             
             # Get system configuration
             num_bs_antennas = self.system_config.get('base_station', {}).get('num_antennas', 64)
-            num_ue_antennas = self.user_equipment_config.get('num_ue_antennas', 4)
+            num_ue_antennas = self.user_equipment_config.get('num_ue_antennas', 1)
             
             # Calculate ray counts
             rays_per_direction = num_sampling_points + resampled_points

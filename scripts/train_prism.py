@@ -489,7 +489,7 @@ class PrismTrainer:
         # Create PrismNetwork instance using the cleaned configuration structure
         self.prism_network = PrismNetwork(
             num_subcarriers=ofdm_config.get('num_subcarriers', attenuation_decoder.get('output_dim', 408)),
-            num_ue_antennas=user_equipment_config.get('num_ue_antennas', 4),
+            num_ue_antennas=user_equipment_config.get('num_ue_antennas', 1),
             num_bs_antennas=base_station_config.get('num_antennas', antenna_codebook.get('num_antennas', 64)),
             position_dim=attenuation_network.get('input_dim', 3),
             hidden_dim=attenuation_network.get('hidden_dim', 256),
