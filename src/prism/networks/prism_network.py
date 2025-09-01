@@ -51,6 +51,12 @@ class PrismNetwork(nn.Module):
         top_k_directions: int = 32,
         complex_output: bool = True,
         use_mixed_precision: bool = False,
+        # Network-specific configurations
+        attenuation_network_config: dict = None,
+        attenuation_decoder_config: dict = None,
+        antenna_codebook_config: dict = None,
+        antenna_network_config: dict = None,
+        radiance_network_config: dict = None,
         **kwargs
     ):
         super().__init__()
@@ -76,6 +82,13 @@ class PrismNetwork(nn.Module):
         self.antenna_use_mixed_precision = use_mixed_precision
         self.radiance_use_mixed_precision = use_mixed_precision
         
+        # Store network-specific configurations with defaults
+        self.attenuation_network_config = attenuation_network_config or {}
+        self.attenuation_decoder_config = attenuation_decoder_config or {}
+        self.antenna_codebook_config = antenna_codebook_config or {}
+        self.antenna_network_config = antenna_network_config or {}
+        self.radiance_network_config = radiance_network_config or {}
+        
         # Initialize positional encoders
         if use_ipe_encoding:
             # Use traditional PE encoding instead of IPE for now
@@ -100,46 +113,56 @@ class PrismNetwork(nn.Module):
         # 1. AttenuationNetwork: Encode spatial position information
         self.attenuation_network = AttenuationNetwork(
             input_dim=self.pe_position_dim,
-            hidden_dim=self.hidden_dim,
-            output_dim=self.feature_dim,
+            hidden_dim=self.attenuation_network_config.get('hidden_dim', self.hidden_dim),
+            output_dim=self.attenuation_network_config.get('feature_dim', self.feature_dim),
+            num_layers=self.attenuation_network_config.get('num_hidden_layers', 8),
+            activation=self.attenuation_network_config.get('activation', 'relu'),
+            use_shortcuts=self.attenuation_network_config.get('use_shortcut', True),
             complex_output=self.complex_output
         )
         
         # 2. AttenuationDecoder: Convert features to attenuation factors
         self.attenuation_decoder = AttenuationDecoder(
-            feature_dim=self.feature_dim,
-            hidden_dim=self.hidden_dim,
-            num_ue_antennas=self.num_ue_antennas,
-            num_subcarriers=self.num_subcarriers,
+            feature_dim=self.attenuation_decoder_config.get('input_dim', self.feature_dim),
+            hidden_dim=self.attenuation_decoder_config.get('hidden_dim', self.hidden_dim),
+            num_layers=self.attenuation_decoder_config.get('num_hidden_layers', 3),
+            activation=self.attenuation_decoder_config.get('activation', 'relu'),
+            num_ue_antennas=self.attenuation_decoder_config.get('num_ue_antennas', self.num_ue_antennas),
+            num_subcarriers=self.attenuation_decoder_config.get('output_dim', self.num_subcarriers),
             complex_output=self.complex_output
         )
         
         # 3. AntennaEmbeddingCodebook: Antenna-specific embeddings
         if self.use_antenna_codebook:
             self.antenna_codebook = AntennaEmbeddingCodebook(
-                num_bs_antennas=self.num_bs_antennas,
-                embedding_dim=self.antenna_embedding_dim
+                num_bs_antennas=self.antenna_codebook_config.get('num_antennas', self.num_bs_antennas),
+                embedding_dim=self.antenna_codebook_config.get('embedding_dim', self.antenna_embedding_dim)
             )
         else:
             self.antenna_codebook = None
         
         # 4. AntennaNetwork: Directional importance indicators
         self.antenna_network = AntennaNetwork(
-            antenna_embedding_dim=self.antenna_embedding_dim,
-            hidden_dim=self.hidden_dim // 2,  # Smaller for efficiency
+            antenna_embedding_dim=self.antenna_network_config.get('input_dim', self.antenna_embedding_dim),
+            hidden_dim=self.antenna_network_config.get('hidden_dim', self.hidden_dim // 2),
             azimuth_divisions=self.azimuth_divisions,
-            elevation_divisions=self.elevation_divisions
+            elevation_divisions=self.elevation_divisions,
+            num_layers=self.antenna_network_config.get('num_hidden_layers', 2),
+            activation=self.antenna_network_config.get('activation', 'relu'),
+            dropout=self.antenna_network_config.get('dropout_rate', 0.1)
         )
         
         # 5. RadianceNetwork: Radiation modeling
         self.radiance_network = RadianceNetwork(
-            ue_position_dim=self.pe_position_dim,
-            view_direction_dim=self.pe_direction_dim,
-            feature_dim=self.feature_dim,
-            antenna_embedding_dim=self.antenna_embedding_dim,
-            hidden_dim=self.hidden_dim,
-            num_ue_antennas=self.num_ue_antennas,
-            num_subcarriers=self.num_subcarriers,
+            ue_position_dim=self.radiance_network_config.get('ue_pos_dim', self.pe_position_dim),
+            view_direction_dim=self.radiance_network_config.get('view_dir_dim', self.pe_direction_dim),
+            feature_dim=self.radiance_network_config.get('spatial_feature_dim', self.feature_dim),
+            antenna_embedding_dim=self.radiance_network_config.get('antenna_embedding_dim', self.antenna_embedding_dim),
+            hidden_dim=self.radiance_network_config.get('hidden_dim', self.hidden_dim),
+            num_layers=self.radiance_network_config.get('num_hidden_layers', 4),
+            activation=self.radiance_network_config.get('activation', 'relu'),
+            num_ue_antennas=self.radiance_network_config.get('num_ue_antennas', self.num_ue_antennas),
+            num_subcarriers=self.radiance_network_config.get('output_dim', self.num_subcarriers),
             complex_output=self.complex_output
         )
         
@@ -285,8 +308,10 @@ class PrismNetwork(nn.Module):
                         # If decoder outputs complex, combine properly
                         voxel_attenuation = real_attenuation + 1j * imag_attenuation
                     else:
-                        # If decoder outputs real, create complex from real/imag parts
-                        voxel_attenuation = torch.complex(real_attenuation, imag_attenuation)
+                        # If decoder outputs real, create complex from real/imag parts with explicit dtype
+                        real_part = real_attenuation.to(torch.float32)
+                        imag_part = imag_attenuation.to(torch.float32)
+                        voxel_attenuation = torch.complex(real_part, imag_part)
                 else:
                     # Features are real, process directly
                     voxel_attenuation = self.attenuation_decoder(voxel_features)

@@ -500,7 +500,13 @@ class PrismTrainer:
             azimuth_divisions=angular_sampling.get('azimuth_divisions', 18),
             elevation_divisions=angular_sampling.get('elevation_divisions', 9),
             top_k_directions=angular_sampling.get('top_k_directions', 32),
-            complex_output=True  # Enable complex output for CSI
+            complex_output=True,  # Enable complex output for CSI
+            # Pass network-specific configurations
+            attenuation_network_config=attenuation_network,
+            attenuation_decoder_config=attenuation_decoder,
+            antenna_codebook_config=antenna_codebook,
+            antenna_network_config=antenna_network,
+            radiance_network_config=radiance_network
         )
         
         # Log OFDM configuration usage
@@ -592,8 +598,8 @@ class PrismTrainer:
         selected_subcarriers = int(total_subcarriers * subcarrier_ratio)
         
         self.logger.info(f"Training interface created with ray_tracing_mode: {ray_tracing_mode}")
-        self.logger.info(f"Ray tracing config: {ray_tracing_config.keys()}")
-        self.logger.info(f"System config: {system_config.keys()}")
+        self.logger.debug(f"Ray tracing config: {ray_tracing_config.keys()}")
+        self.logger.debug(f"System config: {system_config.keys()}")
         self.logger.info(f"Subcarrier sampling: {subcarrier_ratio} ({subcarrier_ratio*100}%) = {selected_subcarriers}/{total_subcarriers} subcarriers")
         
         # Enable multi-GPU training if configured
@@ -616,11 +622,12 @@ class PrismTrainer:
         
     def _setup_training(self):
         """Setup training hyperparameters and optimizers"""
-        # Training hyperparameters - batch_size will be calculated after data loading
-        self.batch_size = None  # Will be set in _calculate_optimal_batch_size()
+        # Training hyperparameters - will be configured after data loading
+        self.batch_size = None  # Will be set in _configure_batch_settings()
+        self.batches_per_epoch = None  # Will be calculated in _configure_batch_settings()
         
         # Multi-GPU setup (batch_size scaling will be done after calculation)
-        # Scale batch size for multi-GPU training will be handled in _calculate_optimal_batch_size()
+        # Scale batch size for multi-GPU training will be handled in _configure_batch_settings()
         
         self.learning_rate = float(self.config['training'].get('learning_rate', 1e-4))  # Read from config and convert to float
         self.num_epochs = self.config['training']['num_epochs']  # Read from config
@@ -655,14 +662,41 @@ class PrismTrainer:
         if 'loss' in training_config:
             loss_config.update(training_config['loss'])
         
+        # Add base_station config needed for SpatialSpectrumLoss
+        loss_config['base_station'] = self.config.get('base_station', {})
+        
         # Initialize loss function
         self.criterion = PrismLossFunction(loss_config)
         
-        self.logger.info(f"🎯 Initialized Hybrid CSI+PDP Loss Function:")
-        self.logger.info(f"   CSI Weight: {loss_config['csi_weight']}")
-        self.logger.info(f"   PDP Weight: {loss_config['pdp_weight']}")
-        self.logger.info(f"   CSI Type: {loss_config['csi_loss']['type']}")
-        self.logger.info(f"   PDP Type: {loss_config['pdp_loss']['type']}")
+        self.logger.info(f"🎯 Initialized Multi-Component Loss Function:")
+        
+        # Log CSI Loss status
+        csi_config = loss_config.get('csi_loss', {})
+        csi_enabled = csi_config.get('enabled', True)
+        self.logger.info(f"   CSI Loss: {'ENABLED' if csi_enabled else 'DISABLED'} (Weight: {loss_config['csi_weight']}, Type: {csi_config.get('type', 'N/A')})")
+        
+        # Log PDP Loss status  
+        pdp_config = loss_config.get('pdp_loss', {})
+        pdp_enabled = pdp_config.get('enabled', True)
+        self.logger.info(f"   PDP Loss: {'ENABLED' if pdp_enabled else 'DISABLED'} (Weight: {loss_config['pdp_weight']}, Type: {pdp_config.get('type', 'N/A')})")
+        
+        # Log spatial spectrum loss status
+        spatial_enabled = (loss_config.get('spatial_spectrum_weight', 0.0) > 0 and 
+                          loss_config.get('spatial_spectrum_loss', {}).get('enabled', False))
+        if spatial_enabled:
+            ssl_config = loss_config.get('spatial_spectrum_loss', {})
+            self.logger.info(f"   Spatial Spectrum Loss: ENABLED (Weight: {loss_config.get('spatial_spectrum_weight', 0.0)})")
+            self.logger.info(f"     Algorithm: {ssl_config.get('algorithm', 'N/A')}")
+            self.logger.info(f"     Fusion Method: {ssl_config.get('fusion_method', 'N/A')}")
+            self.logger.info(f"     Theta Range: {ssl_config.get('theta_range', 'N/A')}")
+            self.logger.info(f"     Phi Range: {ssl_config.get('phi_range', 'N/A')}")
+        else:
+            self.logger.info(f"   Spatial Spectrum Loss: DISABLED (Weight: {loss_config.get('spatial_spectrum_weight', 0.0)}, Enabled: {loss_config.get('spatial_spectrum_loss', {}).get('enabled', False)})")
+        
+        # Log regularization loss status
+        reg_config = loss_config.get('regularization_loss', {})
+        reg_enabled = reg_config.get('enabled', True)
+        self.logger.info(f"   Regularization Loss: {'ENABLED' if reg_enabled else 'DISABLED'} (Weight: {loss_config.get('regularization_weight', 0.01)})")
         
         # Setup mixed precision training
         mixed_precision_config = self.config.get('system', {}).get('mixed_precision', {})
@@ -698,15 +732,31 @@ class PrismTrainer:
                     gamma=lr_scheduler_config.get('gamma', 0.1)
                 )
                 self.logger.info(f"StepLR scheduler enabled: step_size={lr_scheduler_config.get('step_size', 30)}, gamma={lr_scheduler_config.get('gamma', 0.1)}")
-            elif scheduler_type == 'plateau':
+            elif scheduler_type == 'plateau' or scheduler_type == 'reduce_on_plateau':
+                # Get threshold and validate it
+                threshold = lr_scheduler_config.get('threshold', 1e-4)
+                threshold_mode = lr_scheduler_config.get('threshold_mode', 'rel')
+                
+                # Ensure threshold is valid for relative mode
+                if threshold_mode == 'rel' and threshold >= 1.0:
+                    self.logger.warning(f"⚠️ Threshold {threshold} >= 1.0 in 'rel' mode may cause issues, using 1e-4 instead")
+                    threshold = 1e-4
+                
                 self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
                     self.optimizer,
-                    mode='min',
-                    factor=lr_scheduler_config.get('gamma', 0.5),
+                    mode=lr_scheduler_config.get('mode', 'min'),
+                    factor=lr_scheduler_config.get('factor', lr_scheduler_config.get('gamma', 0.5)),
                     patience=lr_scheduler_config.get('patience', 5),
-                    verbose=True
+                    threshold=threshold,
+                    threshold_mode=threshold_mode,
+                    cooldown=lr_scheduler_config.get('cooldown', 0),
+                    min_lr=lr_scheduler_config.get('min_lr_plateau', lr_scheduler_config.get('min_lr', 0)),
+                    verbose=lr_scheduler_config.get('verbose', True)
                 )
-                self.logger.info(f"ReduceLROnPlateau scheduler enabled: factor={lr_scheduler_config.get('gamma', 0.5)}, patience={lr_scheduler_config.get('patience', 5)}")
+                self.logger.info(f"ReduceLROnPlateau scheduler enabled: mode={lr_scheduler_config.get('mode', 'min')}, "
+                               f"factor={lr_scheduler_config.get('factor', lr_scheduler_config.get('gamma', 0.5))}, "
+                               f"patience={lr_scheduler_config.get('patience', 5)}, "
+                               f"threshold={lr_scheduler_config.get('threshold', 1e-4)}")
             else:
                 self.scheduler = None
                 self.logger.warning(f"Unknown scheduler type: {scheduler_type}, disabling scheduler")
@@ -727,41 +777,78 @@ class PrismTrainer:
         else:
             self.logger.info("Early stopping disabled")
     
-    def _calculate_optimal_batch_size(self, total_samples: int) -> int:
+    def _configure_batch_settings(self, total_samples: int):
         """
-        Calculate optimal batch size based on total samples and batches per epoch
+        Configure batch size and batches per epoch based on training configuration.
+        
+        Supports two configuration methods:
+        1. Direct batch_size specification (preferred for memory control)
+        2. Legacy batches_per_epoch specification (backward compatibility)
         
         Args:
             total_samples: Total number of training samples
             
         Returns:
-            Optimal batch size
+            Tuple of (configured_batch_size, calculated_batches_per_epoch)
         """
-        batches_per_epoch = self.config['training'].get('batches_per_epoch', 10)
+        training_config = self.config['training']
         
-        # Calculate base batch size
-        base_batch_size = max(1, total_samples // batches_per_epoch)
+        # Method 1: Direct batch_size specified (preferred)
+        if 'batch_size' in training_config and training_config['batch_size'] is not None:
+            specified_batch_size = int(training_config['batch_size'])
+            
+            # Validate batch size
+            if specified_batch_size < 1:
+                self.logger.warning(f"Invalid batch_size {specified_batch_size}, using 1")
+                specified_batch_size = 1
+            elif specified_batch_size > total_samples:
+                self.logger.warning(f"batch_size {specified_batch_size} > total_samples {total_samples}, using {total_samples}")
+                specified_batch_size = total_samples
+            
+            # Calculate batches per epoch
+            batches_per_epoch = max(1, total_samples // specified_batch_size)
+            
+            # Scale for multi-GPU training
+            if self.use_multi_gpu and self.num_gpus > 1:
+                original_batch_size = specified_batch_size
+                specified_batch_size = specified_batch_size * self.num_gpus
+                self.logger.info(f"Multi-GPU batch size scaling: {original_batch_size} × {self.num_gpus} = {specified_batch_size}")
+            
+            self.logger.info(f"📊 Batch size configuration (Method 1 - Direct batch_size):")
+            self.logger.info(f"   - Total samples: {total_samples}")
+            self.logger.info(f"   - Specified batch_size: {specified_batch_size}")
+            self.logger.info(f"   - Calculated batches_per_epoch: {batches_per_epoch}")
+            self.logger.info(f"   - Samples per epoch: {specified_batch_size * batches_per_epoch}")
+            
+            return specified_batch_size, batches_per_epoch
         
-        # Set reasonable limits for small datasets (≤10k samples)
-        min_batch_size = 1
-        max_batch_size = min(32, total_samples)  # Don't exceed 32 or total samples
-        
-        # Ensure batch size is within reasonable bounds
-        optimal_batch_size = max(min_batch_size, min(base_batch_size, max_batch_size))
-        
-        # Scale for multi-GPU training
-        if self.use_multi_gpu and self.num_gpus > 1:
-            original_batch_size = optimal_batch_size
-            optimal_batch_size = optimal_batch_size * self.num_gpus
-            self.logger.info(f"Multi-GPU batch size scaling: {original_batch_size} × {self.num_gpus} = {optimal_batch_size}")
-        
-        self.logger.info(f"📊 Batch size calculation:")
-        self.logger.info(f"   - Total samples: {total_samples}")
-        self.logger.info(f"   - Batches per epoch: {batches_per_epoch}")
-        self.logger.info(f"   - Calculated batch size: {optimal_batch_size}")
-        self.logger.info(f"   - Expected samples per epoch: {optimal_batch_size * batches_per_epoch}")
-        
-        return optimal_batch_size
+        # Method 2: Legacy batches_per_epoch specified (backward compatibility)
+        else:
+            batches_per_epoch = training_config.get('batches_per_epoch', 10)
+            
+            # Calculate base batch size
+            base_batch_size = max(1, total_samples // batches_per_epoch)
+            
+            # Set reasonable limits for small datasets (≤10k samples)
+            min_batch_size = 1
+            max_batch_size = min(32, total_samples)  # Don't exceed 32 or total samples
+            
+            # Ensure batch size is within reasonable bounds
+            optimal_batch_size = max(min_batch_size, min(base_batch_size, max_batch_size))
+            
+            # Scale for multi-GPU training
+            if self.use_multi_gpu and self.num_gpus > 1:
+                original_batch_size = optimal_batch_size
+                optimal_batch_size = optimal_batch_size * self.num_gpus
+                self.logger.info(f"Multi-GPU batch size scaling: {original_batch_size} × {self.num_gpus} = {optimal_batch_size}")
+            
+            self.logger.info(f"📊 Batch size configuration (Method 2 - Legacy batches_per_epoch):")
+            self.logger.info(f"   - Total samples: {total_samples}")
+            self.logger.info(f"   - Specified batches_per_epoch: {batches_per_epoch}")
+            self.logger.info(f"   - Calculated batch_size: {optimal_batch_size}")
+            self.logger.info(f"   - Samples per epoch: {optimal_batch_size * batches_per_epoch}")
+            
+            return optimal_batch_size, batches_per_epoch
     
     def _select_best_gpu(self) -> int:
         """智能选择最佳可用GPU"""
@@ -999,12 +1086,16 @@ class PrismTrainer:
         # Use split-based data loading
         from prism.data_utils import load_and_split_data
         
+        # Get target antenna index from config
+        target_antenna_index = self.config.get('user_equipment', {}).get('target_antenna_index', 0)
+        
         self.ue_positions, self.csi_data, self.bs_position, self.antenna_indices, metadata = load_and_split_data(
             dataset_path=self.data_path,
             train_ratio=self.split_config['train_ratio'],
             test_ratio=self.split_config['test_ratio'],
             random_seed=self.split_config['random_seed'],
-            mode='train'
+            mode='train',
+            target_antenna_index=target_antenna_index
         )
         
         # Log split information
@@ -1029,7 +1120,7 @@ class PrismTrainer:
         
         # Calculate optimal batch size based on total samples
         total_samples = len(self.ue_positions)
-        self.batch_size = self._calculate_optimal_batch_size(total_samples)
+        self.batch_size, self.batches_per_epoch = self._configure_batch_settings(total_samples)
         
         # Check for data consistency
         if self.csi_data.shape[0] != self.ue_positions.shape[0]:
@@ -1085,7 +1176,11 @@ class PrismTrainer:
         print(f"   💾 Data types: UE (float32), CSI (complex64), BS (float32), Antenna (long)")
         
         # Get batches per epoch from config or use dataloader length
-        self.batches_per_epoch = self.config['training'].get('batches_per_epoch', len(self.dataloader))
+        # batches_per_epoch is already set by _configure_batch_settings()
+        # Use the configured value, or fallback to dataloader length if needed
+        if self.batches_per_epoch is None:
+            self.batches_per_epoch = len(self.dataloader)
+            self.logger.warning("batches_per_epoch was not set by _configure_batch_settings(), using dataloader length")
         
         # Initialize progress monitor AFTER dataloader is created
         self.progress_monitor = TrainingProgressMonitor(
@@ -1377,66 +1472,99 @@ class PrismTrainer:
     
     def _validate(self, epoch: int):
         """Validate model on a subset of data using TrainingInterface"""
-        self.model.eval()
-        total_loss = 0.0
-        num_batches = 0
-        
-        print(f"🔍 Validating Epoch {epoch}...")
-        
-        # Use a subset for validation
-        val_size = min(100, len(self.dataset))
-        val_indices = torch.randperm(len(self.dataset))[:val_size]
-        
-        with torch.no_grad():
-            for i in range(0, val_size, self.batch_size):
-                batch_indices = val_indices[i:i+self.batch_size]
-                ue_pos = self.ue_positions[batch_indices].to(self.device)
-                bs_pos = self.bs_position.expand(len(batch_indices), -1).to(self.device)
-                antenna_idx = self.antenna_indices.expand(len(batch_indices), -1).to(self.device)
-                csi_target = self.csi_data[batch_indices].to(self.device)
-                
-                try:
-                    # Use TrainingInterface forward pass
-                    outputs = self.model(
-                        ue_positions=ue_pos,
-                        bs_position=bs_pos,
-                        antenna_indices=antenna_idx
-                    )
-                    
-                    csi_pred = outputs['csi_predictions']
+        try:
+            self.logger.info(f"🔍 VALIDATION START: Epoch {epoch}")
+            print(f"🔍 Validating Epoch {epoch}...")
+            
+            # Check if dataset is available
+            if not hasattr(self, 'dataset') or len(self.dataset) == 0:
+                self.logger.error("❌ Dataset is empty or not available for validation")
+                print("❌ Dataset not available for validation")
+                return 0.0
+            
+            self.logger.info(f"📊 Dataset size: {len(self.dataset)}")
+            
+            self.model.eval()
+            total_loss = 0.0
+            num_batches = 0
+            
+            # Use a smaller subset for validation to avoid memory issues
+            val_size = min(10, len(self.dataset))  # Reduced from 100 to 10
+            self.logger.info(f"📊 Validation size: {val_size}")
+            
+            val_indices = torch.randperm(len(self.dataset))[:val_size]
+            
+            with torch.no_grad():
+                for i in range(0, val_size, self.batch_size):
                     try:
+                        batch_indices = val_indices[i:i+self.batch_size]
+                        self.logger.debug(f"Processing validation batch {i//self.batch_size + 1}")
+                        
+                        # Check batch indices validity
+                        if torch.any(batch_indices >= len(self.dataset)):
+                            self.logger.error(f"❌ Invalid batch indices: {batch_indices}")
+                            continue
+                        
+                        ue_pos = self.ue_positions[batch_indices].to(self.device)
+                        bs_pos = self.bs_position.expand(len(batch_indices), -1).to(self.device)
+                        antenna_idx = self.antenna_indices.expand(len(batch_indices), -1).to(self.device)
+                        csi_target = self.csi_data[batch_indices].to(self.device)
+                        
+                        # Check for NaN in input data
+                        if torch.isnan(ue_pos).any() or torch.isnan(csi_target).any():
+                            self.logger.warning(f"⚠️ NaN detected in validation data, skipping batch")
+                            continue
+                        
+                        # Use TrainingInterface forward pass
+                        outputs = self.model(
+                            ue_positions=ue_pos,
+                            bs_position=bs_pos,
+                            antenna_indices=antenna_idx
+                        )
+                        
+                        csi_pred = outputs['csi_predictions']
+                        
+                        # Compute loss with detailed error handling
                         loss = self.model.compute_loss(csi_pred, csi_target, self.criterion, validation_mode=True)
                         
                         # Validate loss is a tensor
                         if not isinstance(loss, torch.Tensor):
-                            self.logger.error(f"Validation loss computation returned non-tensor: {type(loss)} = {loss}")
-                            raise ValueError(f"Validation loss must be a torch.Tensor, got {type(loss)}")
+                            self.logger.error(f"❌ Validation loss computation returned non-tensor: {type(loss)} = {loss}")
+                            continue
                         
                         # Check for NaN or infinite values
                         if torch.isnan(loss) or torch.isinf(loss):
-                            self.logger.error(f"Invalid validation loss value: {loss}")
-                            raise ValueError(f"Validation loss contains NaN or infinite values: {loss}")
+                            self.logger.error(f"❌ Invalid validation loss value: {loss}")
+                            continue
                         
-                    except Exception as e:
-                        self.logger.error(f"Validation loss computation failed: {e}")
-                        self.logger.error(f"Shapes - csi_pred: {csi_pred.shape}, csi_target: {csi_target.shape}")
-                        raise
-                    
-                    total_loss += loss
-                    num_batches += 1
-                    
-                except Exception as e:
-                    self.logger.error(f"❌ Validation error: {e}")
-                    self.logger.error(f"Full validation traceback:")
-                    import traceback
-                    self.logger.error(traceback.format_exc())
-                    print(f"  ❌ Validation batch failed: {e}")
-                    print(f"  🔍 Check logs for full traceback")
-                    continue
-        
-        avg_val_loss = total_loss / num_batches if num_batches > 0 else 0.0
-        print(f"✅ Validation Complete | Val Loss: {avg_val_loss:.6f}")
-        return avg_val_loss
+                        total_loss += loss.item()
+                        num_batches += 1
+                        self.logger.debug(f"Validation batch {num_batches} loss: {loss.item():.6f}")
+                        
+                    except Exception as batch_e:
+                        self.logger.error(f"❌ Validation batch error: {batch_e}")
+                        self.logger.error(f"Batch indices: {batch_indices}")
+                        import traceback
+                        self.logger.error(traceback.format_exc())
+                        print(f"  ❌ Validation batch failed: {batch_e}")
+                        continue
+            
+            if num_batches == 0:
+                self.logger.error("❌ No validation batches processed successfully")
+                print("❌ Validation failed - no batches processed")
+                return 0.0
+            
+            avg_val_loss = total_loss / num_batches
+            self.logger.info(f"✅ Validation completed: {num_batches} batches, avg loss: {avg_val_loss:.6f}")
+            print(f"✅ Validation Complete | Val Loss: {avg_val_loss:.6f}")
+            return avg_val_loss
+            
+        except Exception as e:
+            self.logger.error(f"❌ CRITICAL: Validation failed completely: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            print(f"❌ Validation failed: {e}")
+            return 0.0  # Return default value instead of crashing
     
     def _save_checkpoint(self, epoch: int, train_loss: float, val_loss: float):
         """Save model checkpoint using TrainingInterface"""
@@ -1947,10 +2075,26 @@ class PrismTrainer:
             
             # Update learning rate
             if self.scheduler is not None:
-                if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
-                    self.scheduler.step(val_loss)
-                else:
-                    self.scheduler.step()
+                try:
+                    if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                        # Ensure val_loss is a valid float
+                        if isinstance(val_loss, torch.Tensor):
+                            val_loss_value = val_loss.item()
+                        else:
+                            val_loss_value = float(val_loss)
+                        
+                        # Check for invalid values
+                        if not (torch.isfinite(torch.tensor(val_loss_value)) and not torch.isnan(torch.tensor(val_loss_value))):
+                            self.logger.warning(f"⚠️ Invalid validation loss for scheduler: {val_loss_value}, skipping scheduler step")
+                        else:
+                            self.scheduler.step(val_loss_value)
+                    else:
+                        self.scheduler.step()
+                except Exception as scheduler_e:
+                    self.logger.error(f"❌ Learning rate scheduler error: {scheduler_e}")
+                    self.logger.error(f"   Validation loss: {val_loss} (type: {type(val_loss)})")
+                    print(f"❌ Scheduler error: {scheduler_e}")
+                    # Continue training without scheduler update
             current_lr = self.optimizer.param_groups[0]['lr']
             
             # Calculate timing

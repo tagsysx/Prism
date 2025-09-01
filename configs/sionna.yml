@@ -1,5 +1,18 @@
 # Configuration for Prism: Neural Network-Based Electromagnetic Ray Tracing System
 # Cleaned and reorganized configuration with clear separation of concerns
+#
+# ⚠️  IMPORTANT: UE Antenna Configuration
+# The system processes only ONE UE antenna at a time for computational efficiency.
+# 
+# Configuration parameters:
+# - user_equipment.target_antenna_index: Which antenna to extract from dataset (0-based index: 0, 1, 2, or 3)
+#
+# The dataset (data/sionna/P300/P300.h5) contains 4 UE antennas (indices 0-3).
+# The data loader extracts only the specified antenna, reducing memory usage.
+# Final CSI shape: (samples, subcarriers, 1, bs_antennas)
+#
+# Example: To use the second antenna from dataset:
+# - user_equipment.target_antenna_index: 1  # Extract antenna index 1
 
 
 # Neural Network Configuration
@@ -22,7 +35,7 @@ neural_networks:
     hidden_dim: 256               # Hidden layer dimension
     num_hidden_layers: 3          # Number of hidden layers
     output_dim: 408               # Number of subcarriers
-    num_ue_antennas: 1            # Number of UE antennas (reduced for memory optimization)
+    num_ue_antennas: 1            # Number of UE antennas (always 1 for single antenna processing)
     activation: 'relu'            # Activation function
     
   # Antenna Codebook
@@ -36,21 +49,22 @@ neural_networks:
     input_dim: 64                 # Antenna embedding dimension
     hidden_dim: 128               # Hidden layer dimension
     num_hidden_layers: 2          # Number of hidden layers
-    output_dim: 162               # A × B directions (18 × 9 = 162)
+    output_dim: 648               # A × B directions (36 × 18 = 648) - must match angular_sampling.total_directions
     activation: 'relu'            # Activation function
     dropout_rate: 0.1             # Dropout rate for regularization
     max_chunk_size: 256           # Maximum neural network chunk size for memory optimization
     
   # Radiance Network
   radiance_network:
-    ue_pos_dim: 3                 # UE position dimension
-    view_dir_dim: 3               # Viewing direction dimension
+    ue_pos_dim: 63                # UE position dimension (IPE encoded: 3 + 2*10*3 = 63)
+    view_dir_dim: 63              # Viewing direction dimension (IPE encoded: 3 + 2*10*3 = 63)
     spatial_feature_dim: 128      # Spatial feature dimension
     antenna_embedding_dim: 64     # Antenna embedding dimension
     hidden_dim: 256               # Hidden layer dimension
     num_hidden_layers: 4          # Number of hidden layers
     output_dim: 408               # Number of subcarriers
-    num_ue_antennas: 1            # Number of UE antennas (reduced for memory optimization)
+    num_ue_antennas: 1            # Number of UE antennas (always 1 for single antenna processing)
+
     activation: 'relu'            # Activation function
 
 # Base Station Configuration
@@ -80,16 +94,17 @@ base_station:
 
 # User Equipment Configuration
 user_equipment:
-  num_ue_antennas: 1                 # Number of UE antennas per device (reduced for memory optimization)
+  target_antenna_index: 0            # Which UE antenna to extract from dataset (0-based index: 0, 1, 2, or 3)
+                                     # Dataset has 4 antennas, but we extract and process only one
   antenna_config: '1x64'             # 1 UE antenna per device, 64 BS antennas
-  position_range: [-150.0, 150.0]    # UE position range in meters
+  position_range: [-250.0, 250.0]    # UE position range in meters
   height_range: [1.0, 2.0]           # UE height range in meters
 
 # Ray Tracing Configuration
 ray_tracing:
   # Physical parameters
   max_ray_length: 200.0              # Maximum ray length in meters
-  signal_threshold: 1e-6             # Signal strength threshold for early termination
+  signal_threshold: 0.000001         # Signal strength threshold for early termination
   enable_early_termination: true     # Enable early termination optimization
   
   # Scene configuration (shared by training and testing)
@@ -101,12 +116,12 @@ ray_tracing:
   angular_sampling:
     azimuth_divisions: 36            # Number of azimuth divisions (0° to 360°)
     elevation_divisions: 18           # Number of elevation divisions (-90° to +90°)
-    total_directions: 648            # 18 × 9 = 162 angle combinations
+    total_directions: 648            # 36 × 18 = 648 angle combinations
     top_k_directions: 32              # Number of top-K directions to select (increased for better spatial resolution)
   
   radial_sampling:
-    num_sampling_points: 16           # Number of sampling points per ray (memory optimized)
-    resampled_points: 16              # Second stage: importance-based resampled points (memory optimized)
+    num_sampling_points: 8           # Number of sampling points per ray (memory optimized)
+    resampled_points: 8              # Second stage: importance-based resampled points (memory optimized)
   
   subcarrier_sampling:
     sampling_ratio: 0.8              # Ratio of subcarriers to select (80%) - improved frequency domain learning
@@ -153,10 +168,16 @@ system:
 # Training Configuration
 training:
   # Training parameters
-  learning_rate: 2e-4                # Initial learning rate (increased for faster convergence)
-  num_epochs: 5                    # Number of training epochs (increased for better learning)
-  batches_per_epoch: 40              # Number of batches per epoch (1 sample per batch for memory optimization)
-  gradient_accumulation_steps: 4      # Accumulate gradients over 4 steps (effective batch size = 4)
+  learning_rate: 0.00015              # Initial learning rate (optimized for stable convergence)
+  num_epochs: 2                    # Number of training epochs (increased for better learning)
+  batch_size: 4                      # Number of samples per batch (direct control)
+  # batches_per_epoch will be auto-calculated as: total_samples / batch_size
+  
+  # Method 2: Legacy batches per epoch (for backward compatibility)
+  # batches_per_epoch: 40              # Number of batches per epoch (batch_size auto-calculated)
+  # Note: If both are specified, batch_size takes precedence
+  
+  gradient_accumulation_steps: 4      # Accumulate gradients over 4 steps (effective batch size = batch_size × 4)
   
   # Checkpoint and recovery
   auto_checkpoint: true              # Enable automatic checkpointing
@@ -168,44 +189,66 @@ training:
     # Overall loss weights
     csi_weight: 0.7                  # Weight for CSI prediction loss
     pdp_weight: 300.0                # Weight for PDP loss (increased to balance scale difference)
+    spatial_spectrum_weight: 0.1     # Weight for spatial spectrum loss (enabled)
     regularization_weight: 0.01      # Weight for regularization terms
     
     # CSI Loss Configuration
     csi_loss:
-      type: 'hybrid'                 # Loss type: 'mse', 'mae', 'complex_mse', 'magnitude_phase', 'correlation', 'hybrid'
+      enabled: true                  # Enable/disable CSI loss
+      type: 'hybrid'                 # Loss type: 'mse', 'mae', 'complex_mse', 'magnitude_phase', 'hybrid' (correlation removed)
       phase_weight: 2.0              # Weight for phase component (increased for RF/beamforming applications)
       magnitude_weight: 1.0          # Weight for magnitude component (maintained)
       cmse_weight: 0.5               # Weight for CMSE component (reduced to balance)
-      correlation_weight: 0.5        # Weight for correlation component (reduced to balance)
+      # correlation_weight removed - correlation loss disabled due to incorrect implementation
     
     # PDP Loss Configuration  
     pdp_loss:
-      type: 'hybrid'                 # Loss type: 'mse', 'correlation', 'delay', 'hybrid'
+      enabled: true                  # Enable/disable PDP loss
+      type: 'hybrid'                 # Loss type: 'mse', 'delay', 'hybrid' (correlation removed)
       fft_size: 512                 # FFT size for PDP computation
       normalize_pdp: true            # Whether to normalize PDPs before comparison
-      mse_weight: 0.5                # Weight for MSE component in hybrid loss
-      correlation_weight: 0.3        # Weight for correlation component in hybrid loss
-      delay_weight: 0.2              # Weight for delay component in hybrid loss
+      # mse_weight and delay_weight now hardcoded in loss function (0.7, 0.3)
+      # correlation_weight removed - correlation loss disabled due to incorrect implementation
+    
+    # Spatial Spectrum Loss Configuration
+    spatial_spectrum_loss:
+      enabled: false                  # Enable/disable spatial spectrum loss (enabled)
+      weight: 0.1                    # Weight for spatial spectrum loss component
+      algorithm: 'bartlett'          # Spatial spectrum estimation algorithm ('bartlett', 'capon', 'music')
+      fusion_method: 'average'       # Multi-subcarrier fusion method ('average', 'max')
+      theta_range: [-60.0, 5.0, 60.0]   # Elevation angle range [min, step, max] in degrees (reduced resolution)
+      phi_range: [0.0, 10.0, 360.0]     # Azimuth angle range [min, step, max] in degrees (reduced resolution)
+    
+    # Regularization Loss Configuration
+    regularization_loss:
+      enabled: true                  # Enable/disable regularization loss
+
   
   # Optimizer
   optimizer: 'adam'                  # Optimizer type
   optimizer_params:
     beta1: 0.9                       # Adam beta1 parameter
     beta2: 0.999                     # Adam beta2 parameter
-    weight_decay: 1e-5               # Weight decay for regularization
+    weight_decay: 0.00001            # Weight decay for regularization
   
   # Learning rate scheduling
   lr_scheduler:
     enabled: true                    # Enable learning rate scheduling
-    type: 'step'                     # Scheduler type
-    step_size: 30                    # Step size for StepLR
-    gamma: 0.1                       # Multiplicative factor for LR decay
+    type: 'reduce_on_plateau'        # Scheduler type: adaptive based on validation loss
+    mode: 'min'                      # Monitor validation loss minimum
+    factor: 0.7                      # Reduce LR by 30% each time (more conservative)
+    patience: 4                      # Wait 4 epochs before reducing LR (more responsive)
+    threshold: 0.0001                # Minimum improvement threshold
+    threshold_mode: 'rel'            # Relative threshold mode
+    cooldown: 1                      # Cooldown period after LR reduction
+    min_lr_plateau: 0.000005         # Minimum learning rate limit
+    verbose: true                    # Print LR reduction messages
   
   # Early stopping
   early_stopping:
     enabled: true                    # Enable early stopping
     patience: 10                     # Number of epochs to wait for improvement
-    min_delta: 1e-6                  # Minimum change to qualify as improvement
+    min_delta: 0.000001              # Minimum change to qualify as improvement
     restore_best_weights: true       # Restore best weights on early stopping
   
 
@@ -238,7 +281,7 @@ testing:
 # Input Configuration
 input:
   # Single dataset configuration for train/test split
-  dataset_path: "data/sionna/sionna_5g_simulation.h5"    # Single HDF5 file containing all data
+  dataset_path: "data/sionna/P300/P300.h5"    # P300 dataset file (300 positions)
   
   # Train/test split configuration
   split:

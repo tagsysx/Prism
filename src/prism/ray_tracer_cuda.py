@@ -741,23 +741,9 @@ class CUDARayTracer(RayTracer):
         # Step 6: Vectorized computation 
         signal_contributions = attenuation_exp * local_absorption * radiation_expanded  # (K, N_ue)
         
-        # Step 7: Apply importance sampling correction if available
-        if importance_weights is not None and len(importance_weights) == K:
-            # CORRECTED: Importance weights represent the actual contribution weights
-            # from the discrete radiance field formula, not sampling probabilities.
-            # The resampling process already selected points based on these weights,
-            # so we need to apply Monte Carlo correction for the biased sampling.
-            
-            # Get the original uniform sampling probability (before resampling)
-            uniform_prob = 1.0 / self.uniform_samples  # Each point had equal probability originally
-            
-            # Current sampling probability after importance resampling
-            # importance_weights are normalized, so they represent p(x_i) after resampling
-            current_sampling_prob = importance_weights.unsqueeze(1) + 1e-8  # (K, 1)
-            
-            # Monte Carlo correction: f(x_i) * (uniform_prob / current_prob)
-            mc_correction = uniform_prob / current_sampling_prob  # (K, 1)
-            signal_contributions = signal_contributions * mc_correction  # (K, N_ue)
+        # Step 7: Monte Carlo correction removed - direct integration without correction
+        # The importance sampling has already selected the most relevant points,
+        # and we integrate directly without probability correction
         
         # Step 8: Integration
         integrated_signals = torch.sum(signal_contributions, dim=0)  # (N_ue,)

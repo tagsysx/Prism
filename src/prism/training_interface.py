@@ -59,6 +59,10 @@ class PrismTrainingInterface(nn.Module):
         self.system_config = system_config or {}
         self.user_equipment_config = user_equipment_config or {}
         
+        # Extract target antenna index from user equipment config
+        self.target_antenna_index = self.user_equipment_config.get('target_antenna_index', 0)
+        logger.info(f"🎯 Target UE antenna index: {self.target_antenna_index}")
+        
         # Set device first - needed for ray tracer creation
         self.device = device if device is not None else torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         
@@ -351,8 +355,8 @@ class PrismTrainingInterface(nn.Module):
         
         # Extract dimensions
         batch_size = ue_positions.shape[0]
-        # Get UE antenna configuration from PrismNetwork
-        num_ue_antennas = self.prism_network.num_ue_antennas
+        # Single UE antenna processing (always 1 after data extraction)
+        num_ue_antennas = 1
         num_bs_antennas = antenna_indices.shape[1]
         num_subcarriers = self.prism_network.num_subcarriers
         num_selected = int(num_subcarriers * self.subcarrier_sampling_ratio)
@@ -875,8 +879,10 @@ class PrismTrainingInterface(nn.Module):
             logger.info(f"   Predictions UE antennas: {pred_ue_antennas}")
             logger.info(f"   Targets UE antennas: {target_ue_antennas}")
             
-            if target_ue_antennas > pred_ue_antennas:
-                # Use only the first N UE antennas from targets to match predictions
+            # Since we now extract single antenna during data loading, this should rarely happen
+            # But keep the logic for backward compatibility
+            if target_ue_antennas > pred_ue_antennas and pred_ue_antennas == 1:
+                # Use only the first UE antenna from targets to match predictions
                 targets = targets[:, :, :pred_ue_antennas, :]
                 logger.info(f"   ✅ Adjusted targets to use first {pred_ue_antennas} UE antenna(s)")
                 logger.info(f"   New targets shape: {targets.shape}")
@@ -988,14 +994,19 @@ class PrismTrainingInterface(nn.Module):
             logger.debug(f"Subcarrier sampling ratio: {self.subcarrier_sampling_ratio}")
             logger.debug(f"Expected selected subcarriers per antenna-UE pair: {int(self.prism_network.num_subcarriers * self.subcarrier_sampling_ratio)}")
             
-            # Compute hybrid CSI+PDP loss using PrismLossFunction
-            predictions_dict = {'csi': traced_predictions}
-            targets_dict = {'csi': traced_targets}
+            # For spatial spectrum loss, we need full 4D CSI tensors, not individual subcarrier values
+            # So we pass the original predictions and targets, and let the loss function handle subcarrier selection
+            predictions_dict = {'csi': predictions}
+            targets_dict = {'csi': targets}
+            
+            # Also pass the traced values for backward compatibility with other loss components
+            predictions_dict['traced_csi'] = traced_predictions
+            targets_dict['traced_csi'] = traced_targets
             
             loss, loss_components = loss_function(predictions_dict, targets_dict)
             
             # Log detailed loss components
-            logger.info(f"🔍 Hybrid CSI+PDP Loss computed:")
+            logger.info(f"🔍 Hybrid CSI+PDP+Spatial Loss computed:")
             logger.info(f"   Total Loss: {loss.item():.6f}")
             if 'csi_loss' in loss_components:
                 csi_raw = loss_components['csi_loss']
@@ -1005,6 +1016,10 @@ class PrismTrainingInterface(nn.Module):
                 pdp_raw = loss_components['pdp_loss']
                 pdp_weighted = loss_function.pdp_weight * pdp_raw
                 logger.info(f"   PDP Loss: {pdp_raw:.6f} (raw) → {pdp_weighted:.6f} (weighted × {loss_function.pdp_weight})")
+            if 'spatial_spectrum_loss' in loss_components:
+                spatial_raw = loss_components['spatial_spectrum_loss']
+                spatial_weighted = loss_function.spatial_spectrum_weight * spatial_raw
+                logger.info(f"   Spatial Spectrum Loss: {spatial_raw:.6f} (raw) → {spatial_weighted:.6f} (weighted × {loss_function.spatial_spectrum_weight})")
             
             # Final validation of computed loss
             if torch.isnan(loss) or torch.isinf(loss):

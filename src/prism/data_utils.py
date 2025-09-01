@@ -17,7 +17,8 @@ def load_and_split_data(
     train_ratio: float = 0.8,
     test_ratio: float = 0.2,
     random_seed: int = 42,
-    mode: str = 'train'
+    mode: str = 'train',
+    target_antenna_index: int = 0
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, Any]]:
     """
     Load data from HDF5 file and split into train/test sets.
@@ -28,15 +29,18 @@ def load_and_split_data(
         test_ratio: Ratio of data to use for testing (0.0 to 1.0)
         random_seed: Random seed for reproducible splits
         mode: 'train' or 'test' - which split to return
+        target_antenna_index: Which UE antenna to extract (0-based index)
         
     Returns:
         Tuple of (ue_positions, csi_data, bs_position, antenna_indices, metadata)
+        Note: csi_data will have shape (samples, subcarriers, 1, bs_antennas) for the selected antenna
         
     Note:
         train_ratio + test_ratio can be < 1.0 to use only a subset of data
     """
     logger.info(f"Loading dataset from {dataset_path}")
     logger.info(f"Split configuration: train_ratio={train_ratio}, test_ratio={test_ratio}, seed={random_seed}")
+    logger.info(f"Target UE antenna index: {target_antenna_index}")
     
     # Validate parameters
     if train_ratio < 0 or train_ratio > 1:
@@ -80,6 +84,19 @@ def load_and_split_data(
     # Validate data consistency
     if csi_data.shape[0] != num_samples:
         raise ValueError(f"Data mismatch: {csi_data.shape[0]} CSI samples vs {num_samples} UE positions")
+    
+    # Validate target antenna index
+    num_ue_antennas = csi_data.shape[2] if len(csi_data.shape) > 2 else 1
+    if target_antenna_index >= num_ue_antennas:
+        raise ValueError(f"target_antenna_index ({target_antenna_index}) >= available UE antennas ({num_ue_antennas})")
+    
+    logger.info(f"Dataset has {num_ue_antennas} UE antennas, extracting antenna {target_antenna_index}")
+    
+    # Extract only the target antenna data to reduce memory usage
+    # Original shape: (samples, subcarriers, ue_antennas, bs_antennas)
+    # New shape: (samples, subcarriers, 1, bs_antennas)
+    csi_data = csi_data[:, :, target_antenna_index:target_antenna_index+1, :]
+    logger.info(f"Extracted CSI data shape: {csi_data.shape}")
     
     # Set random seed for reproducible splits
     np.random.seed(random_seed)

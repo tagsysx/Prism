@@ -16,8 +16,11 @@ All loss functions are designed to work with PyTorch tensors and support backpro
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union, List
 import numpy as np
+import matplotlib.pyplot as plt
+import os
+from pathlib import Path
 
 
 # Default configuration for loss functions
@@ -26,19 +29,18 @@ DEFAULT_LOSS_CONFIG = {
     'pdp_weight': 0.3,
     'regularization_weight': 0.01,
     'csi_loss': {
-        'type': 'hybrid',  # 'mse', 'mae', 'complex_mse', 'magnitude_phase', 'correlation', 'hybrid'
+        'type': 'hybrid',  # 'mse', 'mae', 'complex_mse', 'magnitude_phase', 'hybrid' (correlation disabled)
         'phase_weight': 1.0,
         'magnitude_weight': 1.0,
-        'cmse_weight': 1.0,
-        'correlation_weight': 1.0
+        'cmse_weight': 1.0
+        # correlation_weight removed - correlation loss disabled
     },
     'pdp_loss': {
-        'type': 'hybrid',  # 'mse', 'correlation', 'delay', 'hybrid'
+        'type': 'hybrid',  # 'mse', 'delay', 'hybrid' (correlation disabled)
         'fft_size': 1024,
-        'normalize_pdp': True,
-        'mse_weight': 0.5,
-        'correlation_weight': 0.3,
-        'delay_weight': 0.2
+        'normalize_pdp': True
+        # mse_weight and delay_weight now hardcoded in hybrid loss (0.7, 0.3)
+        # correlation_weight removed - correlation loss disabled
     }
 }
 
@@ -52,25 +54,22 @@ class CSILoss(nn.Module):
     """
     
     def __init__(self, loss_type: str = 'mse', phase_weight: float = 1.0, 
-                 magnitude_weight: float = 1.0, cmse_weight: float = 1.0,
-                 correlation_weight: float = 1.0):
+                 magnitude_weight: float = 1.0, cmse_weight: float = 1.0):
         """
         Initialize CSI loss function
         
         Args:
-            loss_type: Type of loss ('mse', 'mae', 'complex_mse', 'magnitude_phase', 
-                      'correlation', 'hybrid')
+            loss_type: Type of loss ('mse', 'mae', 'complex_mse', 'magnitude_phase', 'hybrid')
+                      Note: 'correlation' type is disabled due to incorrect implementation
             phase_weight: Weight for phase component in combined losses
             magnitude_weight: Weight for magnitude component in combined losses
             cmse_weight: Weight for CMSE component in hybrid loss
-            correlation_weight: Weight for correlation component in hybrid loss
         """
         super(CSILoss, self).__init__()
         self.loss_type = loss_type
         self.phase_weight = phase_weight
         self.magnitude_weight = magnitude_weight
         self.cmse_weight = cmse_weight
-        self.correlation_weight = correlation_weight
         
     def forward(self, predicted_csi: torch.Tensor, target_csi: torch.Tensor, 
                 mask: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -128,27 +127,20 @@ class CSILoss(nn.Module):
             
             loss = self.magnitude_weight * magnitude_loss + self.phase_weight * phase_loss
             
-        elif self.loss_type == 'correlation':
-            # Complex correlation loss (1 - |correlation|)
-            correlation = self._complex_correlation(predicted_csi, target_csi)
-            loss = 1.0 - torch.abs(correlation)
+
             
         elif self.loss_type == 'hybrid':
-            # Comprehensive Hybrid CSI Loss: CMSE + Correlation + Magnitude + Phase
+            # Modified Hybrid CSI Loss: CMSE + Magnitude + Phase (removed correlation)
             # 1. Complex MSE Loss
             diff = predicted_csi - target_csi
             cmse_loss = torch.mean(torch.abs(diff)**2)
             
-            # 2. Correlation Loss
-            correlation = self._complex_correlation(predicted_csi, target_csi)
-            corr_loss = 1.0 - torch.abs(correlation)
-            
-            # 3. Magnitude Loss
+            # 2. Magnitude Loss
             pred_mag = torch.abs(predicted_csi)
             target_mag = torch.abs(target_csi)
             magnitude_loss = F.mse_loss(pred_mag, target_mag)
             
-            # 4. Phase Loss (handle zero magnitudes)
+            # 3. Phase Loss (handle zero magnitudes)
             pred_phase = torch.angle(predicted_csi + 1e-8)
             target_phase = torch.angle(target_csi + 1e-8)
             
@@ -156,9 +148,8 @@ class CSILoss(nn.Module):
             phase_diff = torch.remainder(pred_phase - target_phase + np.pi, 2*np.pi) - np.pi
             phase_loss = torch.mean(phase_diff**2)
             
-            # Combine all four loss components
+            # Combine three loss components (removed correlation)
             loss = (self.cmse_weight * cmse_loss + 
-                   self.correlation_weight * corr_loss +
                    self.magnitude_weight * magnitude_loss + 
                    self.phase_weight * phase_loss)
             
@@ -167,37 +158,8 @@ class CSILoss(nn.Module):
         
         return loss
     
-    def _complex_correlation(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """
-        Compute complex correlation coefficient between two complex tensors
-        
-        Args:
-            x: First complex tensor
-            y: Second complex tensor
-            
-        Returns:
-            correlation: Complex correlation coefficient
-        """
-        # Flatten tensors for correlation computation
-        # Use .reshape() instead of .view() to handle non-contiguous tensors
-        x_flat = x.reshape(-1)
-        y_flat = y.reshape(-1)
-        
-        # Compute means
-        x_mean = torch.mean(x_flat)
-        y_mean = torch.mean(y_flat)
-        
-        # Center the data
-        x_centered = x_flat - x_mean
-        y_centered = y_flat - y_mean
-        
-        # Compute correlation
-        numerator = torch.mean(x_centered * torch.conj(y_centered))
-        denominator = torch.sqrt(torch.mean(torch.abs(x_centered)**2) * 
-                                torch.mean(torch.abs(y_centered)**2))
-        
-        correlation = numerator / (denominator + 1e-8)
-        return correlation
+    # _complex_correlation method removed - was incorrectly implemented
+    # (mixed all subcarriers and antennas together)
 
 
 class PDPLoss(nn.Module):
@@ -209,26 +171,20 @@ class PDPLoss(nn.Module):
     """
     
     def __init__(self, loss_type: str = 'hybrid', fft_size: int = 1024,
-                 normalize_pdp: bool = True, mse_weight: float = 0.5,
-                 correlation_weight: float = 0.3, delay_weight: float = 0.2):
+                 normalize_pdp: bool = True):
         """
         Initialize PDP loss function
         
         Args:
-            loss_type: Type of PDP loss ('mse', 'correlation', 'delay', 'hybrid')
+            loss_type: Type of PDP loss ('mse', 'delay', 'hybrid')
+                      Note: 'correlation' type is disabled due to incorrect implementation
             fft_size: FFT size for PDP computation
             normalize_pdp: Whether to normalize PDPs before comparison
-            mse_weight: Weight for MSE component in hybrid loss
-            correlation_weight: Weight for correlation component in hybrid loss
-            delay_weight: Weight for delay component in hybrid loss
         """
         super(PDPLoss, self).__init__()
         self.loss_type = loss_type
         self.fft_size = fft_size
         self.normalize_pdp = normalize_pdp
-        self.mse_weight = mse_weight
-        self.correlation_weight = correlation_weight
-        self.delay_weight = delay_weight
         
     def forward(self, predicted_csi: torch.Tensor, target_csi: torch.Tensor) -> torch.Tensor:
         """
@@ -262,23 +218,21 @@ class PDPLoss(nn.Module):
             # PDP MSE Loss
             loss = F.mse_loss(pdp_pred, pdp_target)
             
-        elif self.loss_type == 'correlation':
-            # PDP Correlation Loss
-            loss = self._compute_pdp_correlation_loss(pdp_pred, pdp_target)
+
             
         elif self.loss_type == 'delay':
             # Dominant Path Delay Loss
             loss = self._compute_delay_loss(pdp_pred, pdp_target)
             
         elif self.loss_type == 'hybrid':
-            # Hybrid PDP Loss: MSE + Correlation + Delay
+            # Modified Hybrid PDP Loss: MSE + Delay (removed correlation)
             mse_loss = F.mse_loss(pdp_pred, pdp_target)
-            corr_loss = self._compute_pdp_correlation_loss(pdp_pred, pdp_target)
             delay_loss = self._compute_delay_loss(pdp_pred, pdp_target)
             
-            loss = (self.mse_weight * mse_loss + 
-                   self.correlation_weight * corr_loss + 
-                   self.delay_weight * delay_loss)
+            # Rebalance weights since we removed correlation component
+            # Original: mse_weight=0.5, correlation_weight=0.3, delay_weight=0.2
+            # New: mse_weight=0.7, delay_weight=0.3 (maintain relative importance)
+            loss = (0.7 * mse_loss + 0.3 * delay_loss)
             
         else:
             raise ValueError(f"Unknown PDP loss type: {self.loss_type}")
@@ -344,29 +298,8 @@ class PDPLoss(nn.Module):
             return pdp
         return pdp / max_val
     
-    def _compute_pdp_correlation_loss(self, pdp_pred: torch.Tensor, 
-                                     pdp_target: torch.Tensor) -> torch.Tensor:
-        """
-        Compute correlation loss for PDPs
-        """
-        # Compute correlation coefficient
-        pred_mean = torch.mean(pdp_pred)
-        target_mean = torch.mean(pdp_target)
-        
-        pred_centered = pdp_pred - pred_mean
-        target_centered = pdp_target - target_mean
-        
-        numerator = torch.sum(pred_centered * target_centered)
-        denominator = torch.sqrt(torch.sum(pred_centered ** 2) * 
-                                torch.sum(target_centered ** 2))
-        
-        if denominator < 1e-8:
-            return torch.tensor(1.0, device=pdp_pred.device)
-        
-        correlation = numerator / denominator
-        
-        # Return 1 - |correlation|
-        return 1.0 - torch.abs(correlation)
+    # _compute_pdp_correlation_loss method removed - was incorrectly implemented
+    # (mixed all delay bins together)
     
     def _compute_delay_loss(self, pdp_pred: torch.Tensor, 
                            pdp_target: torch.Tensor) -> torch.Tensor:
@@ -415,189 +348,505 @@ class SpatialSpectrumLoss(nn.Module):
     """
     Spatial Spectrum Loss Functions
     
-    Provides loss functions for comparing spatial spectrum matrices,
-    including peak-aware losses and angular distribution losses.
-    
-    Note: Currently not used in the main training pipeline, but reserved
-    for future spatial spectrum-based training scenarios.
+    Computes MSE loss between spatial spectrum matrices derived from CSI data.
+    Extracts configuration from base_station.antenna_array and training.loss.spatial_spectrum_loss sections.
     """
     
-    def __init__(self, loss_type: str = 'mse', peak_weight: float = 2.0,
-                 angular_smoothness_weight: float = 0.1):
+    def __init__(self, config: Dict):
         """
-        Initialize spatial spectrum loss function
+        Initialize spatial spectrum loss function from configuration
         
         Args:
-            loss_type: Type of loss ('mse', 'mae', 'peak_aware', 'kl_divergence')
-            peak_weight: Weight for peak regions in peak-aware loss
-            angular_smoothness_weight: Weight for angular smoothness regularization
+            config: Full configuration dictionary containing base_station and training sections
         """
         super(SpatialSpectrumLoss, self).__init__()
-        self.loss_type = loss_type
-        self.peak_weight = peak_weight
-        self.angular_smoothness_weight = angular_smoothness_weight
         
-    def forward(self, predicted_spectrum: torch.Tensor, target_spectrum: torch.Tensor,
-                mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # Extract base station configuration
+        if 'base_station' not in config:
+            raise ValueError("Configuration must contain 'base_station' section")
+        bs_config = config['base_station']
+        
+        # Extract spatial spectrum loss configuration
+        if 'training' not in config or 'loss' not in config['training'] or 'spatial_spectrum_loss' not in config['training']['loss']:
+            raise ValueError("Configuration must contain 'training.loss.spatial_spectrum_loss' section")
+        ssl_config = config['training']['loss']['spatial_spectrum_loss']
+        
+        # Algorithm and fusion method - no defaults, must be specified
+        if 'algorithm' not in ssl_config:
+            raise ValueError("Configuration must contain 'training.loss.spatial_spectrum_loss.algorithm'")
+        if 'fusion_method' not in ssl_config:
+            raise ValueError("Configuration must contain 'training.loss.spatial_spectrum_loss.fusion_method'")
+        
+        self.algorithm = ssl_config['algorithm']
+        self.fusion_method = ssl_config['fusion_method']
+        
+        # Antenna array configuration
+        if 'antenna_array' not in bs_config:
+            raise ValueError("Base station configuration must contain 'antenna_array' section")
+        antenna_config = bs_config['antenna_array']
+        
+        # Parse antenna array configuration (e.g., '8x8' -> M=8, N=8)
+        if 'configuration' not in antenna_config:
+            raise ValueError("Antenna array configuration must contain 'configuration' key")
+        array_config = antenna_config['configuration']
+        self.M, self.N = map(int, array_config.split('x'))
+        self.num_antennas = self.M * self.N
+        
+        # OFDM system parameters
+        if 'ofdm' not in bs_config:
+            raise ValueError("Base station configuration must contain 'ofdm' section")
+        ofdm_config = bs_config['ofdm']
+        
+        # Handle string values from YAML (scientific notation) - no defaults
+        if 'center_frequency' not in ofdm_config:
+            raise ValueError("Configuration must contain 'base_station.ofdm.center_frequency'")
+        if 'bandwidth' not in ofdm_config:
+            raise ValueError("Configuration must contain 'base_station.ofdm.bandwidth'")
+        if 'num_subcarriers' not in ofdm_config:
+            raise ValueError("Configuration must contain 'base_station.ofdm.num_subcarriers'")
+        
+        center_freq = ofdm_config['center_frequency']
+        bandwidth = ofdm_config['bandwidth']
+        
+        self.center_frequency = float(center_freq) if isinstance(center_freq, str) else center_freq
+        self.bandwidth = float(bandwidth) if isinstance(bandwidth, str) else bandwidth
+        self.num_subcarriers = ofdm_config['num_subcarriers']
+        
+        # Calculate wavelength and antenna spacing - no defaults
+        self.wavelength = 3e8 / self.center_frequency
+        
+        if 'element_spacing' not in antenna_config:
+            raise ValueError("Configuration must contain 'base_station.antenna_array.element_spacing'")
+        
+        element_spacing_type = antenna_config['element_spacing']
+        
+        if element_spacing_type == 'half_wavelength':
+            self.dx = self.dy = 0.5 * self.wavelength
+        elif element_spacing_type == 'custom':
+            if 'custom_spacing' not in antenna_config:
+                raise ValueError("Configuration must contain 'base_station.antenna_array.custom_spacing' when element_spacing is 'custom'")
+            self.dx = self.dy = antenna_config['custom_spacing']
+        else:
+            raise ValueError(f"Unsupported element spacing type: {element_spacing_type}")
+        
+        # Parse angle ranges from [min, step, max] format - no defaults
+        if 'theta_range' not in ssl_config:
+            raise ValueError("Configuration must contain 'training.loss.spatial_spectrum_loss.theta_range'")
+        if 'phi_range' not in ssl_config:
+            raise ValueError("Configuration must contain 'training.loss.spatial_spectrum_loss.phi_range'")
+        
+        theta_range = ssl_config['theta_range']
+        phi_range = ssl_config['phi_range']
+        
+        # Convert degrees to radians and generate grids
+        theta_min, theta_step, theta_max = theta_range
+        phi_min, phi_step, phi_max = phi_range
+        
+        # Convert to radians
+        theta_min_rad = np.deg2rad(theta_min)
+        theta_max_rad = np.deg2rad(theta_max)
+        theta_step_rad = np.deg2rad(theta_step)
+        
+        phi_min_rad = np.deg2rad(phi_min)
+        phi_max_rad = np.deg2rad(phi_max)
+        phi_step_rad = np.deg2rad(phi_step)
+        
+        # Generate angle grids
+        self.theta_grid = torch.arange(theta_min_rad, theta_max_rad + theta_step_rad/2, theta_step_rad)
+        self.phi_grid = torch.arange(phi_min_rad, phi_max_rad + phi_step_rad/2, phi_step_rad)
+        
+        # Precompute angle combinations for vectorized processing
+        theta_points = len(self.theta_grid)
+        phi_points = len(self.phi_grid)
+        theta_mesh, phi_mesh = torch.meshgrid(self.theta_grid, self.phi_grid, indexing='ij')
+        self.theta_flat = theta_mesh.flatten()  # (num_angles,)
+        self.phi_flat = phi_mesh.flatten()      # (num_angles,)
+        self.num_angles = len(self.theta_flat)
+        
+        # Pre-compute antenna positions for steering vector calculation
+        self.antenna_positions = self._compute_antenna_positions()
+        
+        logger.info(f"🔧 Spatial spectrum grid: {theta_points} × {phi_points} = {self.num_angles} angles")
+        logger.info(f"🚀 Optimization: Precomputed angle combinations for vectorized processing")
+    
+    def _compute_antenna_positions(self) -> torch.Tensor:
         """
-        Compute spatial spectrum loss
-        
-        Args:
-            predicted_spectrum: Predicted spatial spectrum
-                              Shape: (batch_size, theta_points, phi_points)
-            target_spectrum: Target spatial spectrum
-                           Shape: (batch_size, theta_points, phi_points)
-            mask: Optional mask for selective loss computation
-                  Shape: same as spectrum tensors
+        Compute 3D positions of all antennas in the array
         
         Returns:
-            loss: Computed loss value (scalar tensor)
+            positions: Tensor of antenna positions (num_antennas, 3) in meters
         """
-        if predicted_spectrum.shape != target_spectrum.shape:
-            raise ValueError(f"Shape mismatch: predicted {predicted_spectrum.shape} vs target {target_spectrum.shape}")
+        positions = []
+        for m in range(self.M):
+            for n in range(self.N):
+                # Antenna position relative to array center
+                x = (m - (self.M - 1) / 2) * self.dx
+                y = (n - (self.N - 1) / 2) * self.dy
+                z = 0.0  # Assume planar array
+                positions.append([x, y, z])
+        
+        return torch.tensor(positions, dtype=torch.float32)
+    
+    def _compute_subcarrier_frequencies(self) -> torch.Tensor:
+        """
+        Compute frequencies for all subcarriers
+        
+        Returns:
+            frequencies: Tensor of subcarrier frequencies (num_subcarriers,)
+        """
+        # Generate subcarrier indices centered around 0
+        indices = torch.arange(self.num_subcarriers) - self.num_subcarriers // 2
+        
+        # Calculate frequency offsets
+        subcarrier_spacing = self.bandwidth / self.num_subcarriers
+        freq_offsets = indices * subcarrier_spacing
+        
+        # Calculate actual frequencies
+        frequencies = self.center_frequency + freq_offsets
+        
+        return frequencies
+    
+    def _generate_steering_vectors(self, theta_batch: torch.Tensor, phi_batch: torch.Tensor, 
+                                 frequency: float, device: torch.device) -> torch.Tensor:
+        """
+        Generate steering vectors for angles (supports both single and batch processing)
+        
+        Args:
+            theta_batch: Elevation angles tensor (scalar or num_angles,) in radians
+            phi_batch: Azimuth angles tensor (scalar or num_angles,) in radians
+            frequency: Signal frequency in Hz
+            device: Device for tensor computation
+            
+        Returns:
+            steering_vectors: Complex steering vectors (num_antennas, 1) or (num_antennas, num_angles)
+        """
+        wavelength = 3e8 / frequency
+        positions = self.antenna_positions.to(device)  # (num_antennas, 3)
+        
+        # Handle both scalar and batch inputs
+        if theta_batch.dim() == 0:  # Scalar input
+            theta_batch = theta_batch.unsqueeze(0)
+            phi_batch = phi_batch.unsqueeze(0)
+            single_output = True
+        else:
+            single_output = False
+        
+        # Compute direction vectors for all angles at once
+        # directions: (num_angles, 3)
+        directions = torch.stack([
+            torch.sin(theta_batch) * torch.cos(phi_batch),  # x components
+            torch.sin(theta_batch) * torch.sin(phi_batch),  # y components  
+            torch.cos(theta_batch)                          # z components
+        ], dim=1)  # (num_angles, 3)
+        
+        # Calculate phase shifts for all antennas and all angles
+        k = 2 * np.pi / wavelength
+        phase_shifts = k * torch.matmul(positions, directions.T)  # (num_antennas, num_angles)
+        
+        # Generate complex steering vectors for all angles
+        steering_vectors = torch.exp(-1j * phase_shifts)  # (num_antennas, num_angles)
+        
+        # Return appropriate shape
+        if single_output:
+            return steering_vectors.unsqueeze(-1)  # (num_antennas, 1)
+        else:
+            return steering_vectors  # (num_antennas, num_angles)
+    
+    def _compute_spatial_spectrum(self, csi: torch.Tensor, subcarrier_idx: int) -> torch.Tensor:
+        """
+        Compute spatial spectrum from CSI for a single subcarrier (optimized vectorized version)
+        
+        Args:
+            csi: CSI tensor for single subcarrier (num_antennas, 1) - single snapshot
+            subcarrier_idx: Subcarrier index for frequency calculation
+            
+        Returns:
+            spectrum: Spatial spectrum (theta_points, phi_points)
+        """
+        device = csi.device
+        
+        # Get frequency for this subcarrier
+        subcarrier_frequencies = self._compute_subcarrier_frequencies()
+        frequency = subcarrier_frequencies[subcarrier_idx].item()
+        
+        # For single snapshot, covariance matrix is R = csi * csi^H
+        R_xx = torch.matmul(csi, torch.conj(csi).transpose(-2, -1))  # (num_antennas, num_antennas)
+        
+        # Use precomputed angle combinations
+        theta_flat = self.theta_flat.to(device)
+        phi_flat = self.phi_flat.to(device)
+        
+        # Generate all steering vectors at once using unified method
+        all_steering_vectors = self._generate_steering_vectors(theta_flat, phi_flat, frequency, device)
+        # Shape: (num_antennas, num_angles)
+        
+        if self.algorithm == 'bartlett':
+            # Vectorized Bartlett beamformer: a^H * R * a for all angles
+            R_A = torch.matmul(R_xx, all_steering_vectors)  # (num_antennas, num_angles)
+            powers = torch.real(torch.sum(torch.conj(all_steering_vectors) * R_A, dim=0))  # (num_angles,)
+            
+            # Reshape back to (theta_points, phi_points)
+            theta_points = len(self.theta_grid)
+            phi_points = len(self.phi_grid)
+            spectrum = powers.reshape(theta_points, phi_points)
+        else:
+            raise NotImplementedError(f"Algorithm '{self.algorithm}' not implemented")
+        
+        return spectrum
+    
+    def _compute_spectrum_all_subcarriers(self, csi_batch: torch.Tensor, device: torch.device) -> torch.Tensor:
+        """
+        Compute spatial spectrum for all subcarriers at once (optimized)
+        
+        Args:
+            csi_batch: CSI tensor for one batch sample (num_subcarriers, 1, num_bs_antennas)
+            device: Device for computation
+            
+        Returns:
+            fused_spectrum: Fused spatial spectrum (theta_points, phi_points)
+        """
+        num_subcarriers = csi_batch.shape[0]
+        theta_points = len(self.theta_grid)
+        phi_points = len(self.phi_grid)
+        
+        # Use precomputed angle combinations
+        theta_flat = self.theta_flat.to(device)
+        phi_flat = self.phi_flat.to(device)
+        
+        # Get all subcarrier frequencies
+        subcarrier_frequencies = self._compute_subcarrier_frequencies()
+        
+        # Initialize spectrum accumulator
+        if self.fusion_method == 'average':
+            spectrum_accumulator = torch.zeros((theta_points, phi_points), device=device, dtype=torch.float32)
+        elif self.fusion_method == 'max':
+            spectrum_accumulator = torch.full((theta_points, phi_points), -float('inf'), device=device, dtype=torch.float32)
+        else:
+            raise ValueError(f"Unsupported fusion method: {self.fusion_method}")
+        
+        # Process all subcarriers
+        for k in range(num_subcarriers):
+            # Get CSI for this subcarrier: (num_bs_antennas, 1)
+            csi_k = csi_batch[k, 0, :].unsqueeze(1)  # (num_bs_antennas, 1)
+            frequency = subcarrier_frequencies[k].item()
+            
+            # Covariance matrix
+            R_xx = torch.matmul(csi_k, torch.conj(csi_k).transpose(-2, -1))  # (num_bs_antennas, num_bs_antennas)
+            
+            # Generate all steering vectors for this frequency using unified method
+            all_steering_vectors = self._generate_steering_vectors(theta_flat, phi_flat, frequency, device)
+            # Shape: (num_bs_antennas, num_angles)
+            
+            if self.algorithm == 'bartlett':
+                # Vectorized Bartlett beamformer for all angles
+                R_A = torch.matmul(R_xx, all_steering_vectors)  # (num_bs_antennas, num_angles)
+                powers = torch.real(torch.sum(torch.conj(all_steering_vectors) * R_A, dim=0))  # (num_angles,)
+                spectrum_k = powers.reshape(theta_points, phi_points)
+            else:
+                raise NotImplementedError(f"Algorithm '{self.algorithm}' not implemented")
+            
+            # Accumulate spectrum
+            if self.fusion_method == 'average':
+                spectrum_accumulator += spectrum_k
+            elif self.fusion_method == 'max':
+                spectrum_accumulator = torch.maximum(spectrum_accumulator, spectrum_k)
+        
+        # Finalize fusion
+        if self.fusion_method == 'average':
+            fused_spectrum = spectrum_accumulator / num_subcarriers
+        elif self.fusion_method == 'max':
+            fused_spectrum = spectrum_accumulator
+        
+        return fused_spectrum
+    
+    def _csi_to_spatial_spectrum(self, csi: torch.Tensor) -> torch.Tensor:
+        """
+        Convert CSI tensor to spatial spectrum
+        
+        Args:
+            csi: CSI tensor with shape (batch_size, num_subcarriers, num_ue_antennas, num_bs_antennas)
+            
+        Returns:
+            spectrum: Spatial spectrum tensor (batch_size, theta_points, phi_points)
+        """
+        batch_size = csi.shape[0]
+        device = csi.device
+        
+        # Validate CSI tensor dimensions
+        
+        # Validate input shape
+        if csi.dim() != 4:
+            raise ValueError(f"Expected 4D CSI tensor (batch, subcarriers, ue_antennas, bs_antennas), got {csi.shape}")
+        
+        num_subcarriers, num_ue_antennas, num_bs_antennas = csi.shape[1], csi.shape[2], csi.shape[3]
+        
+        # Extract single UE antenna (should always be 1 after data loading)
+        if num_ue_antennas != 1:
+            logger.warning(f"Expected single UE antenna, got {num_ue_antennas}. Using first antenna.")
+            csi = csi[:, :, :1, :]  # Take only the first UE antenna
+            num_ue_antennas = 1
+        
+        # Validate BS antenna count matches array configuration
+        if num_bs_antennas != self.num_antennas:
+            raise ValueError(f"BS antennas ({num_bs_antennas}) doesn't match array config ({self.M}x{self.N}={self.num_antennas})")
+        
+        # Initialize output spectrum
+        theta_points = len(self.theta_grid)
+        phi_points = len(self.phi_grid)
+        batch_spectrums = torch.zeros((batch_size, theta_points, phi_points), 
+                                    device=device, dtype=torch.float32)
+        
+        # Process each batch sample
+        for b in range(batch_size):
+            # Get CSI for this batch: (num_subcarriers, 1, num_bs_antennas)
+            csi_batch = csi[b]  # (num_subcarriers, 1, num_bs_antennas)
+            
+            # Vectorized computation for all subcarriers at once
+            fused_spectrum = self._compute_spectrum_all_subcarriers(csi_batch, device)
+            batch_spectrums[b] = fused_spectrum
+        
+        return batch_spectrums
+        
+    def forward(self, predicted_csi: torch.Tensor, target_csi: torch.Tensor,
+                mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Compute spatial spectrum loss between predicted and target CSI
+        
+        Args:
+            predicted_csi: Predicted CSI tensor 
+                          Shape: (batch_size, num_subcarriers, num_ue_antennas, num_bs_antennas)
+            target_csi: Target CSI tensor
+                       Shape: same as predicted_csi
+            mask: Optional mask for selective loss computation (not currently used)
+        
+        Returns:
+            loss: Computed MSE loss between spatial spectrums (scalar tensor)
+        """
+        # Validate input shapes
+        
+        if predicted_csi.shape != target_csi.shape:
+            raise ValueError(f"Shape mismatch: predicted {predicted_csi.shape} vs target {target_csi.shape}")
+        
+        # Convert CSI to spatial spectrum
+        predicted_spectrum = self._csi_to_spatial_spectrum(predicted_csi)
+        target_spectrum = self._csi_to_spatial_spectrum(target_csi)
         
         # Apply mask if provided
         if mask is not None:
+            if mask.shape != predicted_spectrum.shape:
+                raise ValueError(f"Mask shape {mask.shape} doesn't match spectrum shape {predicted_spectrum.shape}")
             predicted_spectrum = predicted_spectrum * mask
             target_spectrum = target_spectrum * mask
         
-        if self.loss_type == 'mse':
-            # Standard MSE loss
-            loss = F.mse_loss(predicted_spectrum, target_spectrum)
-            
-        elif self.loss_type == 'mae':
-            # Mean Absolute Error
-            loss = F.l1_loss(predicted_spectrum, target_spectrum)
-            
-        elif self.loss_type == 'peak_aware':
-            # Peak-aware loss: higher weight for peak regions
-            peak_mask = self._detect_peaks(target_spectrum)
-            
-            # Standard loss
-            base_loss = F.mse_loss(predicted_spectrum, target_spectrum)
-            
-            # Peak region loss
-            peak_loss = F.mse_loss(predicted_spectrum * peak_mask, 
-                                  target_spectrum * peak_mask)
-            
-            loss = base_loss + self.peak_weight * peak_loss
-            
-        elif self.loss_type == 'kl_divergence':
-            # KL divergence for probability distributions
-            # Normalize to probability distributions
-            pred_prob = self._normalize_to_prob(predicted_spectrum)
-            target_prob = self._normalize_to_prob(target_spectrum)
-            
-            loss = F.kl_div(torch.log(pred_prob + 1e-8), target_prob, reduction='batchmean')
-            
-        elif self.loss_type == 'angular_weighted':
-            # Angular-weighted loss considering spatial relationships
-            angular_weights = self._compute_angular_weights(target_spectrum.shape[-2:])
-            weighted_diff = (predicted_spectrum - target_spectrum)**2 * angular_weights
-            loss = torch.mean(weighted_diff)
-            
-        elif self.loss_type == 'combined':
-            # Combined loss with multiple components
-            mse_loss = F.mse_loss(predicted_spectrum, target_spectrum)
-            peak_loss = self._peak_aware_loss(predicted_spectrum, target_spectrum)
-            smoothness_loss = self._angular_smoothness_loss(predicted_spectrum)
-            
-            loss = mse_loss + self.peak_weight * peak_loss + \
-                   self.angular_smoothness_weight * smoothness_loss
-            
-        else:
-            raise ValueError(f"Unknown loss type: {self.loss_type}")
+        # Compute MSE loss between spatial spectrums
+        loss = F.mse_loss(predicted_spectrum, target_spectrum)
         
         return loss
     
-    def _detect_peaks(self, spectrum: torch.Tensor, threshold: float = 0.7) -> torch.Tensor:
+    def compute_and_visualize_loss(self, predicted_csi: torch.Tensor, target_csi: torch.Tensor,
+                                  save_path: str, sample_idx: int = 0, 
+                                  mask: Optional[torch.Tensor] = None) -> Tuple[float, str]:
         """
-        Detect peak regions in spatial spectrum
+        Compute spatial spectrum loss and save visualization for testing
         
         Args:
-            spectrum: Spatial spectrum tensor
-            threshold: Threshold for peak detection (relative to max)
-            
+            predicted_csi: Predicted CSI tensor 
+                          Shape: (batch_size, num_subcarriers, num_ue_antennas, num_bs_antennas)
+            target_csi: Target CSI tensor (same shape as predicted_csi)
+            save_path: Directory path to save the visualization plot
+            sample_idx: Which sample in the batch to visualize (default: 0)
+            mask: Optional mask for selective loss computation
+        
         Returns:
-            peak_mask: Binary mask indicating peak regions
+            loss_value: Computed loss value (float)
+            plot_path: Path to the saved plot file
         """
-        batch_size = spectrum.shape[0]
-        peak_masks = []
+        if predicted_csi.shape != target_csi.shape:
+            raise ValueError(f"Shape mismatch: predicted {predicted_csi.shape} vs target {target_csi.shape}")
         
-        for b in range(batch_size):
-            spec = spectrum[b]
-            max_val = torch.max(spec)
-            peak_mask = (spec > threshold * max_val).float()
-            peak_masks.append(peak_mask)
+        # Compute loss
+        loss = self.forward(predicted_csi, target_csi, mask)
+        loss_value = loss.item()
         
-        return torch.stack(peak_masks)
+        # Convert CSI to spatial spectrum for visualization
+        predicted_spectrum = self._csi_to_spatial_spectrum(predicted_csi)
+        target_spectrum = self._csi_to_spatial_spectrum(target_csi)
+        
+        # Select sample to visualize
+        if sample_idx >= predicted_spectrum.shape[0]:
+            sample_idx = 0
+        
+        pred_spec = predicted_spectrum[sample_idx].detach().cpu().numpy()
+        target_spec = target_spectrum[sample_idx].detach().cpu().numpy()
+        
+        # Create visualization
+        plot_path = self._create_spectrum_comparison_plot(
+            pred_spec, target_spec, save_path, loss_value, sample_idx
+        )
+        
+        return loss_value, plot_path
     
-    def _normalize_to_prob(self, spectrum: torch.Tensor) -> torch.Tensor:
+    def _create_spectrum_comparison_plot(self, predicted_spectrum: np.ndarray, 
+                                       target_spectrum: np.ndarray,
+                                       save_path: str, loss_value: float,
+                                       sample_idx: int) -> str:
         """
-        Normalize spectrum to probability distribution
+        Create and save spatial spectrum comparison plot
         
         Args:
-            spectrum: Input spectrum tensor
+            predicted_spectrum: Predicted spatial spectrum (theta_points, phi_points)
+            target_spectrum: Target spatial spectrum (theta_points, phi_points)
+            save_path: Directory to save the plot
+            loss_value: Loss value to display in title
+            sample_idx: Sample index for filename
             
         Returns:
-            prob: Normalized probability distribution
+            plot_path: Path to saved plot file
         """
-        # Ensure non-negative values
-        spectrum_pos = torch.clamp(spectrum, min=1e-8)
+        # Create save directory if it doesn't exist
+        Path(save_path).mkdir(parents=True, exist_ok=True)
         
-        # Normalize to sum to 1
-        prob = spectrum_pos / torch.sum(spectrum_pos, dim=(-2, -1), keepdim=True)
+        # Convert angle grids to degrees for display
+        theta_deg = np.rad2deg(self.theta_grid.cpu().numpy())
+        phi_deg = np.rad2deg(self.phi_grid.cpu().numpy())
         
-        return prob
-    
-    def _compute_angular_weights(self, shape: Tuple[int, int]) -> torch.Tensor:
-        """
-        Compute angular weights for spatial spectrum
+        # Create figure with two subplots
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
         
-        Args:
-            shape: (theta_points, phi_points)
-            
-        Returns:
-            weights: Angular weighting matrix
-        """
-        theta_points, phi_points = shape
+        # Plot predicted spectrum
+        im1 = ax1.imshow(predicted_spectrum, aspect='auto', origin='lower', 
+                        extent=[phi_deg[0], phi_deg[-1], theta_deg[0], theta_deg[-1]],
+                        cmap='viridis')
+        ax1.set_title(f'Predicted Spatial Spectrum\nSample {sample_idx}', fontsize=12, fontweight='bold')
+        ax1.set_xlabel('Azimuth (degrees)', fontsize=10)
+        ax1.set_ylabel('Elevation (degrees)', fontsize=10)
+        plt.colorbar(im1, ax=ax1, label='Power')
         
-        # Create angular grids
-        theta_grid = torch.linspace(-np.pi/2, np.pi/2, theta_points)
-        phi_grid = torch.linspace(0, 2*np.pi, phi_points)
+        # Plot target spectrum
+        im2 = ax2.imshow(target_spectrum, aspect='auto', origin='lower',
+                        extent=[phi_deg[0], phi_deg[-1], theta_deg[0], theta_deg[-1]],
+                        cmap='viridis')
+        ax2.set_title(f'Target Spatial Spectrum\nSample {sample_idx}', fontsize=12, fontweight='bold')
+        ax2.set_xlabel('Azimuth (degrees)', fontsize=10)
+        ax2.set_ylabel('Elevation (degrees)', fontsize=10)
+        plt.colorbar(im2, ax=ax2, label='Power')
         
-        # Elevation weighting (higher weight near horizon)
-        theta_weights = torch.cos(theta_grid).unsqueeze(1)  # (theta_points, 1)
+        # Add overall title with loss information
+        fig.suptitle(f'Spatial Spectrum Comparison - Loss: {loss_value:.6f}\n'
+                    f'Algorithm: {self.algorithm.upper()}, Fusion: {self.fusion_method}', 
+                    fontsize=14, fontweight='bold')
         
-        # Uniform azimuth weighting
-        phi_weights = torch.ones(1, phi_points)  # (1, phi_points)
+        # Adjust layout
+        plt.tight_layout()
         
-        # Combined weights
-        weights = theta_weights * phi_weights  # (theta_points, phi_points)
+        # Save plot
+        filename = f'spatial_spectrum_comparison_sample_{sample_idx}.png'
+        plot_path = os.path.join(save_path, filename)
+        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+        plt.close()
         
-        return weights
-    
-    def _peak_aware_loss(self, predicted: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """
-        Compute peak-aware loss component
-        """
-        peak_mask = self._detect_peaks(target)
-        peak_loss = F.mse_loss(predicted * peak_mask, target * peak_mask)
-        return peak_loss
-    
-    def _angular_smoothness_loss(self, spectrum: torch.Tensor) -> torch.Tensor:
-        """
-        Compute angular smoothness regularization loss
-        """
-        # Gradient in theta direction
-        theta_grad = torch.diff(spectrum, dim=-2)
-        theta_smoothness = torch.mean(theta_grad**2)
-        
-        # Gradient in phi direction
-        phi_grad = torch.diff(spectrum, dim=-1)
-        phi_smoothness = torch.mean(phi_grad**2)
-        
-        return theta_smoothness + phi_smoothness
+        return plot_path
+
 
 
 class PrismLossFunction(nn.Module):
@@ -621,30 +870,43 @@ class PrismLossFunction(nn.Module):
         # These are algorithm parameters, not critical system config
         self.csi_weight = config.get('csi_weight', 0.7)
         self.pdp_weight = config.get('pdp_weight', 0.3)
+        self.spatial_spectrum_weight = config.get('spatial_spectrum_weight', 0.0)
         self.regularization_weight = config.get('regularization_weight', 0.01)
         
         # Initialize component losses with reasonable defaults
         csi_config = config.get('csi_loss', {})
+        self.csi_enabled = csi_config.get('enabled', True)  # Default enabled for backward compatibility
         self.csi_loss = CSILoss(
             loss_type=csi_config.get('type', 'hybrid'),
             phase_weight=csi_config.get('phase_weight', 1.0),
             magnitude_weight=csi_config.get('magnitude_weight', 1.0),
-            cmse_weight=csi_config.get('cmse_weight', 1.0),
-            correlation_weight=csi_config.get('correlation_weight', 1.0)
+            cmse_weight=csi_config.get('cmse_weight', 1.0)
+            # correlation_weight parameter removed
         )
         
         # Initialize PDP loss
         pdp_config = config.get('pdp_loss', {})
+        self.pdp_enabled = pdp_config.get('enabled', True)  # Default enabled for backward compatibility
         self.pdp_loss = PDPLoss(
             loss_type=pdp_config.get('type', 'hybrid'),
             fft_size=pdp_config.get('fft_size', 1024),
-            normalize_pdp=pdp_config.get('normalize_pdp', True),
-            mse_weight=pdp_config.get('mse_weight', 0.5),
-            correlation_weight=pdp_config.get('correlation_weight', 0.3),
-            delay_weight=pdp_config.get('delay_weight', 0.2)
+            normalize_pdp=pdp_config.get('normalize_pdp', True)
+            # mse_weight, correlation_weight, delay_weight parameters removed
         )
         
-
+        # Initialize regularization loss enabled flag
+        reg_config = config.get('regularization_loss', {})
+        self.regularization_enabled = reg_config.get('enabled', True)  # Default enabled for backward compatibility
+        
+        # Initialize Spatial Spectrum loss (only if enabled and weight > 0)
+        ssl_config = config.get('spatial_spectrum_loss', {})
+        self.spatial_spectrum_enabled = ssl_config.get('enabled', False)
+        self.spatial_spectrum_loss = None
+        if self.spatial_spectrum_weight > 0 and self.spatial_spectrum_enabled:
+            # Pass the full config to SpatialSpectrumLoss (it needs base_station and training sections)
+            full_config = {'base_station': config.get('base_station', {}), 
+                          'training': {'loss': {'spatial_spectrum_loss': ssl_config}}}
+            self.spatial_spectrum_loss = SpatialSpectrumLoss(full_config)
         
         # Loss components tracking
         self.loss_components = {}
@@ -674,18 +936,26 @@ class PrismLossFunction(nn.Module):
         if masks is None:
             masks = {}
         
-        # CSI loss (hybrid: CMSE + Correlation)
-        if 'csi' in predictions and 'csi' in targets:
-            csi_loss_val = self.csi_loss(
-                predictions['csi'], 
-                targets['csi'], 
-                masks.get('csi')
-            )
+        # CSI loss (hybrid: CMSE + Correlation) - use traced CSI for subcarrier-level loss
+        if ('traced_csi' in predictions and 'traced_csi' in targets and self.csi_enabled):
+            # Convert traced CSI back to tensor format for CSI loss
+            traced_pred = predictions['traced_csi']
+            traced_target = targets['traced_csi']
+            
+            # CSI loss expects 1D tensors of traced subcarriers
+            # Handle complex tensors by manually computing MSE to avoid CUDA issues
+            if traced_pred.is_complex():
+                # Compute MSE manually for complex tensors
+                diff = traced_pred - traced_target
+                csi_loss_val = torch.mean(torch.abs(diff) ** 2)
+            else:
+                csi_loss_val = F.mse_loss(traced_pred, traced_target)
             total_loss = total_loss + self.csi_weight * csi_loss_val
             loss_components['csi_loss'] = csi_loss_val.item()
         
-        # PDP loss (hybrid: MSE + Correlation + Delay)
-        if 'csi' in predictions and 'csi' in targets and self.pdp_weight > 0:
+        # PDP loss (hybrid: MSE + Correlation + Delay) - use full CSI for frequency domain analysis
+        if ('csi' in predictions and 'csi' in targets and 
+            self.pdp_enabled and self.pdp_weight > 0):
             pdp_loss_val = self.pdp_loss(
                 predictions['csi'], 
                 targets['csi']
@@ -693,10 +963,23 @@ class PrismLossFunction(nn.Module):
             total_loss = total_loss + self.pdp_weight * pdp_loss_val
             loss_components['pdp_loss'] = pdp_loss_val.item()
         
-
+        # Spatial Spectrum loss
+        if (self.spatial_spectrum_loss is not None and 
+            self.spatial_spectrum_enabled and
+            'csi' in predictions and 'csi' in targets and 
+            self.spatial_spectrum_weight > 0):
+            # Use full 4D CSI tensors for spatial spectrum loss
+            spatial_loss_val = self.spatial_spectrum_loss(
+                predictions['csi'], 
+                targets['csi'],
+                masks.get('spatial_spectrum') if masks else None
+            )
+            total_loss = total_loss + self.spatial_spectrum_weight * spatial_loss_val
+            loss_components['spatial_spectrum_loss'] = spatial_loss_val.item()
         
         # Regularization losses
-        if 'regularization' in predictions:
+        if ('regularization' in predictions and 
+            self.regularization_enabled and self.regularization_weight > 0):
             reg_loss = predictions['regularization']
             total_loss = total_loss + self.regularization_weight * reg_loss
             loss_components['regularization_loss'] = reg_loss.item()
@@ -714,6 +997,28 @@ class PrismLossFunction(nn.Module):
             loss_components: Dictionary of loss component values
         """
         return self.loss_components.copy()
+    
+    def compute_and_visualize_spatial_spectrum_loss(self, predicted_csi: torch.Tensor, 
+                                                   target_csi: torch.Tensor,
+                                                   save_path: str, sample_idx: int = 0) -> Optional[Tuple[float, str]]:
+        """
+        Compute spatial spectrum loss and create visualization (for testing)
+        
+        Args:
+            predicted_csi: Predicted CSI tensor
+            target_csi: Target CSI tensor  
+            save_path: Directory to save visualization
+            sample_idx: Sample index to visualize
+            
+        Returns:
+            (loss_value, plot_path) if spatial spectrum loss is enabled, None otherwise
+        """
+        if self.spatial_spectrum_loss is None:
+            return None
+            
+        return self.spatial_spectrum_loss.compute_and_visualize_loss(
+            predicted_csi, target_csi, save_path, sample_idx
+        )
 
 
 

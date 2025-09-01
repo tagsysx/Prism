@@ -809,26 +809,15 @@ class CPURayTracer(RayTracer):
         # Term 4: Broadcast radiance to all samples - shape: (num_subcarriers, num_samples)
         radiance_batch_expanded = radiation_batch.unsqueeze(1).expand(-1, num_samples)
         
-        # Term 5: Broadcast importance correction - shape: (num_subcarriers, num_samples)
-        if len(importance_weights) > 0:
-            if len(importance_weights) < num_samples:
-                importance_correction = torch.cat([
-                    1.0 / (importance_weights + 1e-8),
-                    torch.ones(num_samples - len(importance_weights), device=self.device)
-                ], dim=0)
-            else:
-                importance_correction = 1.0 / (importance_weights[:num_samples] + 1e-8)
-        else:
-            importance_correction = torch.ones(num_samples, device=self.device)
-        
-        importance_correction_batch = importance_correction.unsqueeze(0).expand(num_subcarriers, -1)
+        # Term 5: Importance correction removed - direct integration without correction
+        # The importance sampling has already selected the most relevant points,
+        # and we integrate directly without probability correction
         
         # 🚀 ULTIMATE VECTORIZED COMPUTATION - Single massive tensor operation!
         # Process ALL subcarriers and ALL samples simultaneously
         signal_contributions_batch = (attenuation_factors_batch * 
                                     local_absorption_batch * 
-                                    radiance_batch_expanded * 
-                                    importance_correction_batch)  # (num_subcarriers, num_samples)
+                                    radiance_batch_expanded)  # (num_subcarriers, num_samples)
         
         # Early termination using batch operations
         if self.enable_early_termination:

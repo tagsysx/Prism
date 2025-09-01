@@ -40,6 +40,9 @@ class ConfigLoader:
         # Process template variables
         config = self._process_template_variables(config)
         
+        # Validate configuration consistency
+        self._validate_config_consistency(config)
+        
         logger.info(f"Configuration loaded from: {self.config_path}")
         return config
     
@@ -524,6 +527,270 @@ class ConfigLoader:
         }
         
         return summary
+    
+    def _validate_config_consistency(self, config: Dict[str, Any]) -> None:
+        """
+        Validate configuration consistency and report any conflicts.
+        
+        Args:
+            config: Configuration dictionary to validate
+            
+        Raises:
+            SystemExit: If critical configuration conflicts are found
+        """
+        logger.info("🔍 Starting configuration consistency validation...")
+        
+        errors = []
+        warnings = []
+        
+        try:
+            # Extract configuration sections
+            neural_networks = config.get('neural_networks', {})
+            base_station = config.get('base_station', {})
+            user_equipment = config.get('user_equipment', {})
+            ray_tracing = config.get('ray_tracing', {})
+            training = config.get('training', {})
+            
+            # 1. Validate angular sampling consistency
+            self._validate_angular_sampling(ray_tracing, neural_networks, errors)
+            
+            # 2. Validate subcarrier consistency
+            self._validate_subcarrier_consistency(base_station, neural_networks, errors)
+            
+            # 3. Validate antenna consistency
+            self._validate_antenna_consistency(base_station, neural_networks, user_equipment, errors)
+            
+            # 4. Validate embedding dimension consistency
+            self._validate_embedding_consistency(base_station, neural_networks, errors)
+            
+            # 5. Validate feature dimension consistency
+            self._validate_feature_consistency(neural_networks, errors)
+            
+            # 6. Validate OFDM parameter consistency
+            self._validate_ofdm_consistency(base_station, warnings)
+            
+            # 7. Validate antenna array consistency
+            self._validate_antenna_array_consistency(base_station, warnings)
+            
+            # 8. Validate training parameter consistency
+            self._validate_training_consistency(training, warnings)
+            
+        except Exception as e:
+            errors.append(f"Configuration validation failed with exception: {e}")
+        
+        # Report results
+        if warnings:
+            logger.warning("⚠️  Configuration warnings found:")
+            for warning in warnings:
+                logger.warning(f"   - {warning}")
+        
+        if errors:
+            logger.error("❌ Critical configuration errors found:")
+            for error in errors:
+                logger.error(f"   - {error}")
+            logger.error("🛑 System will exit due to configuration errors")
+            raise SystemExit(1)
+        else:
+            logger.info("✅ Configuration consistency validation passed")
+    
+    def _validate_angular_sampling(self, ray_tracing: Dict, neural_networks: Dict, errors: list) -> None:
+        """Validate angular sampling consistency."""
+        try:
+            angular_sampling = ray_tracing.get('angular_sampling', {})
+            antenna_network = neural_networks.get('antenna_network', {})
+            
+            azimuth_divisions = int(angular_sampling.get('azimuth_divisions', 0))
+            elevation_divisions = int(angular_sampling.get('elevation_divisions', 0))
+            total_directions = int(angular_sampling.get('total_directions', 0))
+            antenna_output_dim = int(antenna_network.get('output_dim', 0))
+            
+            # Check azimuth × elevation = total_directions
+            expected_total = azimuth_divisions * elevation_divisions
+            if expected_total != total_directions:
+                errors.append(
+                    f"Angular sampling mismatch: azimuth_divisions({azimuth_divisions}) × "
+                    f"elevation_divisions({elevation_divisions}) = {expected_total}, "
+                    f"but total_directions = {total_directions}"
+                )
+            
+            # Check antenna network output dimension matches total directions
+            if antenna_output_dim != total_directions:
+                errors.append(
+                    f"Antenna network output dimension mismatch: "
+                    f"antenna_network.output_dim({antenna_output_dim}) ≠ "
+                    f"angular_sampling.total_directions({total_directions})"
+                )
+        except (ValueError, TypeError) as e:
+            errors.append(f"Invalid angular sampling parameter types: {e}")
+    
+    def _validate_subcarrier_consistency(self, base_station: Dict, neural_networks: Dict, errors: list) -> None:
+        """Validate subcarrier number consistency."""
+        try:
+            ofdm = base_station.get('ofdm', {})
+            attenuation_decoder = neural_networks.get('attenuation_decoder', {})
+            radiance_network = neural_networks.get('radiance_network', {})
+            
+            ofdm_subcarriers = int(ofdm.get('num_subcarriers', 0))
+            decoder_output = int(attenuation_decoder.get('output_dim', 0))
+            radiance_output = int(radiance_network.get('output_dim', 0))
+            
+            if not (ofdm_subcarriers == decoder_output == radiance_output):
+                errors.append(
+                    f"Subcarrier number mismatch: "
+                    f"ofdm.num_subcarriers({ofdm_subcarriers}) ≠ "
+                    f"attenuation_decoder.output_dim({decoder_output}) ≠ "
+                    f"radiance_network.output_dim({radiance_output})"
+                )
+        except (ValueError, TypeError) as e:
+            errors.append(f"Invalid subcarrier parameter types: {e}")
+    
+    def _validate_antenna_consistency(self, base_station: Dict, neural_networks: Dict, 
+                                    user_equipment: Dict, errors: list) -> None:
+        """Validate antenna number consistency."""
+        try:
+            # BS antenna consistency
+            bs_antennas = int(base_station.get('num_antennas', 0))
+            codebook_antennas = int(neural_networks.get('antenna_codebook', {}).get('num_antennas', 0))
+            
+            if bs_antennas != codebook_antennas:
+                errors.append(
+                    f"BS antenna number mismatch: "
+                    f"base_station.num_antennas({bs_antennas}) ≠ "
+                    f"antenna_codebook.num_antennas({codebook_antennas})"
+                )
+            
+            # UE antenna consistency (neural networks should both use 1 for single antenna processing)
+            decoder_ue = int(neural_networks.get('attenuation_decoder', {}).get('num_ue_antennas', 0))
+            radiance_ue = int(neural_networks.get('radiance_network', {}).get('num_ue_antennas', 0))
+            
+            if decoder_ue != 1 or radiance_ue != 1:
+                errors.append(
+                    f"UE antenna configuration error: "
+                    f"attenuation_decoder.num_ue_antennas({decoder_ue}) and "
+                    f"radiance_network.num_ue_antennas({radiance_ue}) must both be 1 for single antenna processing"
+                )
+        except (ValueError, TypeError) as e:
+            errors.append(f"Invalid antenna parameter types: {e}")
+    
+    def _validate_embedding_consistency(self, base_station: Dict, neural_networks: Dict, errors: list) -> None:
+        """Validate embedding dimension consistency."""
+        try:
+            bs_embedding = int(base_station.get('antenna_embedding_dim', 0))
+            codebook_embedding = int(neural_networks.get('antenna_codebook', {}).get('embedding_dim', 0))
+            antenna_input = int(neural_networks.get('antenna_network', {}).get('input_dim', 0))
+            radiance_embedding = int(neural_networks.get('radiance_network', {}).get('antenna_embedding_dim', 0))
+            
+            if not (bs_embedding == codebook_embedding == antenna_input == radiance_embedding):
+                errors.append(
+                    f"Antenna embedding dimension mismatch: "
+                    f"base_station.antenna_embedding_dim({bs_embedding}) ≠ "
+                    f"antenna_codebook.embedding_dim({codebook_embedding}) ≠ "
+                    f"antenna_network.input_dim({antenna_input}) ≠ "
+                    f"radiance_network.antenna_embedding_dim({radiance_embedding})"
+                )
+        except (ValueError, TypeError) as e:
+            errors.append(f"Invalid embedding parameter types: {e}")
+    
+    def _validate_feature_consistency(self, neural_networks: Dict, errors: list) -> None:
+        """Validate feature dimension consistency."""
+        try:
+            attenuation_feature = int(neural_networks.get('attenuation_network', {}).get('feature_dim', 0))
+            decoder_input = int(neural_networks.get('attenuation_decoder', {}).get('input_dim', 0))
+            radiance_feature = int(neural_networks.get('radiance_network', {}).get('spatial_feature_dim', 0))
+            
+            if not (attenuation_feature == decoder_input == radiance_feature):
+                errors.append(
+                    f"Feature dimension mismatch: "
+                    f"attenuation_network.feature_dim({attenuation_feature}) ≠ "
+                    f"attenuation_decoder.input_dim({decoder_input}) ≠ "
+                    f"radiance_network.spatial_feature_dim({radiance_feature})"
+                )
+        except (ValueError, TypeError) as e:
+            errors.append(f"Invalid feature parameter types: {e}")
+    
+    def _validate_ofdm_consistency(self, base_station: Dict, warnings: list) -> None:
+        """Validate OFDM parameter consistency."""
+        ofdm = base_station.get('ofdm', {})
+        
+        try:
+            bandwidth = float(ofdm.get('bandwidth', 0))
+            num_subcarriers = int(ofdm.get('num_subcarriers', 0))
+            subcarrier_spacing = float(ofdm.get('subcarrier_spacing', 0))
+            fft_size = int(ofdm.get('fft_size', 0))
+            num_guard_carriers = int(ofdm.get('num_guard_carriers', 0))
+        except (ValueError, TypeError):
+            warnings.append("Invalid OFDM parameter types")
+            return
+        
+        # Check subcarrier spacing
+        if bandwidth > 0 and num_subcarriers > 0 and subcarrier_spacing > 0:
+            expected_spacing = bandwidth / num_subcarriers
+            spacing_error = abs(subcarrier_spacing - expected_spacing) / expected_spacing
+            if spacing_error > 0.01:  # 1% tolerance
+                warnings.append(
+                    f"OFDM subcarrier spacing mismatch: "
+                    f"configured({subcarrier_spacing:.1f} Hz) vs "
+                    f"calculated({expected_spacing:.1f} Hz), "
+                    f"error: {spacing_error*100:.2f}%"
+                )
+        
+        # Check guard carriers
+        if fft_size > 0 and num_subcarriers > 0:
+            expected_guards = (fft_size - num_subcarriers) / 2
+            if abs(num_guard_carriers - expected_guards) > 0.5:
+                warnings.append(
+                    f"OFDM guard carriers mismatch: "
+                    f"configured({num_guard_carriers}) vs "
+                    f"calculated({expected_guards})"
+                )
+    
+    def _validate_antenna_array_consistency(self, base_station: Dict, warnings: list) -> None:
+        """Validate antenna array configuration consistency."""
+        num_antennas = base_station.get('num_antennas', 0)
+        antenna_array = base_station.get('antenna_array', {})
+        configuration = antenna_array.get('configuration', '')
+        
+        # Parse antenna array configuration (e.g., '8x8')
+        if 'x' in configuration:
+            try:
+                parts = configuration.split('x')
+                if len(parts) == 2:
+                    rows, cols = int(parts[0]), int(parts[1])
+                    expected_antennas = rows * cols
+                    if expected_antennas != num_antennas:
+                        warnings.append(
+                            f"Antenna array configuration mismatch: "
+                            f"configuration({configuration}) = {expected_antennas} antennas, "
+                            f"but num_antennas = {num_antennas}"
+                        )
+            except (ValueError, IndexError):
+                warnings.append(f"Invalid antenna array configuration format: {configuration}")
+    
+    def _validate_training_consistency(self, training: Dict, warnings: list) -> None:
+        """Validate training parameter consistency."""
+        try:
+            batches_per_epoch = int(training.get('batches_per_epoch', 0))
+            gradient_accumulation_steps = int(training.get('gradient_accumulation_steps', 1))
+            
+            effective_batch_size = batches_per_epoch * gradient_accumulation_steps
+            
+            # Check for reasonable effective batch size
+            if effective_batch_size > 1000:
+                warnings.append(
+                    f"Very large effective batch size: "
+                    f"batches_per_epoch({batches_per_epoch}) × "
+                    f"gradient_accumulation_steps({gradient_accumulation_steps}) = "
+                    f"{effective_batch_size}"
+                )
+            elif effective_batch_size < 4:
+                warnings.append(
+                    f"Very small effective batch size: "
+                    f"batches_per_epoch({batches_per_epoch}) × "
+                    f"gradient_accumulation_steps({gradient_accumulation_steps}) = "
+                    f"{effective_batch_size}"
+                )
+        except (ValueError, TypeError):
+            warnings.append("Invalid training parameter types")
 
 
 def load_config(config_path: str) -> ConfigLoader:

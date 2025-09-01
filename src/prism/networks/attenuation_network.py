@@ -119,8 +119,10 @@ class AttenuationNetwork(nn.Module):
         if self.complex_output:
             # Reshape to (batch_size, output_dim, 2) for complex representation
             output = output.view(batch_size, self.output_dim, 2)
-            # Convert to complex tensor
-            output = torch.complex(output[..., 0], output[..., 1])
+            # Convert to complex tensor with explicit dtype to avoid ComplexHalf warning
+            real_part = output[..., 0].to(torch.float32)
+            imag_part = output[..., 1].to(torch.float32)
+            output = torch.complex(real_part, imag_part)
         
         return output
     

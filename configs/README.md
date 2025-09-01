@@ -10,6 +10,9 @@ This document explains the configuration parameters for the Prism neural network
 - ✅ **Comprehensive Testing**: Complete testing pipeline with visualization
 - ✅ **Performance Optimizations**: Reduced computational complexity for faster training
 - ✅ **Template Variables**: Dynamic path resolution in configuration files
+- ✅ **Spatial Spectrum Loss**: Advanced loss function for beamforming and DOA applications
+- ✅ **Multi-objective Training**: Configurable loss weights for CSI, PDP, and spatial spectrum components
+- ✅ **Visualization Support**: Automatic generation of spatial spectrum comparison plots
 
 ## Table of Contents
 1. [Key Concepts Clarification](#key-concepts-clarification)
@@ -22,11 +25,12 @@ This document explains the configuration parameters for the Prism neural network
 8. [Testing Configuration](#testing-configuration)
 9. [Input Configuration](#input-configuration)
 10. [Output Configuration](#output-configuration)
-11. [Performance Optimization Guide](#performance-optimization-guide)
-12. [CUDA Acceleration Guide](#cuda-acceleration-guide)
-13. [Recent Updates and Improvements](#recent-updates-and-improvements-january-2025)
-14. [Configuration Examples](#configuration-examples)
-15. [Troubleshooting Guide](#troubleshooting-guide)
+11. [Spatial Spectrum Loss Configuration](#spatial-spectrum-loss-configuration)
+12. [Performance Optimization Guide](#performance-optimization-guide)
+13. [CUDA Acceleration Guide](#cuda-acceleration-guide)
+14. [Recent Updates and Improvements](#recent-updates-and-improvements-january-2025)
+15. [Configuration Examples](#configuration-examples)
+16. [Troubleshooting Guide](#troubleshooting-guide)
 
 ## Key Concepts Clarification
 
@@ -404,13 +408,48 @@ training:
 ### Loss Function Configuration
 ```yaml
 training:
-  loss_function: 'mse'               # Loss function type
-  loss_weights:
-    csi_loss: 1.0                    # Weight for CSI prediction loss
-    regularization: 0.01             # Weight for regularization terms
+  loss:
+    # Overall loss weights
+    csi_weight: 0.7                  # Weight for CSI prediction loss
+    pdp_weight: 300.0                # Weight for PDP loss (increased to balance scale difference)
+    spatial_spectrum_weight: 0.0     # Weight for spatial spectrum loss (disabled by default)
+    regularization_weight: 0.01      # Weight for regularization terms
+    
+    # CSI Loss Configuration
+    csi_loss:
+      type: 'hybrid'                 # Loss type: 'mse', 'mae', 'complex_mse', 'magnitude_phase', 'hybrid'
+      phase_weight: 2.0              # Weight for phase component (increased for RF/beamforming applications)
+      magnitude_weight: 1.0          # Weight for magnitude component (maintained)
+      cmse_weight: 0.5               # Weight for CMSE component (reduced to balance)
+    
+    # PDP Loss Configuration  
+    pdp_loss:
+      type: 'hybrid'                 # Loss type: 'mse', 'delay', 'hybrid'
+      fft_size: 512                  # FFT size for PDP computation
+      normalize_pdp: true            # Whether to normalize PDPs before comparison
+    
+    # Spatial Spectrum Loss Configuration
+    spatial_spectrum_loss:
+      enabled: false                 # Enable/disable spatial spectrum loss (disabled by default)
+      weight: 0.1                    # Weight for spatial spectrum loss component
+      algorithm: 'bartlett'          # Spatial spectrum estimation algorithm ('bartlett', 'capon', 'music')
+      fusion_method: 'average'       # Multi-subcarrier fusion method ('average', 'max')
+      theta_range: [-60.0, 2.0, 60.0]   # Elevation angle range [min, step, max] in degrees
+      phi_range: [0.0, 2.0, 360.0]      # Azimuth angle range [min, step, max] in degrees
 ```
 
-**Description**: Loss function selection and weighting for multi-objective training.
+**Description**: Comprehensive loss function configuration supporting multiple loss types:
+
+- **CSI Loss**: Hybrid loss combining complex MSE, magnitude, and phase components for accurate channel prediction
+- **PDP Loss**: Power Delay Profile loss for time-domain validation using FFT-based analysis
+- **Spatial Spectrum Loss**: Optional spatial spectrum loss for direction-of-arrival and beamforming applications
+- **Multi-objective Training**: Configurable weights allow balancing different loss components based on application requirements
+
+**Spatial Spectrum Loss Features**:
+- **Bartlett Beamforming**: Currently supports Bartlett spatial spectrum estimation
+- **Configurable Angular Resolution**: Adjustable elevation and azimuth angle sampling
+- **Multi-subcarrier Fusion**: Averages spatial spectrums across all subcarriers
+- **Visualization Support**: Generates comparison plots during testing for analysis
 
 ### Optimizer Configuration
 ```yaml
@@ -429,12 +468,43 @@ training:
 training:
   lr_scheduler:
     enabled: true                    # Enable learning rate scheduling
-    type: 'step'                     # Scheduler type
+    type: 'reduce_on_plateau'        # Scheduler type
+    
+    # ReduceLROnPlateau parameters (recommended for adaptive training)
+    mode: 'min'                      # Monitor validation loss minimum
+    factor: 0.7                      # Reduce LR by 30% each time
+    patience: 4                      # Wait 4 epochs before reducing LR
+    threshold: 1e-4                  # Minimum improvement threshold
+    threshold_mode: 'rel'            # Relative threshold mode
+    cooldown: 1                      # Cooldown period after LR reduction
+    min_lr_plateau: 5e-6             # Minimum learning rate limit
+    verbose: true                    # Print LR reduction messages
+    
+    # StepLR parameters (alternative fixed-step scheduling)
     step_size: 30                    # Step size for StepLR
     gamma: 0.1                       # Multiplicative factor for LR decay
 ```
 
-**Description**: Learning rate scheduling for improved training convergence.
+**Description**: Learning rate scheduling for improved training convergence. The system supports multiple scheduler types:
+
+- **`reduce_on_plateau`** (Recommended): Automatically reduces learning rate when validation loss stops improving. Best for handling training instability and loss fluctuations.
+- **`step`**: Reduces learning rate at fixed intervals. Suitable when you know the optimal decay schedule.
+- **`plateau`**: Alias for `reduce_on_plateau` for backward compatibility.
+
+**Supported Scheduler Types**:
+- `reduce_on_plateau`: Adaptive scheduling based on validation loss
+- `step`: Fixed-step learning rate decay
+- `plateau`: Backward compatibility alias for `reduce_on_plateau`
+
+**Parameter Details**:
+- `mode`: 'min' for loss minimization, 'max' for metric maximization
+- `factor`: Multiplication factor for learning rate reduction (0.0 < factor < 1.0)
+- `patience`: Number of epochs to wait before reducing learning rate
+- `threshold`: Minimum change to qualify as improvement
+- `threshold_mode`: 'rel' for relative threshold, 'abs' for absolute
+- `cooldown`: Number of epochs to wait before resuming normal operation
+- `min_lr_plateau`: Lower bound on the learning rate
+- `verbose`: Whether to print messages when learning rate is reduced
 
 ### Early Stopping
 ```yaml
@@ -529,6 +599,159 @@ input:
 ```
 
 **Note**: The system automatically detects which configuration approach is used and handles data loading accordingly.
+
+---
+
+## Spatial Spectrum Loss Configuration
+
+The Spatial Spectrum Loss is an advanced loss function that computes spatial spectrum from CSI data and compares predicted vs target spatial spectrums. This is particularly useful for beamforming, direction-of-arrival estimation, and spatial channel modeling applications.
+
+### Basic Configuration
+
+```yaml
+training:
+  loss:
+    spatial_spectrum_weight: 0.1       # Weight for spatial spectrum loss (0.0 = disabled)
+    
+    spatial_spectrum_loss:
+      enabled: true                    # Enable/disable spatial spectrum loss
+      algorithm: 'bartlett'            # Spatial spectrum estimation algorithm
+      fusion_method: 'average'         # Multi-subcarrier fusion method
+      theta_range: [-60.0, 2.0, 60.0] # Elevation angle range [min, step, max] in degrees
+      phi_range: [0.0, 2.0, 360.0]    # Azimuth angle range [min, step, max] in degrees
+```
+
+### Required Base Station Configuration
+
+The Spatial Spectrum Loss requires specific base station antenna array configuration:
+
+```yaml
+base_station:
+  antenna_array:
+    configuration: '8x8'              # Antenna array configuration (M x N)
+    element_spacing: 'half_wavelength' # Element spacing type
+    custom_spacing: null              # Custom spacing in meters (if not half_wavelength)
+  
+  ofdm:
+    center_frequency: 3.5e9           # Center frequency in Hz (required for wavelength calculation)
+    bandwidth: 100.0e6                # Bandwidth in Hz (required for subcarrier frequencies)
+    num_subcarriers: 408              # Total number of subcarriers
+```
+
+### Algorithm Options
+
+**Currently Supported:**
+- `'bartlett'`: Bartlett beamforming (classical beamforming)
+
+**Future Support:**
+- `'capon'`: Capon beamforming (adaptive beamforming)
+- `'music'`: MUSIC algorithm (subspace-based method)
+
+### Fusion Methods
+
+- `'average'`: Average spatial spectrums across all subcarriers (recommended)
+- `'max'`: Take maximum values across subcarriers
+
+### Angular Resolution Configuration
+
+The `theta_range` and `phi_range` parameters use the format `[min, step, max]` in degrees:
+
+```yaml
+theta_range: [-60.0, 2.0, 60.0]     # Elevation: -60° to +60° with 2° steps (61 points)
+phi_range: [0.0, 2.0, 360.0]        # Azimuth: 0° to 360° with 2° steps (181 points)
+```
+
+**Performance Considerations:**
+- Higher angular resolution (smaller step size) increases computation time
+- Typical configurations:
+  - **Fast**: `theta_range: [-60.0, 5.0, 60.0]`, `phi_range: [0.0, 10.0, 360.0]`
+  - **Balanced**: `theta_range: [-60.0, 2.0, 60.0]`, `phi_range: [0.0, 2.0, 360.0]`
+  - **High-res**: `theta_range: [-90.0, 1.0, 90.0]`, `phi_range: [0.0, 1.0, 360.0]`
+
+### Usage Examples
+
+#### Enable for Beamforming Applications
+```yaml
+training:
+  loss:
+    csi_weight: 0.6                   # Reduce CSI weight slightly
+    pdp_weight: 200.0                 # Maintain PDP weight
+    spatial_spectrum_weight: 0.2      # Add spatial spectrum component
+    
+    spatial_spectrum_loss:
+      enabled: true
+      algorithm: 'bartlett'
+      fusion_method: 'average'
+      theta_range: [-45.0, 2.0, 45.0]  # Focus on main lobe region
+      phi_range: [0.0, 2.0, 360.0]
+```
+
+#### Disable Spatial Spectrum Loss (Default)
+```yaml
+training:
+  loss:
+    spatial_spectrum_weight: 0.0      # Set weight to 0 to disable
+    
+    spatial_spectrum_loss:
+      enabled: false                  # Explicitly disable
+```
+
+### Testing and Visualization
+
+When enabled, the Spatial Spectrum Loss provides visualization capabilities during testing:
+
+```python
+# In testing code
+result = loss_function.compute_and_visualize_spatial_spectrum_loss(
+    predicted_csi, target_csi, 
+    save_path='results/sionna/testing/plots',
+    sample_idx=0
+)
+
+if result:
+    loss_value, plot_path = result
+    print(f"Spatial spectrum loss: {loss_value:.6f}")
+    print(f"Comparison plot saved to: {plot_path}")
+```
+
+**Generated Visualizations:**
+- Side-by-side comparison of predicted vs target spatial spectrums
+- Color-coded power levels with elevation/azimuth axes
+- Loss value and algorithm information in plot title
+- Automatic saving to `results/sionna/testing/plots/` directory
+
+### Performance Impact
+
+**Computational Complexity:**
+- **Training**: Adds significant computation per batch (depends on angular resolution)
+- **Memory**: Moderate additional GPU memory usage
+- **Time**: Approximately 2-5x slower training depending on configuration
+
+**Optimization Tips:**
+1. **Start with coarse resolution** during initial training
+2. **Use smaller subcarrier counts** for faster prototyping
+3. **Enable only when spatial characteristics are important** for your application
+4. **Monitor GPU memory usage** with high-resolution configurations
+
+### Troubleshooting
+
+**Common Issues:**
+
+1. **"Configuration must contain 'base_station.antenna_array.configuration'"**
+   - Ensure antenna array configuration is properly set in base_station section
+
+2. **"BS antennas doesn't match array config"**
+   - Verify `num_antennas` matches `M × N` from antenna array configuration
+
+3. **High memory usage**
+   - Reduce angular resolution (increase step size)
+   - Use smaller batch sizes
+   - Consider reducing number of subcarriers for testing
+
+4. **Slow training**
+   - Use coarser angular resolution during initial experiments
+   - Enable only for final training runs
+   - Consider using CPU ray tracing mode for debugging
 
 ---
 
