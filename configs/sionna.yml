@@ -96,6 +96,7 @@ base_station:
 user_equipment:
   target_antenna_index: 0            # Which UE antenna to extract from dataset (0-based index: 0, 1, 2, or 3)
                                      # Dataset has 4 antennas, but we extract and process only one
+  num_ue_antennas: 1                 # Number of UE antennas to process (always 1 for single antenna processing)
   antenna_config: '1x64'             # 1 UE antenna per device, 64 BS antennas
   position_range: [-250.0, 250.0]    # UE position range in meters
   height_range: [1.0, 2.0]           # UE height range in meters
