@@ -653,7 +653,7 @@ class PrismTrainer:
         self.progress_check_interval = 30  # Check progress every 30 seconds
         
         # Import and setup loss function
-        from prism.loss_functions import PrismLossFunction, DEFAULT_LOSS_CONFIG
+        from prism.loss import PrismLossFunction, DEFAULT_LOSS_CONFIG
         
         # Create loss configuration
         loss_config = DEFAULT_LOSS_CONFIG.copy()

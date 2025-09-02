@@ -857,6 +857,41 @@ class PrismTrainingInterface(nn.Module):
             'num_selected': num_selected
         }
 
+    def _extract_selected_subcarriers(self, csi_data: torch.Tensor, selection_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Extract selected subcarriers from full CSI data based on selection mask
+        
+        Args:
+            csi_data: Full CSI tensor (batch_size, num_subcarriers, num_ue_antennas, num_bs_antennas)
+            selection_mask: Boolean mask (batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers)
+            
+        Returns:
+            selected_csi: CSI tensor with only selected subcarriers 
+                         (batch_size, num_selected_subcarriers, num_ue_antennas, num_bs_antennas)
+        """
+        batch_size, num_subcarriers, num_ue_antennas, num_bs_antennas = csi_data.shape
+        device = csi_data.device
+        
+        # Get the number of selected subcarriers (should be consistent across batch)
+        num_selected = torch.sum(selection_mask[0, 0, 0, :]).item()
+        
+        # Initialize output tensor
+        selected_csi = torch.zeros(
+            (batch_size, num_selected, num_ue_antennas, num_bs_antennas), 
+            dtype=csi_data.dtype, 
+            device=device
+        )
+        
+        # Extract selected subcarriers for each batch sample
+        for b in range(batch_size):
+            # Get selected subcarrier indices for this batch (should be same across antennas)
+            # Use the first antenna pair as reference
+            selected_indices = torch.where(selection_mask[b, 0, 0, :])[0]
+            
+            # Extract selected subcarriers
+            selected_csi[b] = csi_data[b, selected_indices, :, :]
+        
+        return selected_csi
     
     def compute_loss(
         self, 
@@ -995,15 +1030,20 @@ class PrismTrainingInterface(nn.Module):
             logger.debug(f"Subcarrier sampling ratio: {self.subcarrier_sampling_ratio}")
             logger.debug(f"Expected selected subcarriers per antenna-UE pair: {int(self.prism_network.num_subcarriers * self.subcarrier_sampling_ratio)}")
             
-            # For spatial spectrum loss, we need full 4D CSI tensors, not individual subcarrier values
-            # So we pass the original predictions and targets, and let the loss function handle subcarrier selection
-            predictions_dict = {'csi': predictions}
-            targets_dict = {'csi': targets}
+            # Create selected CSI tensors for loss computation
+            # Extract selected subcarriers based on current_selection_mask
+            selected_predictions = self._extract_selected_subcarriers(predictions, self.current_selection_mask)
+            selected_targets = self._extract_selected_subcarriers(targets, self.current_selection_mask)
             
-            # Also pass the traced values for backward compatibility with other loss components
+            # Prepare data for loss functions
+            predictions_dict = {'csi': selected_predictions}
+            targets_dict = {'csi': selected_targets}
+            
+            # Also pass the traced values for backward compatibility with CSI loss component
             predictions_dict['traced_csi'] = traced_predictions
             targets_dict['traced_csi'] = traced_targets
             
+            # Call loss function without masks (data is already selected)
             loss, loss_components = loss_function(predictions_dict, targets_dict)
             
             # Log detailed loss components

@@ -47,10 +47,10 @@ results = system.analyze()
 Prism/
 ├── src/prism/          # Main source code
 ├── tests/              # Test suite
-├── examples/           # Usage examples
 ├── docs/               # Documentation
 ├── configs/            # Configuration files
 ├── scripts/            # Utility scripts
+├── results/            # Training and testing results
 └── data/               # Data files
 ```
 
@@ -97,11 +97,11 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 If you use Prism in your research, please cite:
 
 ```bibtex
-@software{prism_rf,
-  title={Prism: RF Neural Radiance Fields for OFDM Communication},
-  author={Prism Project Team},
-  year={2024},
-  url={https://github.com/tagsysx/Prism}
+@ARTICLE{11068936,
+  author={Zhao, Xiaopeng and An, Zhenlin and Pan, Qingrui and Yang, Lei},
+  journal={IEEE Transactions on Mobile Computing},
+  title={Frequency-Aware Neural Radio-Frequency Radiance Fields},
+  year={2025}
 }
 ```
 

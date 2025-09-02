@@ -184,6 +184,8 @@ virtual_links:
 
 ## Data Flow
 
+### High-Level Data Flow Overview
+
 ```
 1. Spatial Position (3D) → IPE Encoding
    ↓
@@ -211,6 +213,118 @@ virtual_links:
     ↓
 13. N_{\text{UE}} × K Radiation Factors (All UE Antenna Channels)
 ```
+
+### Detailed Training Sequence Diagram
+
+The following sequence diagram shows the detailed method calls and data flow during the training process:
+
+```mermaid
+sequenceDiagram
+    participant TS as Training Script
+    participant TI as PrismTrainingInterface
+    participant PN as PrismNetwork
+    participant AN as AttenuationNetwork
+    participant AD as AttenuationDecoder
+    participant AC as AntennaCodebook
+    participant ANT as AntennaNetwork
+    participant RN as RadianceNetwork
+    participant RT as RayTracer
+    participant LF as LossFunction
+    
+    %% Training Loop Start
+    TS->>TI: forward(ue_positions, bs_position, antenna_indices)
+    
+    %% Step 1: Subcarrier Selection
+    TI->>TI: _generate_subcarrier_selection()
+    Note over TI: Random subcarrier sampling<br/>K' = α × K subcarriers
+    
+    %% Step 2: For each BS antenna
+    loop For each BS Antenna
+        TI->>AC: forward(antenna_indices)
+        AC-->>TI: antenna_embedding [64D]
+        
+        TI->>ANT: forward(antenna_embedding)
+        ANT-->>TI: directional_importance [A×B]
+        
+        TI->>TI: select_top_k_directions()
+        Note over TI: Select top-K directions<br/>based on importance
+        
+        %% Step 3: Ray Tracing
+        TI->>RT: trace_rays_pytorch_gpu()
+        
+        loop For each direction
+            loop For each ray sample point
+                RT->>AN: forward(sampled_position)
+                AN-->>RT: spatial_features [128D]
+                
+                RT->>AD: forward(spatial_features)
+                AD-->>RT: attenuation_factors [N_UE×K]
+                
+                RT->>RN: forward(ue_pos, view_dir, features, antenna_emb)
+                RN-->>RT: radiance_values [N_UE×K]
+                
+                RT->>RT: accumulate_complex_signal()
+                Note over RT: S = Σ exp(-Σρ·Δt) × (1-exp(-ρ·Δt)) × radiance
+            end
+        end
+        
+        RT-->>TI: complex_signals [Complex CSI]
+    end
+    
+    %% Step 4: Combine results
+    TI->>TI: _update_csi_predictions_unified()
+    TI->>TI: _create_full_predictions()
+    TI-->>TS: outputs{csi_predictions, ray_results}
+    
+    %% Step 5: Loss Computation
+    TS->>LF: forward(predictions, targets)
+    
+    %% Loss Components
+    LF->>LF: compute_csi_loss()
+    Note over LF: Complex MSE Loss
+    
+    LF->>LF: compute_pdp_loss()
+    Note over LF: Power Delay Profile Loss<br/>FFT-based time domain
+    
+    LF->>LF: compute_spatial_spectrum_loss()
+    Note over LF: Spatial spectrum validation
+    
+    LF-->>TS: total_loss, loss_components
+    
+    %% Step 6: Backpropagation
+    TS->>TS: loss.backward()
+    TS->>TS: optimizer.step()
+    
+    Note over TS,LF: Training iteration complete
+```
+
+### Key Data Flow Characteristics
+
+**1. Subcarrier Sampling Optimization**:
+- Random selection of K' = α × K subcarriers per training iteration
+- Reduces computational complexity while maintaining training effectiveness
+- Sampling ratio α typically ranges from 0.1 to 0.3
+
+**2. BS-Centric Ray Tracing**:
+- Rays originate from BS antenna position, not from UE
+- Fixed ray length independent of UE positions
+- UE positions used only as RadianceNetwork inputs
+
+**3. Complex Signal Preservation**:
+- All computations maintain complex number representation
+- Phase and amplitude information preserved throughout pipeline
+- Only converted to real values during loss computation
+
+**4. Importance-Based Direction Sampling**:
+- AntennaNetwork generates A×B directional importance matrix
+- Top-K selection reduces computational load from A×B to K directions
+- Antenna-specific directional preferences learned through training
+
+**5. Vectorized Neural Network Integration**:
+- AttenuationNetwork: 3D position → 128D spatial features
+- AttenuationDecoder: 128D features → N_UE×K attenuation coefficients
+- RadianceNetwork: Multi-input → N_UE×K radiance values
+- All networks process batched data for efficiency
 
 
 

@@ -40,7 +40,7 @@ from prism.ray_tracer_cpu import CPURayTracer
 from prism.ray_tracer_cuda import CUDARayTracer
 from prism.training_interface import PrismTrainingInterface
 from prism.data_utils import load_and_split_data, check_dataset_compatibility
-from prism.loss_functions import SpatialSpectrumLoss
+from prism.loss import SpatialSpectrumLoss
 
 # Configure logging
 logging.basicConfig(
@@ -619,7 +619,7 @@ class PrismTester:
                 if not ssl_config_for_testing.get('fusion_method'):
                     ssl_config_for_testing['fusion_method'] = 'average'
                 if not ssl_config_for_testing.get('theta_range'):
-                    ssl_config_for_testing['theta_range'] = [-60.0, 5.0, 60.0]
+                    ssl_config_for_testing['theta_range'] = [0.0, 5.0, 90.0]
                 if not ssl_config_for_testing.get('phi_range'):
                     ssl_config_for_testing['phi_range'] = [0.0, 10.0, 360.0]
                 
@@ -695,7 +695,7 @@ class PrismTester:
             raise
     
     def _plot_random_csi_amplitude_comparison(self, plots_dir: Path):
-        """Plot CSI amplitude comparison for 20 randomly selected samples across all 64 BS antennas"""
+        """Plot CSI amplitude comparison for 20 randomly selected samples across all 64 BS antennas (using selected subcarriers only)"""
         logger.info("Creating random CSI amplitude comparison plots...")
         
         try:
@@ -709,18 +709,33 @@ class PrismTester:
             # Get data dimensions
             _, num_subcarriers, num_ue_antennas, num_bs_antennas = self.predictions.shape
             
+            # Get selected subcarriers based on training configuration
+            ray_tracing_config = self.config.get('ray_tracing', {})
+            subcarrier_config = ray_tracing_config.get('subcarrier_sampling', {})
+            sampling_ratio = subcarrier_config.get('sampling_ratio', 0.8)
+            sampling_method = subcarrier_config.get('sampling_method', 'uniform')
+            
+            # Simulate subcarrier selection (same as training)
+            selection_mask = self._simulate_subcarrier_selection(
+                num_subcarriers, sampling_ratio, sampling_method, total_samples
+            )
+            
             # Create figure with 4 rows x 5 columns (20 subplots)
             fig, axes = plt.subplots(4, 5, figsize=(25, 20))
-            fig.suptitle('Random CSI Amplitude Comparison (20 Samples)\nEach plot shows a specific (Subcarrier, UE Position) across all 64 BS antennas', 
+            fig.suptitle(f'Random CSI Amplitude Comparison (20 Samples) - Selected Subcarriers Only\nUsing {sampling_method} sampling with {sampling_ratio*100:.0f}% ratio\nEach plot shows a specific (Selected Subcarrier, UE Position) across all 64 BS antennas', 
                         fontsize=16, fontweight='bold')
             
             for idx, sample_idx in enumerate(selected_indices):
                 row = idx // 5
                 col = idx % 5
                 
-                # Randomly select subcarrier for this sample
+                # Get selected subcarriers for this sample
+                sample_selected_subcarriers = np.where(selection_mask[sample_idx, :])[0]
+                
+                # Randomly select from the selected subcarriers only
                 np.random.seed(42 + sample_idx)  # Different seed for each sample
-                selected_subcarrier = np.random.randint(0, num_subcarriers)
+                selected_subcarrier_idx = np.random.randint(0, len(sample_selected_subcarriers))
+                selected_subcarrier = sample_selected_subcarriers[selected_subcarrier_idx]
                 selected_ue_antenna = 0  # Only one UE antenna available
                 
                 # Get predicted and target CSI for this specific sample and subcarrier across all BS antennas
@@ -767,7 +782,7 @@ class PrismTester:
             raise
 
     def _plot_random_csi_phase_comparison(self, plots_dir: Path):
-        """Plot CSI phase comparison for 20 randomly selected samples across all 64 BS antennas"""
+        """Plot CSI phase comparison for 20 randomly selected samples across all 64 BS antennas (using selected subcarriers only)"""
         logger.info("Creating random CSI phase comparison plots...")
         
         try:
@@ -781,18 +796,33 @@ class PrismTester:
             # Get data dimensions
             _, num_subcarriers, num_ue_antennas, num_bs_antennas = self.predictions.shape
             
+            # Get selected subcarriers based on training configuration (same as amplitude plot)
+            ray_tracing_config = self.config.get('ray_tracing', {})
+            subcarrier_config = ray_tracing_config.get('subcarrier_sampling', {})
+            sampling_ratio = subcarrier_config.get('sampling_ratio', 0.8)
+            sampling_method = subcarrier_config.get('sampling_method', 'uniform')
+            
+            # Simulate subcarrier selection (same as training and amplitude plot)
+            selection_mask = self._simulate_subcarrier_selection(
+                num_subcarriers, sampling_ratio, sampling_method, total_samples
+            )
+            
             # Create figure with 4 rows x 5 columns (20 subplots)
             fig, axes = plt.subplots(4, 5, figsize=(25, 20))
-            fig.suptitle('Random CSI Phase Comparison (20 Samples)\nEach plot shows a specific (Subcarrier, UE Position) across all 64 BS antennas', 
+            fig.suptitle(f'Random CSI Phase Comparison (20 Samples) - Selected Subcarriers Only\nUsing {sampling_method} sampling with {sampling_ratio*100:.0f}% ratio\nEach plot shows a specific (Selected Subcarrier, UE Position) across all 64 BS antennas', 
                         fontsize=16, fontweight='bold')
             
             for idx, sample_idx in enumerate(selected_indices):
                 row = idx // 5
                 col = idx % 5
                 
-                # Randomly select subcarrier for this sample (same as amplitude plot)
+                # Get selected subcarriers for this sample
+                sample_selected_subcarriers = np.where(selection_mask[sample_idx, :])[0]
+                
+                # Randomly select from the selected subcarriers only (same as amplitude plot)
                 np.random.seed(42 + sample_idx)  # Same seed as amplitude plot for consistency
-                selected_subcarrier = np.random.randint(0, num_subcarriers)
+                selected_subcarrier_idx = np.random.randint(0, len(sample_selected_subcarriers))
+                selected_subcarrier = sample_selected_subcarriers[selected_subcarrier_idx]
                 selected_ue_antenna = 0  # Only one UE antenna available
                 
                 # Get predicted and target CSI for this specific sample and subcarrier across all BS antennas
@@ -873,7 +903,7 @@ class PrismTester:
             dx = dy = 0.5 * wavelength  # Half wavelength spacing
             
             # Angle grids for spatial spectrum
-            theta_range = np.linspace(-60, 60, 25)  # Elevation angles in degrees
+            theta_range = np.linspace(0, 90, 25)    # Elevation angles in degrees (0 to 90)
             phi_range = np.linspace(0, 360, 37)     # Azimuth angles in degrees
             theta_grid = np.deg2rad(theta_range)    # Convert to radians
             phi_grid = np.deg2rad(phi_range)
@@ -883,13 +913,28 @@ class PrismTester:
             fig.suptitle('Random Spatial Spectrum Comparison (10 Samples)\nLeft: Predicted, Right: Target', 
                         fontsize=20, fontweight='bold')
             
+            # Get selected subcarriers based on training configuration
+            ray_tracing_config = self.config.get('ray_tracing', {})
+            subcarrier_config = ray_tracing_config.get('subcarrier_sampling', {})
+            sampling_ratio = subcarrier_config.get('sampling_ratio', 0.8)
+            sampling_method = subcarrier_config.get('sampling_method', 'uniform')
+            
+            # Simulate subcarrier selection (same as training)
+            selection_mask = self._simulate_subcarrier_selection(
+                num_subcarriers, sampling_ratio, sampling_method, total_samples
+            )
+            
             for idx, sample_idx in enumerate(selected_indices):
                 row = idx // 5
                 col_base = (idx % 5) * 2  # Each sample gets 2 columns (predicted and target)
                 
-                # Randomly select subcarrier for this sample
+                # Get selected subcarriers for this sample
+                sample_selected_subcarriers = np.where(selection_mask[sample_idx, :])[0]
+                
+                # Randomly select from the selected subcarriers only
                 np.random.seed(42 + sample_idx)  # Different seed for each sample
-                selected_subcarrier = np.random.randint(0, num_subcarriers)
+                selected_subcarrier_idx = np.random.randint(0, len(sample_selected_subcarriers))
+                selected_subcarrier = sample_selected_subcarriers[selected_subcarrier_idx]
                 selected_ue_antenna = 0  # Only one UE antenna available
                 
                 # Get predicted and target CSI for this specific sample and subcarrier across all BS antennas
@@ -1057,17 +1102,35 @@ class PrismTester:
             raise
 
     def _plot_error_distribution(self, plots_dir: Path):
-        """Plot error distribution with error bars per subcarrier"""
+        """Plot error distribution with error bars per subcarrier (using selected subcarriers only)"""
         fig, axes = plt.subplots(1, 2, figsize=(15, 6))
         
-        # Calculate errors
+        # Get full CSI data
         pred_np = self.predictions.numpy()
         target_np = self.csi_target.cpu().numpy()
         
-        # Calculate errors for each sample
-        mag_error = np.abs(np.abs(pred_np) - np.abs(target_np))
-        pred_phase = np.angle(pred_np)
-        target_phase = np.angle(target_np)
+        # Get selected subcarriers based on training configuration
+        num_samples, num_subcarriers, num_ue_antennas, num_bs_antennas = pred_np.shape
+        ray_tracing_config = self.config.get('ray_tracing', {})
+        subcarrier_config = ray_tracing_config.get('subcarrier_sampling', {})
+        sampling_ratio = subcarrier_config.get('sampling_ratio', 0.8)
+        sampling_method = subcarrier_config.get('sampling_method', 'uniform')
+        
+        # Simulate subcarrier selection (same as training)
+        selection_mask = self._simulate_subcarrier_selection(
+            num_subcarriers, sampling_ratio, sampling_method, num_samples
+        )
+        
+        # Extract selected subcarriers
+        selected_pred_np = self._extract_selected_subcarriers(pred_np, selection_mask)
+        selected_target_np = self._extract_selected_subcarriers(target_np, selection_mask)
+        
+        logger.info(f"Using selected subcarriers: {selected_pred_np.shape[1]} out of {num_subcarriers} total")
+        
+        # Calculate errors for selected subcarriers only
+        mag_error = np.abs(np.abs(selected_pred_np) - np.abs(selected_target_np))
+        pred_phase = np.angle(selected_pred_np)
+        target_phase = np.angle(selected_target_np)
         phase_diff = pred_phase - target_phase
         # Use same wrapping method as training: torch.remainder(phase_diff + π, 2π) - π
         phase_diff = np.remainder(phase_diff + np.pi, 2*np.pi) - np.pi
@@ -1164,18 +1227,36 @@ class PrismTester:
         logger.info(f"Phase error per subcarrier - Mean: {overall_phase_mean:.6f}, Avg Std: {overall_phase_std:.6f}")
     
     def _plot_spatial_performance(self, plots_dir: Path):
-        """Plot spatial performance map showing error by UE position"""
+        """Plot spatial performance map showing error by UE position (using selected subcarriers only)"""
         fig, axes = plt.subplots(1, 2, figsize=(15, 6))
         
-        # Calculate error per UE position
+        # Get full CSI data
         pred_np = self.predictions.numpy()
         target_np = self.csi_target.cpu().numpy()
         
-        # Calculate error per UE - need to handle different data shapes
+        # Get selected subcarriers based on training configuration
+        num_samples, num_subcarriers, num_ue_antennas, num_bs_antennas = pred_np.shape
+        ray_tracing_config = self.config.get('ray_tracing', {})
+        subcarrier_config = ray_tracing_config.get('subcarrier_sampling', {})
+        sampling_ratio = subcarrier_config.get('sampling_ratio', 0.8)
+        sampling_method = subcarrier_config.get('sampling_method', 'uniform')
+        
+        # Simulate subcarrier selection (same as training)
+        selection_mask = self._simulate_subcarrier_selection(
+            num_subcarriers, sampling_ratio, sampling_method, num_samples
+        )
+        
+        # Extract selected subcarriers
+        selected_pred_np = self._extract_selected_subcarriers(pred_np, selection_mask)
+        selected_target_np = self._extract_selected_subcarriers(target_np, selection_mask)
+        
+        logger.info(f"Spatial performance using selected subcarriers: {selected_pred_np.shape[1]} out of {num_subcarriers} total")
+        
+        # Calculate error per UE - using selected subcarriers only
         # First calculate magnitude and phase errors
-        mag_error = np.abs(np.abs(pred_np) - np.abs(target_np))
-        pred_phase = np.angle(pred_np)
-        target_phase = np.angle(target_np)
+        mag_error = np.abs(np.abs(selected_pred_np) - np.abs(selected_target_np))
+        pred_phase = np.angle(selected_pred_np)
+        target_phase = np.angle(selected_target_np)
         phase_diff = pred_phase - target_phase
         # Use same wrapping method as training: torch.remainder(phase_diff + π, 2π) - π
         phase_diff = np.remainder(phase_diff + np.pi, 2*np.pi) - np.pi
@@ -1238,22 +1319,40 @@ class PrismTester:
         logger.info(f"Spatial performance plot saved: {plot_path}")
     
     def _plot_subcarrier_performance(self, plots_dir: Path):
-        """Plot performance across subcarriers"""
+        """Plot performance across subcarriers (using selected subcarriers only)"""
         fig, axes = plt.subplots(1, 2, figsize=(15, 6))
         
+        # Get full CSI data
         pred_np = self.predictions.numpy()
         target_np = self.csi_target.cpu().numpy()
         
-        # Debug: Print shapes to understand the data structure
-        logger.info(f"Predictions shape: {pred_np.shape}")
-        logger.info(f"Target shape: {target_np.shape}")
+        # Get selected subcarriers based on training configuration
+        num_samples, num_subcarriers, num_ue_antennas, num_bs_antennas = pred_np.shape
+        ray_tracing_config = self.config.get('ray_tracing', {})
+        subcarrier_config = ray_tracing_config.get('subcarrier_sampling', {})
+        sampling_ratio = subcarrier_config.get('sampling_ratio', 0.8)
+        sampling_method = subcarrier_config.get('sampling_method', 'uniform')
         
-        # Calculate error per subcarrier
+        # Simulate subcarrier selection (same as training)
+        selection_mask = self._simulate_subcarrier_selection(
+            num_subcarriers, sampling_ratio, sampling_method, num_samples
+        )
+        
+        # Extract selected subcarriers
+        selected_pred_np = self._extract_selected_subcarriers(pred_np, selection_mask)
+        selected_target_np = self._extract_selected_subcarriers(target_np, selection_mask)
+        
+        # Debug: Print shapes to understand the data structure
+        logger.info(f"Original predictions shape: {pred_np.shape}")
+        logger.info(f"Selected predictions shape: {selected_pred_np.shape}")
+        logger.info(f"Using selected subcarriers: {selected_pred_np.shape[1]} out of {num_subcarriers} total")
+        
+        # Calculate error per subcarrier using selected subcarriers only
         # First calculate the errors
-        mag_error = np.abs(np.abs(pred_np) - np.abs(target_np))
+        mag_error = np.abs(np.abs(selected_pred_np) - np.abs(selected_target_np))
         # Calculate phase error with proper wrapping
-        pred_phase = np.angle(pred_np)
-        target_phase = np.angle(target_np)
+        pred_phase = np.angle(selected_pred_np)
+        target_phase = np.angle(selected_target_np)
         phase_diff = pred_phase - target_phase
         # Use same wrapping method as training: torch.remainder(phase_diff + π, 2π) - π
         phase_diff = np.remainder(phase_diff + np.pi, 2*np.pi) - np.pi
@@ -1307,16 +1406,35 @@ class PrismTester:
         logger.info(f"Subcarrier performance plot saved: {plot_path}")
     
     def _plot_error_cdf(self, plots_dir: Path):
-        """Plot CDF of magnitude and phase errors"""
+        """Plot CDF of magnitude and phase errors (using selected subcarriers only)"""
         fig, axes = plt.subplots(1, 2, figsize=(15, 6))
         
+        # Get full CSI data
         pred_np = self.predictions.numpy()
         target_np = self.csi_target.cpu().numpy()
         
-        # Calculate errors for all samples
-        mag_error = np.abs(np.abs(pred_np) - np.abs(target_np))
-        pred_phase = np.angle(pred_np)
-        target_phase = np.angle(target_np)
+        # Get selected subcarriers based on training configuration
+        num_samples, num_subcarriers, num_ue_antennas, num_bs_antennas = pred_np.shape
+        ray_tracing_config = self.config.get('ray_tracing', {})
+        subcarrier_config = ray_tracing_config.get('subcarrier_sampling', {})
+        sampling_ratio = subcarrier_config.get('sampling_ratio', 0.8)
+        sampling_method = subcarrier_config.get('sampling_method', 'uniform')
+        
+        # Simulate subcarrier selection (same as training)
+        selection_mask = self._simulate_subcarrier_selection(
+            num_subcarriers, sampling_ratio, sampling_method, num_samples
+        )
+        
+        # Extract selected subcarriers
+        selected_pred_np = self._extract_selected_subcarriers(pred_np, selection_mask)
+        selected_target_np = self._extract_selected_subcarriers(target_np, selection_mask)
+        
+        logger.info(f"Error CDF using selected subcarriers: {selected_pred_np.shape[1]} out of {num_subcarriers} total")
+        
+        # Calculate errors for selected subcarriers only
+        mag_error = np.abs(np.abs(selected_pred_np) - np.abs(selected_target_np))
+        pred_phase = np.angle(selected_pred_np)
+        target_phase = np.angle(selected_target_np)
         phase_diff = pred_phase - target_phase
         # Use same wrapping method as training: torch.remainder(phase_diff + π, 2π) - π
         phase_diff = np.remainder(phase_diff + np.pi, 2*np.pi) - np.pi
@@ -1392,18 +1510,39 @@ class PrismTester:
         logger.info(f"  95th percentile: {np.percentile(phase_error_flat, 95):.6f} rad")
     
     def _plot_spatial_spectrum_error_cdf(self, plots_dir: Path):
-        """Plot CDF of spatial spectrum errors"""
+        """Plot CDF of spatial spectrum errors (using selected subcarriers only)"""
         logger.info("Creating spatial spectrum error CDF plot...")
         
         try:
             # Import spatial spectrum functions
             from prism.spatial_spectrum import calculate_bartlett_spectrum, generate_steering_vector
             
+            # Get full CSI data
             pred_np = self.predictions.numpy()
             target_np = self.csi_target.cpu().numpy()
             
             # Shape: (samples, subcarriers, ue_antennas, bs_antennas)
             num_samples, num_subcarriers, num_ue_antennas, num_bs_antennas = pred_np.shape
+            
+            # Get selected subcarriers based on training configuration
+            ray_tracing_config = self.config.get('ray_tracing', {})
+            subcarrier_config = ray_tracing_config.get('subcarrier_sampling', {})
+            sampling_ratio = subcarrier_config.get('sampling_ratio', 0.8)
+            sampling_method = subcarrier_config.get('sampling_method', 'uniform')
+            
+            # Simulate subcarrier selection (same as training)
+            selection_mask = self._simulate_subcarrier_selection(
+                num_subcarriers, sampling_ratio, sampling_method, num_samples
+            )
+            
+            # Extract selected subcarriers
+            selected_pred_np = self._extract_selected_subcarriers(pred_np, selection_mask)
+            selected_target_np = self._extract_selected_subcarriers(target_np, selection_mask)
+            
+            logger.info(f"Spatial spectrum error CDF using selected subcarriers: {selected_pred_np.shape[1]} out of {num_subcarriers} total")
+            
+            # Update dimensions after selection
+            num_selected_subcarriers = selected_pred_np.shape[1]
             
             # Antenna array configuration (8x8 = 64 antennas)
             M, N = 8, 8  # 8x8 antenna array
@@ -1414,7 +1553,7 @@ class PrismTester:
             dx = dy = 0.5 * wavelength  # Half wavelength spacing
             
             # Angle grids for spatial spectrum
-            theta_range = np.linspace(-60, 60, 25)  # Elevation angles in degrees
+            theta_range = np.linspace(0, 90, 25)    # Elevation angles in degrees (0 to 90)
             phi_range = np.linspace(0, 360, 37)     # Azimuth angles in degrees
             theta_grid = np.deg2rad(theta_range)    # Convert to radians
             phi_grid = np.deg2rad(phi_range)
@@ -1428,13 +1567,13 @@ class PrismTester:
             logger.info(f"Computing spatial spectrum errors for {len(sample_indices)} samples...")
             
             for sample_idx in sample_indices:
-                # Use every 10th subcarrier for efficiency
-                subcarrier_indices = np.arange(0, num_subcarriers, 10)
+                # Use every 10th selected subcarrier for efficiency
+                selected_subcarrier_indices = np.arange(0, num_selected_subcarriers, 10)
                 
-                for subcarrier_idx in subcarrier_indices:
-                    # Get predicted and target CSI for this specific sample and subcarrier
-                    pred_csi = pred_np[sample_idx, subcarrier_idx, 0, :].reshape(-1, 1)  # (64, 1)
-                    target_csi = target_np[sample_idx, subcarrier_idx, 0, :].reshape(-1, 1)  # (64, 1)
+                for selected_subcarrier_idx in selected_subcarrier_indices:
+                    # Get predicted and target CSI for this specific sample and selected subcarrier
+                    pred_csi = selected_pred_np[sample_idx, selected_subcarrier_idx, 0, :].reshape(-1, 1)  # (64, 1)
+                    target_csi = selected_target_np[sample_idx, selected_subcarrier_idx, 0, :].reshape(-1, 1)  # (64, 1)
                     
                     # Calculate spatial spectrum using Bartlett beamforming
                     pred_spectrum = calculate_bartlett_spectrum(
@@ -1896,7 +2035,7 @@ class PrismTester:
             num_subcarriers, num_ue_antennas, num_bs_antennas = pred_np.shape
             
             # Define angle grid (simplified)
-            theta_angles = np.linspace(-60, 60, 25)  # Elevation angles in degrees
+            theta_angles = np.linspace(0, 90, 25)    # Elevation angles in degrees (0 to 90)
             phi_angles = np.linspace(0, 360, 37)     # Azimuth angles in degrees
             
             # Convert to radians
@@ -2190,46 +2329,183 @@ class PrismTester:
             logger.error(f"❌ CSI analysis failed: {e}")
             raise
     
+    def _simulate_subcarrier_selection(self, num_subcarriers: int, sampling_ratio: float, 
+                                      sampling_method: str, num_samples: int) -> np.ndarray:
+        """
+        Simulate subcarrier selection based on training configuration
+        
+        Args:
+            num_subcarriers: Total number of subcarriers (408)
+            sampling_ratio: Subcarrier sampling ratio (0.8)
+            sampling_method: Sampling method ('uniform' or 'random')
+            num_samples: Number of samples in batch
+            
+        Returns:
+            selection_mask: Boolean mask (num_samples, num_subcarriers)
+        """
+        import random
+        
+        num_selected = int(num_subcarriers * sampling_ratio)
+        selection_mask = np.zeros((num_samples, num_subcarriers), dtype=bool)
+        
+        for sample_idx in range(num_samples):
+            if sampling_method == 'uniform':
+                # Uniform sampling: evenly spaced subcarriers
+                step = num_subcarriers // num_selected
+                selected_indices = [i * step for i in range(num_selected)]
+                # Ensure we don't exceed bounds
+                selected_indices = [min(idx, num_subcarriers - 1) for idx in selected_indices]
+            else:  # 'random'
+                # Random sampling: randomly selected subcarriers
+                selected_indices = random.sample(range(num_subcarriers), num_selected)
+            
+            selection_mask[sample_idx, selected_indices] = True
+        
+        return selection_mask
+
+    def _extract_selected_subcarriers(self, csi_data: np.ndarray, selection_mask: np.ndarray) -> np.ndarray:
+        """
+        Extract selected subcarriers from full CSI data
+        
+        Args:
+            csi_data: Full CSI array (num_samples, num_subcarriers, num_ue_antennas, num_bs_antennas)
+            selection_mask: Boolean mask (num_samples, num_subcarriers)
+            
+        Returns:
+            selected_csi: CSI array with only selected subcarriers 
+                         (num_samples, num_selected_subcarriers, num_ue_antennas, num_bs_antennas)
+        """
+        num_samples, num_subcarriers, num_ue_antennas, num_bs_antennas = csi_data.shape
+        
+        # Get the number of selected subcarriers (should be consistent across samples)
+        num_selected = np.sum(selection_mask[0, :])
+        
+        # Initialize output array
+        selected_csi = np.zeros(
+            (num_samples, num_selected, num_ue_antennas, num_bs_antennas), 
+            dtype=csi_data.dtype
+        )
+        
+        # Extract selected subcarriers for each sample
+        for sample_idx in range(num_samples):
+            # Get selected subcarrier indices for this sample
+            selected_indices = np.where(selection_mask[sample_idx, :])[0]
+            
+            # Extract selected subcarriers
+            selected_csi[sample_idx] = csi_data[sample_idx, selected_indices, :, :]
+        
+        return selected_csi
+
     def _calculate_spatial_spectrum_mse(self, pred_np: np.ndarray, target_np: np.ndarray) -> float:
-        """Calculate MSE between predicted and target spatial spectrums"""
+        """Calculate MSE between predicted and target spatial spectrums using configuration-based method"""
         try:
-            # Calculate spatial spectrum for predictions and targets
-            # Using simple beamforming approach for spatial spectrum estimation
+            from prism.loss import SpatialSpectrumLoss
+            import yaml
+            import torch
+            from pathlib import Path
             
             # Shape: (samples, subcarriers, ue_antennas, bs_antennas)
             num_samples, num_subcarriers, num_ue_antennas, num_bs_antennas = pred_np.shape
             
-            # Define angular grid for spatial spectrum calculation
-            theta_range = np.linspace(-np.pi/2, np.pi/2, 180)  # Elevation angles
-            phi_range = np.linspace(0, 2*np.pi, 360)          # Azimuth angles
+            # Load configuration to get subcarrier sampling parameters
+            config_path = Path('configs/sionna.yml')
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
             
-            # Calculate spatial spectrum for each sample and subcarrier
+            # Extract subcarrier sampling configuration
+            ray_tracing_config = config.get('ray_tracing', {})
+            subcarrier_config = ray_tracing_config.get('subcarrier_sampling', {})
+            
+            sampling_ratio = subcarrier_config.get('sampling_ratio', 0.8)
+            sampling_method = subcarrier_config.get('sampling_method', 'uniform')
+            
+            logger.info(f"   Subcarrier sampling config: ratio={sampling_ratio}, method={sampling_method}")
+            
+            # Simulate subcarrier selection based on training configuration
+            selection_mask = self._simulate_subcarrier_selection(
+                num_subcarriers, sampling_ratio, sampling_method, num_samples
+            )
+            
+            num_selected_per_sample = np.sum(selection_mask, axis=1)
+            logger.info(f"   Selected subcarriers per sample: {num_selected_per_sample[0]}/{num_subcarriers}")
+            
+            # Use the improved SpatialSpectrumLoss class with proper mask
+            try:
+                # Create SpatialSpectrumLoss instance
+                spatial_loss = SpatialSpectrumLoss(config)
+                
+                # Extract selected subcarriers based on selection mask
+                selected_pred_np = self._extract_selected_subcarriers(pred_np, selection_mask)
+                selected_target_np = self._extract_selected_subcarriers(target_np, selection_mask)
+                
+                # Convert to torch tensors
+                pred_tensor = torch.from_numpy(selected_pred_np).to(dtype=torch.complex64)
+                target_tensor = torch.from_numpy(selected_target_np).to(dtype=torch.complex64)
+                
+                # Calculate spatial spectrum loss using selected subcarriers (no mask needed)
+                with torch.no_grad():
+                    spatial_spectrum_mse = spatial_loss(pred_tensor, target_tensor).item()
+                
+                logger.info(f"   Spatial spectrum MSE (config-based, {sampling_method} sampling): {spatial_spectrum_mse:.6f}")
+                return spatial_spectrum_mse
+                
+            except Exception as config_error:
+                logger.warning(f"   Failed to use SpatialSpectrumLoss class: {config_error}")
+                # Fallback to simple power calculation
+                
+            # Fallback: Simple power-based calculation using selected subcarriers
             pred_spectrums = []
             target_spectrums = []
             
-            # Use a subset of samples for efficiency (first 10 samples)
+            # Use subset of samples for efficiency
             sample_indices = np.linspace(0, num_samples-1, min(10, num_samples), dtype=int)
             
             for sample_idx in sample_indices:
-                for subcarrier_idx in range(0, num_subcarriers, max(1, num_subcarriers//4)):  # Sample every 4th subcarrier
+                # Get selected subcarriers for this sample
+                selected_subcarriers = np.where(selection_mask[sample_idx])[0]
+                
+                # Sample every few selected subcarriers for efficiency
+                subcarrier_step = max(1, len(selected_subcarriers) // 20)
+                sampled_subcarriers = selected_subcarriers[::subcarrier_step]
+                
+                for subcarrier_idx in sampled_subcarriers:
                     # Extract channel matrix for this sample and subcarrier
                     pred_h = pred_np[sample_idx, subcarrier_idx, :, :]  # (ue_antennas, bs_antennas)
                     target_h = target_np[sample_idx, subcarrier_idx, :, :]
                     
-                    # Calculate power spectrum using simple magnitude squared
+                    # Skip zero-valued subcarriers
+                    if np.max(np.abs(pred_h)) < 1e-10:
+                        continue
+                    
+                    # Calculate power spectrum using magnitude squared
                     pred_power = np.mean(np.abs(pred_h)**2)
                     target_power = np.mean(np.abs(target_h)**2)
                     
                     pred_spectrums.append(pred_power)
                     target_spectrums.append(target_power)
             
+            if len(pred_spectrums) == 0:
+                logger.warning("   No valid subcarriers found for spatial spectrum calculation")
+                return 0.0
+            
             pred_spectrums = np.array(pred_spectrums)
             target_spectrums = np.array(target_spectrums)
             
-            # Calculate MSE between spatial spectrums
-            spatial_spectrum_mse = np.mean((pred_spectrums - target_spectrums)**2)
+            # Use max normalization (consistent with improved loss function)
+            pred_max = np.max(pred_spectrums)
+            target_max = np.max(target_spectrums)
             
-            logger.info(f"   Spatial spectrum MSE: {spatial_spectrum_mse:.6f}")
+            if pred_max > 1e-8 and target_max > 1e-8:
+                pred_normalized = pred_spectrums / pred_max
+                target_normalized = target_spectrums / target_max
+            else:
+                pred_normalized = pred_spectrums
+                target_normalized = target_spectrums
+            
+            # Calculate MSE between max-normalized spatial spectrums
+            spatial_spectrum_mse = np.mean((pred_normalized - target_normalized)**2)
+            
+            logger.info(f"   Fallback spatial spectrum MSE (config-based, {sampling_method}): {spatial_spectrum_mse:.6f}")
             return spatial_spectrum_mse
             
         except Exception as e:
@@ -2237,14 +2513,32 @@ class PrismTester:
             return 0.0
     
     def _calculate_pdp_mse(self, pred_np: np.ndarray, target_np: np.ndarray) -> float:
-        """Calculate MSE between predicted and target Power Delay Profiles (PDP)"""
+        """Calculate MSE between predicted and target Power Delay Profiles (PDP) using selected subcarriers only"""
         try:
-            # Calculate PDP by taking IFFT across subcarriers to get delay domain
-            # Shape: (samples, subcarriers, ue_antennas, bs_antennas)
+            # Get selected subcarriers based on training configuration
+            num_samples, num_subcarriers, num_ue_antennas, num_bs_antennas = pred_np.shape
+            ray_tracing_config = self.config.get('ray_tracing', {})
+            subcarrier_config = ray_tracing_config.get('subcarrier_sampling', {})
+            sampling_ratio = subcarrier_config.get('sampling_ratio', 0.8)
+            sampling_method = subcarrier_config.get('sampling_method', 'uniform')
             
-            # Take IFFT across subcarrier dimension to get delay domain
-            pred_delay = np.fft.ifft(pred_np, axis=1)  # IFFT across subcarriers
-            target_delay = np.fft.ifft(target_np, axis=1)
+            # Simulate subcarrier selection (same as training)
+            selection_mask = self._simulate_subcarrier_selection(
+                num_subcarriers, sampling_ratio, sampling_method, num_samples
+            )
+            
+            # Extract selected subcarriers
+            selected_pred_np = self._extract_selected_subcarriers(pred_np, selection_mask)
+            selected_target_np = self._extract_selected_subcarriers(target_np, selection_mask)
+            
+            logger.info(f"PDP MSE using selected subcarriers: {selected_pred_np.shape[1]} out of {num_subcarriers} total")
+            
+            # Calculate PDP by taking IFFT across selected subcarriers to get delay domain
+            # Shape: (samples, selected_subcarriers, ue_antennas, bs_antennas)
+            
+            # Take IFFT across selected subcarrier dimension to get delay domain
+            pred_delay = np.fft.ifft(selected_pred_np, axis=1)  # IFFT across selected subcarriers
+            target_delay = np.fft.ifft(selected_target_np, axis=1)
             
             # Calculate power delay profile (PDP) - power vs delay
             pred_pdp = np.mean(np.abs(pred_delay)**2, axis=(2, 3))  # Average over UE and BS antennas
@@ -2359,8 +2653,29 @@ class PrismTester:
             # Try to calculate spatial spectrum loss if available
             if hasattr(self, 'spatial_spectrum_loss') and self.spatial_spectrum_loss is not None:
                 logger.info("🔧 Using SpatialSpectrumLoss for analysis...")
+                
+                # Extract selected subcarriers for spatial spectrum analysis
+                # Simulate subcarrier selection based on training configuration
+                ray_tracing_config = self.config.get('ray_tracing', {})
+                subcarrier_config = ray_tracing_config.get('subcarrier_sampling', {})
+                sampling_ratio = subcarrier_config.get('sampling_ratio', 0.8)
+                sampling_method = subcarrier_config.get('sampling_method', 'uniform')
+                
+                num_samples, num_subcarriers, num_ue_antennas, num_bs_antennas = pred_np.shape
+                selection_mask = self._simulate_subcarrier_selection(
+                    num_subcarriers, sampling_ratio, sampling_method, num_samples
+                )
+                
+                # Extract selected subcarriers
+                selected_pred_np = self._extract_selected_subcarriers(pred_np, selection_mask)
+                selected_target_np = self._extract_selected_subcarriers(target_np, selection_mask)
+                
+                # Convert to tensors with selected subcarriers
+                selected_pred_tensor = torch.from_numpy(selected_pred_np).to(self.device)
+                selected_target_tensor = torch.from_numpy(selected_target_np).to(self.device)
+                
                 with torch.no_grad():
-                    spatial_loss = self.spatial_spectrum_loss(pred_tensor, target_tensor)
+                    spatial_loss = self.spatial_spectrum_loss(selected_pred_tensor, selected_target_tensor)
                     metrics['spatial_spectrum_loss'] = float(spatial_loss.item())
                 
                 # Generate spatial spectrum visualization using the loss function
@@ -2371,7 +2686,7 @@ class PrismTester:
                 save_path = str(plots_dir)
                 
                 self.spatial_spectrum_loss.compute_and_visualize_loss(
-                    pred_tensor, target_tensor, save_path, sample_idx
+                    selected_pred_tensor, selected_target_tensor, save_path, sample_idx
                 )
                 
                 logger.info(f"✅ SpatialSpectrumLoss: {metrics['spatial_spectrum_loss']:.6f}")

@@ -169,7 +169,7 @@ system:
 training:
   # Training parameters
   learning_rate: 0.00015              # Initial learning rate (optimized for stable convergence)
-  num_epochs: 4                    # Number of training epochs (increased for better learning)
+  num_epochs: 6                    # Number of training epochs (increased for better learning)
   batch_size: 4                      # Number of samples per batch (direct control)
   # batches_per_epoch will be auto-calculated as: total_samples / batch_size
   
@@ -189,7 +189,7 @@ training:
     # Overall loss weights
     csi_weight: 0.7                  # Weight for CSI prediction loss
     pdp_weight: 300.0                # Weight for PDP loss (increased to balance scale difference)
-    spatial_spectrum_weight: 20      # Weight for spatial spectrum loss (enabled)
+    spatial_spectrum_weight: 50      # Weight for spatial spectrum loss (reduced from 2000 to balance with other losses)
     regularization_weight: 0.01      # Weight for regularization terms
     
     # CSI Loss Configuration
@@ -215,7 +215,7 @@ training:
       weight: 20                  # Weight for spatial spectrum loss component (this is not used by code, see spatial_spectrum_weight above)
       algorithm: 'bartlett'          # Spatial spectrum estimation algorithm ('bartlett', 'capon', 'music')
       fusion_method: 'average'       # Multi-subcarrier fusion method ('average', 'max')
-      theta_range: [-60.0, 5.0, 60.0]   # Elevation angle range [min, step, max] in degrees (reduced resolution)
+      theta_range: [0, 5.0, 90.0]   # Elevation angle range [min, step, max] in degrees (reduced resolution)
       phi_range: [0.0, 10.0, 360.0]     # Azimuth angle range [min, step, max] in degrees (reduced resolution)
     
     # Regularization Loss Configuration

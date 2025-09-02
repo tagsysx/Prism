@@ -33,7 +33,7 @@ from .spatial_spectrum import (
     fuse_subcarrier_spectrums
 )
 
-from .loss_functions import (
+from .loss import (
     PrismLossFunction,
     CSILoss,
     PDPLoss,
