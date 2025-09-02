@@ -837,7 +837,7 @@ class PrismTrainingInterface(nn.Module):
                 # Apply the SAME subcarrier selection to ALL UEs and BS antennas in this batch
                 for u in range(num_ue_antennas):
                     for bs_antenna in range(num_bs_antennas):
-                        selected_indices[b, bs_antenna, u] = torch.tensor(batch_selected)
+                        selected_indices[b, bs_antenna, u] = torch.tensor(batch_selected, dtype=torch.long)
                         selection_mask[b, bs_antenna, u, batch_selected] = True
                         
             except Exception as e:
@@ -933,6 +933,7 @@ class PrismTrainingInterface(nn.Module):
                         if self.current_selection is not None:
                             selected_indices = self.current_selection[b, bs_antenna_idx, u]
                             for k in selected_indices:
+                                k = int(k)  # Ensure k is an integer for indexing
                                 if k < num_subcarriers:  # Ensure index is valid
                                     csi_value = predictions[b, k, u, bs_antenna_idx]
                                     # Check if CSI absolute value is zero
@@ -1051,6 +1052,13 @@ class PrismTrainingInterface(nn.Module):
         except Exception as e:
             logger.error(f"Error in compute_loss: {e}")
             logger.error(f"Shapes - predictions: {predictions.shape}, targets: {targets.shape}")
+            logger.error(f"current_selection type: {type(self.current_selection)}")
+            logger.error(f"current_selection shape: {self.current_selection.shape if self.current_selection is not None else 'None'}")
+            logger.error(f"current_selection dtype: {self.current_selection.dtype if self.current_selection is not None else 'None'}")
+            
+            # Add detailed traceback
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             raise
     
     def _get_device(self):

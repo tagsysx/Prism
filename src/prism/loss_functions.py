@@ -18,6 +18,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Optional, Tuple, Union, List
 import numpy as np
+import logging
+
+# Get logger for this module
+logger = logging.getLogger(__name__)
 import matplotlib.pyplot as plt
 import os
 from pathlib import Path
@@ -183,7 +187,7 @@ class PDPLoss(nn.Module):
         """
         super(PDPLoss, self).__init__()
         self.loss_type = loss_type
-        self.fft_size = fft_size
+        self.fft_size = int(fft_size)  # Ensure fft_size is always an integer
         self.normalize_pdp = normalize_pdp
         
     def forward(self, predicted_csi: torch.Tensor, target_csi: torch.Tensor) -> torch.Tensor:
@@ -264,6 +268,14 @@ class PDPLoss(nn.Module):
             batch_size = 1
             N = original_shape[0]
             csi_flat = csi_data.unsqueeze(0)
+        
+        # Validate dimensions
+        if batch_size <= 0:
+            raise ValueError(f"Invalid batch_size: {batch_size}, original_shape: {original_shape}")
+        if N <= 0:
+            raise ValueError(f"Invalid number of subcarriers: {N}, original_shape: {original_shape}")
+        if self.fft_size <= 0:
+            raise ValueError(f"Invalid fft_size: {self.fft_size}")
         
         # Zero-pad to fft_size for each batch
         if N >= self.fft_size:
@@ -569,8 +581,13 @@ class SpatialSpectrumLoss(nn.Module):
         subcarrier_frequencies = self._compute_subcarrier_frequencies()
         frequency = subcarrier_frequencies[subcarrier_idx].item()
         
+        # Normalize CSI magnitude to reduce numerical issues
+        # Keep phase information but normalize magnitude
+        csi_magnitude = torch.abs(csi) + 1e-8  # Add small epsilon to avoid division by zero
+        csi_normalized = csi / csi_magnitude  # Magnitude = 1, phase preserved
+        
         # For single snapshot, covariance matrix is R = csi * csi^H
-        R_xx = torch.matmul(csi, torch.conj(csi).transpose(-2, -1))  # (num_antennas, num_antennas)
+        R_xx = torch.matmul(csi_normalized, torch.conj(csi_normalized).transpose(-2, -1))  # (num_antennas, num_antennas)
         
         # Use precomputed angle combinations
         theta_flat = self.theta_flat.to(device)
@@ -630,8 +647,13 @@ class SpatialSpectrumLoss(nn.Module):
             csi_k = csi_batch[k, 0, :].unsqueeze(1)  # (num_bs_antennas, 1)
             frequency = subcarrier_frequencies[k].item()
             
-            # Covariance matrix
-            R_xx = torch.matmul(csi_k, torch.conj(csi_k).transpose(-2, -1))  # (num_bs_antennas, num_bs_antennas)
+            # Normalize CSI magnitude to use only phase information
+            # Keep phase information but normalize magnitude to 1
+            csi_k_magnitude = torch.abs(csi_k) + 1e-8  # Add small epsilon to avoid division by zero
+            csi_k_normalized = csi_k / csi_k_magnitude  # Magnitude = 1, phase preserved
+            
+            # Covariance matrix using normalized CSI (phase-only)
+            R_xx = torch.matmul(csi_k_normalized, torch.conj(csi_k_normalized).transpose(-2, -1))  # (num_bs_antennas, num_bs_antennas)
             
             # Generate all steering vectors for this frequency using unified method
             all_steering_vectors = self._generate_steering_vectors(theta_flat, phi_flat, frequency, device)
@@ -738,8 +760,21 @@ class SpatialSpectrumLoss(nn.Module):
             predicted_spectrum = predicted_spectrum * mask
             target_spectrum = target_spectrum * mask
         
-        # Compute MSE loss between spatial spectrums
-        loss = F.mse_loss(predicted_spectrum, target_spectrum)
+        # Normalize spectrums to reduce magnitude differences
+        # Use L2 normalization to make spectrums comparable
+        pred_norm = torch.norm(predicted_spectrum.flatten(), p=2)
+        target_norm = torch.norm(target_spectrum.flatten(), p=2)
+        
+        if pred_norm > 1e-8 and target_norm > 1e-8:
+            predicted_spectrum_normalized = predicted_spectrum / pred_norm
+            target_spectrum_normalized = target_spectrum / target_norm
+        else:
+            # Fallback if normalization fails
+            predicted_spectrum_normalized = predicted_spectrum
+            target_spectrum_normalized = target_spectrum
+        
+        # Compute MSE loss between normalized spatial spectrums
+        loss = F.mse_loss(predicted_spectrum_normalized, target_spectrum_normalized)
         
         return loss
     

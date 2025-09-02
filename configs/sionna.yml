@@ -128,13 +128,12 @@ ray_tracing:
     sampling_ratio: 0.8              # Ratio of subcarriers to select (80%) - improved frequency domain learning
     sampling_method: 'uniform'         # Sampling method: 'random' or 'uniform'
     antenna_consistent: true          # All BS antennas use same subcarriers for each UE
-    antenna_specific_selection: false # Disable antenna-specific selection (deprecated)
 
 # System Configuration
 system:
   # Computational settings
   device: 'cuda'                     # Primary device for computation ('cuda' or 'cpu')
-  gpu_memory_fraction: 0.3           # GPU memory usage fraction (ultra-conservative for stability)
+  gpu_memory_fraction: 0.6           # GPU memory usage fraction (increased for better performance)
   # Note: batch_size is now automatically calculated as total_samples / batches_per_epoch
   
   # Ray tracing execution mode
@@ -170,7 +169,7 @@ system:
 training:
   # Training parameters
   learning_rate: 0.00015              # Initial learning rate (optimized for stable convergence)
-  num_epochs: 2                    # Number of training epochs (increased for better learning)
+  num_epochs: 4                    # Number of training epochs (increased for better learning)
   batch_size: 4                      # Number of samples per batch (direct control)
   # batches_per_epoch will be auto-calculated as: total_samples / batch_size
   
@@ -190,31 +189,30 @@ training:
     # Overall loss weights
     csi_weight: 0.7                  # Weight for CSI prediction loss
     pdp_weight: 300.0                # Weight for PDP loss (increased to balance scale difference)
-    spatial_spectrum_weight: 0.1     # Weight for spatial spectrum loss (enabled)
+    spatial_spectrum_weight: 20      # Weight for spatial spectrum loss (enabled)
     regularization_weight: 0.01      # Weight for regularization terms
     
     # CSI Loss Configuration
     csi_loss:
       enabled: true                  # Enable/disable CSI loss
       type: 'hybrid'                 # Loss type: 'mse', 'mae', 'complex_mse', 'magnitude_phase', 'hybrid' (correlation removed)
-      phase_weight: 2.0              # Weight for phase component (increased for RF/beamforming applications)
+      phase_weight: 5.0              # Weight for phase component (increased for RF/beamforming applications)
       magnitude_weight: 1.0          # Weight for magnitude component (maintained)
-      cmse_weight: 0.5               # Weight for CMSE component (reduced to balance)
+      cmse_weight: 0.01               # Weight for CMSE component (reduced to balance)
       # correlation_weight removed - correlation loss disabled due to incorrect implementation
     
     # PDP Loss Configuration  
     pdp_loss:
       enabled: true                  # Enable/disable PDP loss
       type: 'hybrid'                 # Loss type: 'mse', 'delay', 'hybrid' (correlation removed)
-      fft_size: 512                 # FFT size for PDP computation
+      fft_size: 512                  # FFT size for PDP computation (must be positive integer)
       normalize_pdp: true            # Whether to normalize PDPs before comparison
       # mse_weight and delay_weight now hardcoded in loss function (0.7, 0.3)
-      # correlation_weight removed - correlation loss disabled due to incorrect implementation
     
     # Spatial Spectrum Loss Configuration
     spatial_spectrum_loss:
       enabled: true                   # Enable/disable spatial spectrum loss (enabled)
-      weight: 0.1                    # Weight for spatial spectrum loss component
+      weight: 20                  # Weight for spatial spectrum loss component (this is not used by code, see spatial_spectrum_weight above)
       algorithm: 'bartlett'          # Spatial spectrum estimation algorithm ('bartlett', 'capon', 'music')
       fusion_method: 'average'       # Multi-subcarrier fusion method ('average', 'max')
       theta_range: [-60.0, 5.0, 60.0]   # Elevation angle range [min, step, max] in degrees (reduced resolution)
@@ -260,10 +258,10 @@ testing:
   batch_size: 1                      # Testing batch size (can be different from training)
   
   # Model configuration
-  model_path: "results/sionna/training/models/best_model.pt"    # Path to trained model for testing
+  model_path: "results/sionna/training/models/best_model.pt"    # Path to trained model for testing (best model - trained after noon with superior performance)
   # Alternative model paths (uncomment to use):
+  # model_path: "results/sionna/training/checkpoints/checkpoint_epoch_4_batch_10.pt"  # Latest checkpoint
   # model_path: "results/sionna/training/checkpoints/checkpoint_epoch_1_batch_39.pt"  # Specific epoch/batch
-  # model_path: "results/sionna/training/models/best_model.pt"  # Best model
   
   # Evaluation metrics
   metrics:

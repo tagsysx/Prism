@@ -694,84 +694,368 @@ class PrismTester:
             logger.error(f"❌ FATAL ERROR: Failed to load test data: {e}")
             raise
     
-    def _plot_csi_magnitude_comparison(self, plots_dir: Path):
-        """Plot CSI magnitude comparison between predicted and target"""
-        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    def _plot_random_csi_amplitude_comparison(self, plots_dir: Path):
+        """Plot CSI amplitude comparison for 20 randomly selected samples across all 64 BS antennas"""
+        logger.info("Creating random CSI amplitude comparison plots...")
         
-        # Get sample indices for visualization
-        sample_indices = [0, len(self.ue_positions)//2, -1]
-        
-        for i, sample_idx in enumerate(sample_indices):
-            if sample_idx >= len(self.ue_positions):
-                continue
+        try:
+            # Get total number of samples
+            total_samples = self.predictions.shape[0]
+            
+            # Randomly select 20 samples
+            np.random.seed(42)  # For reproducibility
+            selected_indices = np.random.choice(total_samples, size=min(20, total_samples), replace=False)
+            
+            # Get data dimensions
+            _, num_subcarriers, num_ue_antennas, num_bs_antennas = self.predictions.shape
+            
+            # Create figure with 4 rows x 5 columns (20 subplots)
+            fig, axes = plt.subplots(4, 5, figsize=(25, 20))
+            fig.suptitle('Random CSI Amplitude Comparison (20 Samples)\nEach plot shows a specific (Subcarrier, UE Position) across all 64 BS antennas', 
+                        fontsize=16, fontweight='bold')
+            
+            for idx, sample_idx in enumerate(selected_indices):
+                row = idx // 5
+                col = idx % 5
                 
-            row = i // 2
-            col = i % 2
-            
-            # Get data for this sample
-            pred_mag = torch.abs(self.predictions[sample_idx]).numpy()
-            target_mag = torch.abs(self.csi_target[sample_idx]).cpu().numpy()
-            
-            # Handle different data shapes - reshape if needed for visualization
-            if pred_mag.ndim == 3:
-                # If 3D (e.g., UEs, subcarriers, antennas), take mean over first dimension or reshape
-                pred_mag = pred_mag.mean(axis=0) if pred_mag.shape[0] > 1 else pred_mag[0]
-            if target_mag.ndim == 3:
-                target_mag = target_mag.mean(axis=0) if target_mag.shape[0] > 1 else target_mag[0]
-            
-            # Plot magnitude comparison
-            im1 = axes[row, col].imshow(pred_mag, aspect='auto', cmap='viridis')
-            axes[row, col].set_title(f'Sample {sample_idx}: Predicted Magnitude')
-            axes[row, col].set_xlabel('Antenna Index')
-            axes[row, col].set_ylabel('Subcarrier Index')
-            plt.colorbar(im1, ax=axes[row, col])
-        
-        plt.tight_layout()
-        plot_path = plots_dir / 'csi_magnitude_comparison.png'
-        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        logger.info(f"CSI magnitude comparison plot saved: {plot_path}")
-    
-    def _plot_csi_phase_comparison(self, plots_dir: Path):
-        """Plot CSI phase comparison between predicted and target"""
-        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-        
-        # Get sample indices for visualization
-        sample_indices = [0, len(self.ue_positions)//2, -1]
-        
-        for i, sample_idx in enumerate(sample_indices):
-            if sample_idx >= len(self.ue_positions):
-                continue
+                # Randomly select subcarrier for this sample
+                np.random.seed(42 + sample_idx)  # Different seed for each sample
+                selected_subcarrier = np.random.randint(0, num_subcarriers)
+                selected_ue_antenna = 0  # Only one UE antenna available
                 
-            row = i // 2
-            col = i % 2
+                # Get predicted and target CSI for this specific sample and subcarrier across all BS antennas
+                pred_csi = self.predictions[sample_idx, selected_subcarrier, selected_ue_antenna, :].numpy()
+                target_csi = self.csi_target[sample_idx, selected_subcarrier, selected_ue_antenna, :].cpu().numpy()
+                
+                # Calculate amplitude across all BS antennas
+                pred_amplitude = np.abs(pred_csi)
+                target_amplitude = np.abs(target_csi)
+                
+                # Get UE position for this sample
+                if hasattr(self, 'ue_positions') and self.ue_positions is not None:
+                    ue_pos = self.ue_positions[sample_idx]
+                    ue_pos_str = f"({ue_pos[0]:.1f}, {ue_pos[1]:.1f}, {ue_pos[2]:.1f})"
+                else:
+                    ue_pos_str = "N/A"
+                
+                # Create BS antenna indices
+                bs_antennas = np.arange(num_bs_antennas)
+                
+                # Create line plot
+                ax = axes[row, col]
+                ax.plot(bs_antennas, pred_amplitude, 'b-', linewidth=1.5, label='Predicted', alpha=0.8)
+                ax.plot(bs_antennas, target_amplitude, 'r--', linewidth=1.5, label='Target', alpha=0.8)
+                ax.set_ylabel('Amplitude')
+                ax.set_xlabel('BS Antenna Index')
+                ax.set_title(f'Sample {sample_idx}\nSub:{selected_subcarrier}, UE:{ue_pos_str}', 
+                           fontsize=9)
+                ax.grid(True, alpha=0.3)
+                
+                # Add legend only for the first subplot
+                if idx == 0:
+                    ax.legend(loc='upper right', fontsize=8)
             
-            # Get data for this sample
-            pred_phase = torch.angle(self.predictions[sample_idx]).numpy()
-            target_phase = torch.angle(self.csi_target[sample_idx]).cpu().numpy()
+            plt.tight_layout()
+            plot_path = plots_dir / 'random_csi_amplitude_comparison.png'
+            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
             
-            # Handle different data shapes - reshape if needed for visualization
-            if pred_phase.ndim == 3:
-                # If 3D (e.g., UEs, subcarriers, antennas), take mean over first dimension or reshape
-                pred_phase = pred_phase.mean(axis=0) if pred_phase.shape[0] > 1 else pred_phase[0]
-            if target_phase.ndim == 3:
-                target_phase = target_phase.mean(axis=0) if target_phase.shape[0] > 1 else target_phase[0]
+            logger.info(f"Random CSI amplitude comparison plot saved: {plot_path}")
             
-            # Plot phase comparison
-            im1 = axes[row, col].imshow(pred_phase, aspect='auto', cmap='twilight')
-            axes[row, col].set_title(f'Sample {sample_idx}: Predicted Phase')
-            axes[row, col].set_xlabel('Antenna Index')
-            axes[row, col].set_ylabel('Subcarrier Index')
-            plt.colorbar(im1, ax=axes[row, col])
+        except Exception as e:
+            logger.error(f"Failed to create random CSI amplitude comparison plot: {e}")
+            raise
+
+    def _plot_random_csi_phase_comparison(self, plots_dir: Path):
+        """Plot CSI phase comparison for 20 randomly selected samples across all 64 BS antennas"""
+        logger.info("Creating random CSI phase comparison plots...")
         
-        plt.tight_layout()
-        plot_path = plots_dir / 'csi_phase_comparison.png'
-        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
+        try:
+            # Get total number of samples
+            total_samples = self.predictions.shape[0]
+            
+            # Randomly select 20 samples (same as amplitude for consistency)
+            np.random.seed(42)  # For reproducibility
+            selected_indices = np.random.choice(total_samples, size=min(20, total_samples), replace=False)
+            
+            # Get data dimensions
+            _, num_subcarriers, num_ue_antennas, num_bs_antennas = self.predictions.shape
+            
+            # Create figure with 4 rows x 5 columns (20 subplots)
+            fig, axes = plt.subplots(4, 5, figsize=(25, 20))
+            fig.suptitle('Random CSI Phase Comparison (20 Samples)\nEach plot shows a specific (Subcarrier, UE Position) across all 64 BS antennas', 
+                        fontsize=16, fontweight='bold')
+            
+            for idx, sample_idx in enumerate(selected_indices):
+                row = idx // 5
+                col = idx % 5
+                
+                # Randomly select subcarrier for this sample (same as amplitude plot)
+                np.random.seed(42 + sample_idx)  # Same seed as amplitude plot for consistency
+                selected_subcarrier = np.random.randint(0, num_subcarriers)
+                selected_ue_antenna = 0  # Only one UE antenna available
+                
+                # Get predicted and target CSI for this specific sample and subcarrier across all BS antennas
+                pred_csi = self.predictions[sample_idx, selected_subcarrier, selected_ue_antenna, :].numpy()
+                target_csi = self.csi_target[sample_idx, selected_subcarrier, selected_ue_antenna, :].cpu().numpy()
+                
+                # Calculate phase across all BS antennas
+                pred_phase = np.angle(pred_csi)
+                target_phase = np.angle(target_csi)
+                
+                # Get UE position for this sample
+                if hasattr(self, 'ue_positions') and self.ue_positions is not None:
+                    ue_pos = self.ue_positions[sample_idx]
+                    ue_pos_str = f"({ue_pos[0]:.1f}, {ue_pos[1]:.1f}, {ue_pos[2]:.1f})"
+                else:
+                    ue_pos_str = "N/A"
+                
+                # Create BS antenna indices
+                bs_antennas = np.arange(num_bs_antennas)
+                
+                # Create line plot
+                ax = axes[row, col]
+                ax.plot(bs_antennas, pred_phase, 'g-', linewidth=1.5, label='Predicted', alpha=0.8)
+                ax.plot(bs_antennas, target_phase, 'm--', linewidth=1.5, label='Target', alpha=0.8)
+                ax.set_ylabel('Phase (rad)')
+                ax.set_xlabel('BS Antenna Index')
+                ax.set_title(f'Sample {sample_idx}\nSub:{selected_subcarrier}, UE:{ue_pos_str}', 
+                           fontsize=9)
+                ax.grid(True, alpha=0.3)
+                ax.set_ylim([-np.pi, np.pi])  # Set phase range to [-π, π]
+                
+                # Add horizontal lines at key phase values
+                ax.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
+                ax.axhline(y=np.pi/2, color='black', linestyle='--', alpha=0.3, linewidth=0.5)
+                ax.axhline(y=-np.pi/2, color='black', linestyle='--', alpha=0.3, linewidth=0.5)
+                ax.axhline(y=np.pi, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
+                ax.axhline(y=-np.pi, color='black', linestyle='-', alpha=0.3, linewidth=0.5)
+                
+                # Add legend only for the first subplot
+                if idx == 0:
+                    ax.legend(loc='upper right', fontsize=8)
+            
+            plt.tight_layout()
+            plot_path = plots_dir / 'random_csi_phase_comparison.png'
+            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            logger.info(f"Random CSI phase comparison plot saved: {plot_path}")
+            
+        except Exception as e:
+            logger.error(f"Failed to create random CSI phase comparison plot: {e}")
+            raise
+
+    def _plot_random_spatial_spectrum_comparison(self, plots_dir: Path):
+        """Plot spatial spectrum comparison for 20 randomly selected samples"""
+        logger.info("Creating random spatial spectrum comparison plots...")
         
-        logger.info(f"CSI phase comparison plot saved: {plot_path}")
-    
+        try:
+            # Import spatial spectrum functions
+            from prism.spatial_spectrum import calculate_bartlett_spectrum, generate_steering_vector
+            
+            # Get total number of samples
+            total_samples = self.predictions.shape[0]
+            
+            # Randomly select 10 samples (for better readability with side-by-side layout)
+            np.random.seed(42)  # For reproducibility
+            selected_indices = np.random.choice(total_samples, size=min(10, total_samples), replace=False)
+            
+            # Get data dimensions
+            _, num_subcarriers, num_ue_antennas, num_bs_antennas = self.predictions.shape
+            
+            # Antenna array configuration (8x8 = 64 antennas)
+            M, N = 8, 8  # 8x8 antenna array
+            
+            # OFDM parameters from config
+            center_freq = 3.5e9  # 3.5 GHz
+            wavelength = 3e8 / center_freq
+            dx = dy = 0.5 * wavelength  # Half wavelength spacing
+            
+            # Angle grids for spatial spectrum
+            theta_range = np.linspace(-60, 60, 25)  # Elevation angles in degrees
+            phi_range = np.linspace(0, 360, 37)     # Azimuth angles in degrees
+            theta_grid = np.deg2rad(theta_range)    # Convert to radians
+            phi_grid = np.deg2rad(phi_range)
+            
+            # Create figure with 2 rows x 10 columns (10 samples x 2 plots each = 20 subplots)
+            fig, axes = plt.subplots(2, 10, figsize=(50, 12))
+            fig.suptitle('Random Spatial Spectrum Comparison (10 Samples)\nLeft: Predicted, Right: Target', 
+                        fontsize=20, fontweight='bold')
+            
+            for idx, sample_idx in enumerate(selected_indices):
+                row = idx // 5
+                col_base = (idx % 5) * 2  # Each sample gets 2 columns (predicted and target)
+                
+                # Randomly select subcarrier for this sample
+                np.random.seed(42 + sample_idx)  # Different seed for each sample
+                selected_subcarrier = np.random.randint(0, num_subcarriers)
+                selected_ue_antenna = 0  # Only one UE antenna available
+                
+                # Get predicted and target CSI for this specific sample and subcarrier across all BS antennas
+                pred_csi = self.predictions[sample_idx, selected_subcarrier, selected_ue_antenna, :].numpy()
+                target_csi = self.csi_target[sample_idx, selected_subcarrier, selected_ue_antenna, :].cpu().numpy()
+                
+                # Reshape CSI data for spatial spectrum calculation (64,) -> (64, 1) for single snapshot
+                pred_csi_reshaped = pred_csi.reshape(-1, 1)
+                target_csi_reshaped = target_csi.reshape(-1, 1)
+                
+                # Calculate spatial spectrum using Bartlett beamforming
+                pred_spectrum = calculate_bartlett_spectrum(
+                    pred_csi_reshaped, M, N, theta_grid, phi_grid, wavelength, dx, dy
+                )
+                target_spectrum = calculate_bartlett_spectrum(
+                    target_csi_reshaped, M, N, theta_grid, phi_grid, wavelength, dx, dy
+                )
+                
+                # Get UE position for this sample
+                if hasattr(self, 'ue_positions') and self.ue_positions is not None:
+                    ue_pos = self.ue_positions[sample_idx]
+                    ue_pos_str = f"({ue_pos[0]:.1f}, {ue_pos[1]:.1f}, {ue_pos[2]:.1f})"
+                else:
+                    ue_pos_str = "N/A"
+                
+                # Normalize spectra to dB scale
+                pred_spectrum_db = 10 * np.log10(np.maximum(pred_spectrum, 1e-10))
+                target_spectrum_db = 10 * np.log10(np.maximum(target_spectrum, 1e-10))
+                
+                # Create meshgrid for plotting
+                theta_mesh, phi_mesh = np.meshgrid(theta_range, phi_range, indexing='ij')
+                
+                # Plot predicted spectrum (left subplot)
+                ax_pred = axes[row, col_base]
+                im_pred = ax_pred.contourf(phi_mesh, theta_mesh, pred_spectrum_db, 
+                                         levels=20, cmap='viridis')
+                ax_pred.set_xlabel('Azimuth (deg)', fontsize=8)
+                ax_pred.set_ylabel('Elevation (deg)', fontsize=8)
+                ax_pred.set_title(f'Predicted - Sample {sample_idx}\nSub:{selected_subcarrier}, UE:{ue_pos_str}', 
+                                fontsize=8)
+                ax_pred.grid(True, alpha=0.3)
+                
+                # Plot target spectrum (right subplot)
+                ax_target = axes[row, col_base + 1]
+                im_target = ax_target.contourf(phi_mesh, theta_mesh, target_spectrum_db, 
+                                             levels=20, cmap='viridis')
+                ax_target.set_xlabel('Azimuth (deg)', fontsize=8)
+                ax_target.set_ylabel('Elevation (deg)', fontsize=8)
+                ax_target.set_title(f'Target - Sample {sample_idx}\nSub:{selected_subcarrier}, UE:{ue_pos_str}', 
+                                  fontsize=8)
+                ax_target.grid(True, alpha=0.3)
+                
+                # Add colorbar for the first pair of subplots
+                if idx == 0:
+                    # Add colorbar for predicted spectrum
+                    cbar_pred = plt.colorbar(im_pred, ax=ax_pred, shrink=0.8)
+                    cbar_pred.set_label('Power (dB)', fontsize=8)
+                    
+                    # Add colorbar for target spectrum
+                    cbar_target = plt.colorbar(im_target, ax=ax_target, shrink=0.8)
+                    cbar_target.set_label('Power (dB)', fontsize=8)
+            
+            plt.tight_layout()
+            plot_path = plots_dir / 'random_spatial_spectrum_comparison.png'
+            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            logger.info(f"Random spatial spectrum comparison plot saved: {plot_path}")
+            
+        except Exception as e:
+            logger.error(f"Failed to create random spatial spectrum comparison plot: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+
+    def _plot_random_spectrogram_comparison(self, plots_dir: Path):
+        """Plot CSI spectrogram comparison for 20 randomly selected samples"""
+        logger.info("Creating random CSI spectrogram comparison plots...")
+        
+        try:
+            # Get total number of samples
+            total_samples = self.predictions.shape[0]
+            
+            # Randomly select 20 samples (different from the first method)
+            np.random.seed(123)  # Different seed for different samples
+            selected_indices = np.random.choice(total_samples, size=min(20, total_samples), replace=False)
+            
+            # Create figure with 4 rows x 5 columns (20 subplots), each with 2 spectrograms
+            fig, axes = plt.subplots(8, 5, figsize=(25, 32))  # 8 rows to accommodate pairs
+            fig.suptitle('Random CSI Spectrogram Comparison (20 Samples)\nTop: Predicted, Bottom: Actual', 
+                        fontsize=18, fontweight='bold')
+            
+            for idx, sample_idx in enumerate(selected_indices):
+                col = idx % 5
+                pred_row = (idx // 5) * 2  # Even rows for predicted
+                actual_row = pred_row + 1   # Odd rows for actual
+                
+                # Get predicted and target CSI for this sample
+                pred_csi = self.predictions[sample_idx].numpy()
+                target_csi = self.csi_target[sample_idx].cpu().numpy()
+                
+                # Handle different dimensions - we need time-frequency representation
+                if pred_csi.ndim == 3:
+                    # Shape: (time_steps, subcarriers, antennas) -> average over antennas
+                    pred_spectrogram = pred_csi.mean(axis=-1) if pred_csi.shape[-1] > 1 else pred_csi[:, :, 0]
+                elif pred_csi.ndim == 4:
+                    # Shape: (time_steps, subcarriers, ue_antennas, bs_antennas) -> average over antennas
+                    pred_spectrogram = pred_csi.mean(axis=(-1, -2)) if pred_csi.shape[-1] > 1 else pred_csi[:, :, 0, 0]
+                else:
+                    # If only 2D, create a time dimension by repeating
+                    pred_spectrogram = np.tile(pred_csi[np.newaxis, :], (10, 1))
+                
+                if target_csi.ndim == 3:
+                    target_spectrogram = target_csi.mean(axis=-1) if target_csi.shape[-1] > 1 else target_csi[:, :, 0]
+                elif target_csi.ndim == 4:
+                    target_spectrogram = target_csi.mean(axis=(-1, -2)) if target_csi.shape[-1] > 1 else target_csi[:, :, 0, 0]
+                else:
+                    target_spectrogram = np.tile(target_csi[np.newaxis, :], (10, 1))
+                
+                # Convert to magnitude for spectrogram visualization
+                pred_magnitude = np.abs(pred_spectrogram)
+                target_magnitude = np.abs(target_spectrogram)
+                
+                # Convert to dB scale for better visualization
+                pred_db = 20 * np.log10(pred_magnitude + 1e-10)
+                target_db = 20 * np.log10(target_magnitude + 1e-10)
+                
+                # Determine common color scale
+                vmin = min(np.min(pred_db), np.min(target_db))
+                vmax = max(np.max(pred_db), np.max(target_db))
+                
+                # Plot predicted spectrogram
+                ax_pred = axes[pred_row, col]
+                im_pred = ax_pred.imshow(pred_db.T, aspect='auto', origin='lower', 
+                                       cmap='viridis', vmin=vmin, vmax=vmax)
+                ax_pred.set_title(f'Predicted CSI\nSample {sample_idx}', fontsize=10)
+                ax_pred.set_ylabel('Subcarrier')
+                if pred_row == 6:  # Only add x-label for bottom predicted plots
+                    ax_pred.set_xlabel('Time Step')
+                
+                # Plot actual spectrogram
+                ax_actual = axes[actual_row, col]
+                im_actual = ax_actual.imshow(target_db.T, aspect='auto', origin='lower', 
+                                           cmap='viridis', vmin=vmin, vmax=vmax)
+                ax_actual.set_title(f'Actual CSI\nSample {sample_idx}', fontsize=10)
+                ax_actual.set_ylabel('Subcarrier')
+                ax_actual.set_xlabel('Time Step')
+                
+                # Add colorbar for the first column
+                if col == 0:
+                    # Add colorbar between the pair
+                    cbar = plt.colorbar(im_pred, ax=[ax_pred, ax_actual], 
+                                      orientation='vertical', fraction=0.05, pad=0.02)
+                    cbar.set_label('Magnitude (dB)', rotation=90, labelpad=15)
+            
+            plt.tight_layout()
+            plot_path = plots_dir / 'random_csi_spectrogram_comparison.png'
+            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            logger.info(f"Random CSI spectrogram comparison plot saved: {plot_path}")
+            
+        except Exception as e:
+            logger.error(f"Failed to create random spectrogram comparison plot: {e}")
+            raise
+
     def _plot_error_distribution(self, plots_dir: Path):
         """Plot error distribution with error bars per subcarrier"""
         fig, axes = plt.subplots(1, 2, figsize=(15, 6))
@@ -785,7 +1069,8 @@ class PrismTester:
         pred_phase = np.angle(pred_np)
         target_phase = np.angle(target_np)
         phase_diff = pred_phase - target_phase
-        phase_diff = np.angle(np.exp(1j * phase_diff))
+        # Use same wrapping method as training: torch.remainder(phase_diff + π, 2π) - π
+        phase_diff = np.remainder(phase_diff + np.pi, 2*np.pi) - np.pi
         phase_error = np.abs(phase_diff)
         
         # Debug: Check data shape
@@ -892,7 +1177,8 @@ class PrismTester:
         pred_phase = np.angle(pred_np)
         target_phase = np.angle(target_np)
         phase_diff = pred_phase - target_phase
-        phase_diff = np.angle(np.exp(1j * phase_diff))
+        # Use same wrapping method as training: torch.remainder(phase_diff + π, 2π) - π
+        phase_diff = np.remainder(phase_diff + np.pi, 2*np.pi) - np.pi
         phase_error = np.abs(phase_diff)
         
         # Average over all dimensions except the first (samples/UEs)
@@ -965,7 +1251,13 @@ class PrismTester:
         # Calculate error per subcarrier
         # First calculate the errors
         mag_error = np.abs(np.abs(pred_np) - np.abs(target_np))
-        phase_error = np.abs(np.angle(pred_np) - np.angle(target_np))
+        # Calculate phase error with proper wrapping
+        pred_phase = np.angle(pred_np)
+        target_phase = np.angle(target_np)
+        phase_diff = pred_phase - target_phase
+        # Use same wrapping method as training: torch.remainder(phase_diff + π, 2π) - π
+        phase_diff = np.remainder(phase_diff + np.pi, 2*np.pi) - np.pi
+        phase_error = np.abs(phase_diff)
         
         logger.info(f"Magnitude error shape: {mag_error.shape}")
         
@@ -1026,8 +1318,8 @@ class PrismTester:
         pred_phase = np.angle(pred_np)
         target_phase = np.angle(target_np)
         phase_diff = pred_phase - target_phase
-        # Wrap phase difference to [-π, π]
-        phase_diff = np.angle(np.exp(1j * phase_diff))
+        # Use same wrapping method as training: torch.remainder(phase_diff + π, 2π) - π
+        phase_diff = np.remainder(phase_diff + np.pi, 2*np.pi) - np.pi
         phase_error = np.abs(phase_diff)
         
         # Flatten all errors for CDF calculation
@@ -1098,6 +1390,181 @@ class PrismTester:
         logger.info(f"  Median: {np.median(phase_error_flat):.6f} rad")
         logger.info(f"  90th percentile: {np.percentile(phase_error_flat, 90):.6f} rad")
         logger.info(f"  95th percentile: {np.percentile(phase_error_flat, 95):.6f} rad")
+    
+    def _plot_spatial_spectrum_error_cdf(self, plots_dir: Path):
+        """Plot CDF of spatial spectrum errors"""
+        logger.info("Creating spatial spectrum error CDF plot...")
+        
+        try:
+            # Import spatial spectrum functions
+            from prism.spatial_spectrum import calculate_bartlett_spectrum, generate_steering_vector
+            
+            pred_np = self.predictions.numpy()
+            target_np = self.csi_target.cpu().numpy()
+            
+            # Shape: (samples, subcarriers, ue_antennas, bs_antennas)
+            num_samples, num_subcarriers, num_ue_antennas, num_bs_antennas = pred_np.shape
+            
+            # Antenna array configuration (8x8 = 64 antennas)
+            M, N = 8, 8  # 8x8 antenna array
+            
+            # OFDM parameters from config
+            center_freq = 3.5e9  # 3.5 GHz
+            wavelength = 3e8 / center_freq
+            dx = dy = 0.5 * wavelength  # Half wavelength spacing
+            
+            # Angle grids for spatial spectrum
+            theta_range = np.linspace(-60, 60, 25)  # Elevation angles in degrees
+            phi_range = np.linspace(0, 360, 37)     # Azimuth angles in degrees
+            theta_grid = np.deg2rad(theta_range)    # Convert to radians
+            phi_grid = np.deg2rad(phi_range)
+            
+            # Collect spatial spectrum errors
+            spectrum_errors = []
+            
+            # Use a subset of samples for efficiency (every 3rd sample)
+            sample_indices = np.arange(0, num_samples, 3)
+            
+            logger.info(f"Computing spatial spectrum errors for {len(sample_indices)} samples...")
+            
+            for sample_idx in sample_indices:
+                # Use every 10th subcarrier for efficiency
+                subcarrier_indices = np.arange(0, num_subcarriers, 10)
+                
+                for subcarrier_idx in subcarrier_indices:
+                    # Get predicted and target CSI for this specific sample and subcarrier
+                    pred_csi = pred_np[sample_idx, subcarrier_idx, 0, :].reshape(-1, 1)  # (64, 1)
+                    target_csi = target_np[sample_idx, subcarrier_idx, 0, :].reshape(-1, 1)  # (64, 1)
+                    
+                    # Calculate spatial spectrum using Bartlett beamforming
+                    pred_spectrum = calculate_bartlett_spectrum(
+                        pred_csi, M, N, theta_grid, phi_grid, wavelength, dx, dy
+                    )
+                    target_spectrum = calculate_bartlett_spectrum(
+                        target_csi, M, N, theta_grid, phi_grid, wavelength, dx, dy
+                    )
+                    
+                    # Calculate error metrics for this spectrum pair
+                    # 1. Mean Squared Error
+                    mse_error = np.mean((pred_spectrum - target_spectrum)**2)
+                    
+                    # 2. Mean Absolute Error
+                    mae_error = np.mean(np.abs(pred_spectrum - target_spectrum))
+                    
+                    # 3. Peak error (maximum absolute difference)
+                    peak_error = np.max(np.abs(pred_spectrum - target_spectrum))
+                    
+                    # 4. Normalized MSE (relative to target spectrum power)
+                    target_power = np.mean(target_spectrum**2)
+                    if target_power > 1e-12:
+                        normalized_mse = mse_error / target_power
+                    else:
+                        normalized_mse = mse_error
+                    
+                    spectrum_errors.append({
+                        'mse': mse_error,
+                        'mae': mae_error,
+                        'peak': peak_error,
+                        'normalized_mse': normalized_mse
+                    })
+            
+            # Convert to arrays for easier processing
+            mse_errors = np.array([e['mse'] for e in spectrum_errors])
+            mae_errors = np.array([e['mae'] for e in spectrum_errors])
+            peak_errors = np.array([e['peak'] for e in spectrum_errors])
+            normalized_mse_errors = np.array([e['normalized_mse'] for e in spectrum_errors])
+            
+            logger.info(f"Collected {len(spectrum_errors)} spatial spectrum error measurements")
+            
+            # Create figure with 2x2 subplots for different error metrics
+            fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+            fig.suptitle('Spatial Spectrum Error CDF Analysis', fontsize=16, fontweight='bold')
+            
+            # Plot 1: MSE CDF
+            mse_sorted = np.sort(mse_errors)
+            mse_cdf = np.arange(1, len(mse_sorted) + 1) / len(mse_sorted)
+            axes[0, 0].plot(mse_sorted, mse_cdf, 'b-', linewidth=2)
+            axes[0, 0].set_xlabel('Mean Squared Error')
+            axes[0, 0].set_ylabel('CDF')
+            axes[0, 0].set_title('CDF of Spatial Spectrum MSE')
+            axes[0, 0].grid(True, alpha=0.3)
+            axes[0, 0].set_xscale('log')
+            
+            # Add percentile markers
+            percentiles = [50, 90, 95, 99]
+            for p in percentiles:
+                val = np.percentile(mse_errors, p)
+                axes[0, 0].axvline(val, color='red', linestyle='--', alpha=0.7)
+                axes[0, 0].text(val, p/100, f'{p}%', rotation=90, verticalalignment='bottom')
+            
+            # Plot 2: MAE CDF
+            mae_sorted = np.sort(mae_errors)
+            mae_cdf = np.arange(1, len(mae_sorted) + 1) / len(mae_sorted)
+            axes[0, 1].plot(mae_sorted, mae_cdf, 'g-', linewidth=2)
+            axes[0, 1].set_xlabel('Mean Absolute Error')
+            axes[0, 1].set_ylabel('CDF')
+            axes[0, 1].set_title('CDF of Spatial Spectrum MAE')
+            axes[0, 1].grid(True, alpha=0.3)
+            axes[0, 1].set_xscale('log')
+            
+            # Add percentile markers
+            for p in percentiles:
+                val = np.percentile(mae_errors, p)
+                axes[0, 1].axvline(val, color='red', linestyle='--', alpha=0.7)
+                axes[0, 1].text(val, p/100, f'{p}%', rotation=90, verticalalignment='bottom')
+            
+            # Plot 3: Peak Error CDF
+            peak_sorted = np.sort(peak_errors)
+            peak_cdf = np.arange(1, len(peak_sorted) + 1) / len(peak_sorted)
+            axes[1, 0].plot(peak_sorted, peak_cdf, 'r-', linewidth=2)
+            axes[1, 0].set_xlabel('Peak Error (Max Absolute Difference)')
+            axes[1, 0].set_ylabel('CDF')
+            axes[1, 0].set_title('CDF of Spatial Spectrum Peak Error')
+            axes[1, 0].grid(True, alpha=0.3)
+            axes[1, 0].set_xscale('log')
+            
+            # Add percentile markers
+            for p in percentiles:
+                val = np.percentile(peak_errors, p)
+                axes[1, 0].axvline(val, color='red', linestyle='--', alpha=0.7)
+                axes[1, 0].text(val, p/100, f'{p}%', rotation=90, verticalalignment='bottom')
+            
+            # Plot 4: Normalized MSE CDF
+            norm_mse_sorted = np.sort(normalized_mse_errors)
+            norm_mse_cdf = np.arange(1, len(norm_mse_sorted) + 1) / len(norm_mse_sorted)
+            axes[1, 1].plot(norm_mse_sorted, norm_mse_cdf, 'm-', linewidth=2)
+            axes[1, 1].set_xlabel('Normalized MSE (relative to target power)')
+            axes[1, 1].set_ylabel('CDF')
+            axes[1, 1].set_title('CDF of Normalized Spatial Spectrum MSE')
+            axes[1, 1].grid(True, alpha=0.3)
+            axes[1, 1].set_xscale('log')
+            
+            # Add percentile markers
+            for p in percentiles:
+                val = np.percentile(normalized_mse_errors, p)
+                axes[1, 1].axvline(val, color='red', linestyle='--', alpha=0.7)
+                axes[1, 1].text(val, p/100, f'{p}%', rotation=90, verticalalignment='bottom')
+            
+            plt.tight_layout()
+            plot_path = plots_dir / 'spatial_spectrum_error_cdf.png'
+            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            logger.info(f"Spatial spectrum error CDF plot saved: {plot_path}")
+            
+            # Log statistics
+            logger.info(f"Spatial Spectrum Error Statistics:")
+            logger.info(f"  MSE - Mean: {np.mean(mse_errors):.8f}, Median: {np.median(mse_errors):.8f}")
+            logger.info(f"  MSE - 90th percentile: {np.percentile(mse_errors, 90):.8f}")
+            logger.info(f"  MSE - 95th percentile: {np.percentile(mse_errors, 95):.8f}")
+            logger.info(f"  MAE - Mean: {np.mean(mae_errors):.8f}, Median: {np.median(mae_errors):.8f}")
+            logger.info(f"  Peak Error - Mean: {np.mean(peak_errors):.8f}, Median: {np.median(peak_errors):.8f}")
+            logger.info(f"  Normalized MSE - Mean: {np.mean(normalized_mse_errors):.8f}")
+            
+        except Exception as e:
+            logger.error(f"Failed to create spatial spectrum error CDF plot: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _plot_pdp_analysis(self, plots_dir: Path):
         """Compute PDP for each CSI and plot CDF of PDP characteristics"""
@@ -1541,7 +2008,7 @@ class PrismTester:
             predictions = []
             
             # Process in batches to avoid memory issues (use config setting)
-            batch_size = self.config['testing']['batch_size']
+            batch_size = int(self.config['testing']['batch_size'])  # Ensure integer type
             num_samples = len(self.ue_positions)
             
             logger.info(f"Processing {num_samples} samples in batches of {batch_size}")
@@ -1822,7 +2289,8 @@ class PrismTester:
         pred_phase = np.angle(pred_np)
         target_phase = np.angle(target_np)
         phase_diff = pred_phase - target_phase
-        phase_diff = np.angle(np.exp(1j * phase_diff))  # Wrap to [-π, π]
+        # Use same wrapping method as training: torch.remainder(phase_diff + π, 2π) - π
+        phase_diff = np.remainder(phase_diff + np.pi, 2*np.pi) - np.pi
         phase_error = np.abs(phase_diff)
         
         # Calculate MSE for comparison (optional)
@@ -2052,28 +2520,35 @@ class PrismTester:
             plots_dir = Path(self.config['output']['testing']['plots_dir'])
             plots_dir.mkdir(parents=True, exist_ok=True)
             
-            # Plot 1: CSI magnitude comparison
-            self._plot_csi_magnitude_comparison(plots_dir)
-            
-            # Plot 2: CSI phase comparison
-            self._plot_csi_phase_comparison(plots_dir)
-            
-            # Plot 3: Error distribution
+            # Plot 1: Error distribution
             self._plot_error_distribution(plots_dir)
             
-            # Plot 4: Spatial performance
+            # Plot 2: Spatial performance
             self._plot_spatial_performance(plots_dir)
             
-            # Plot 5: Subcarrier performance
+            # Plot 3: Subcarrier performance
             self._plot_subcarrier_performance(plots_dir)
             
-            # Plot 6: CDF of magnitude and phase errors
+            # Plot 4: CDF of magnitude and phase errors
             self._plot_error_cdf(plots_dir)
             
-            # Plot 7: PDP analysis and CDF
+            # Plot 5: PDP analysis and CDF
             self._plot_pdp_analysis(plots_dir)
             
-
+            # Plot 6: Spatial spectrum error CDF
+            self._plot_spatial_spectrum_error_cdf(plots_dir)
+            
+            # Plot 7a: Random CSI amplitude comparison
+            self._plot_random_csi_amplitude_comparison(plots_dir)
+            
+            # Plot 7b: Random CSI phase comparison
+            self._plot_random_csi_phase_comparison(plots_dir)
+            
+            # Plot 7c: Random spatial spectrum comparison
+            self._plot_random_spatial_spectrum_comparison(plots_dir)
+            
+            # Plot 8: Random CSI spectrogram comparison
+            self._plot_random_spectrogram_comparison(plots_dir)
             
             logger.info("✅ All visualizations created successfully")
             

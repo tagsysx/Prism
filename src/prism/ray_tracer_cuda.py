@@ -298,7 +298,8 @@ class CUDARayTracer(RayTracer):
             num_subcarriers = len(subcarrier_list)
             
             logger.debug(f"🎯 BS-Centric: {num_directions} directions × {num_ue} UEs × {num_subcarriers} subcarriers")
-            logger.debug(f"📡 Ray Origin: BS antenna at {base_station_pos}")
+            # Only show first BS position since we're using single UE antenna (all positions are the same)
+            logger.debug(f"📡 Ray Origin: BS antenna at {base_station_pos[0] if base_station_pos.dim() > 1 else base_station_pos}")
             logger.debug(f"📏 Two-stage sampling: {self.uniform_samples} uniform → {self.resampled_points} importance-based")
             
             # Create output tensor for complex signal strengths

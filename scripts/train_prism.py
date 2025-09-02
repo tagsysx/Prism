@@ -1122,6 +1122,10 @@ class PrismTrainer:
         total_samples = len(self.ue_positions)
         self.batch_size, self.batches_per_epoch = self._configure_batch_settings(total_samples)
         
+        # Ensure batch_size is always an integer
+        self.batch_size = int(self.batch_size)
+        self.batches_per_epoch = int(self.batches_per_epoch)
+        
         # Check for data consistency
         if self.csi_data.shape[0] != self.ue_positions.shape[0]:
             raise ValueError(f"Data mismatch: {self.csi_data.shape[0]} CSI samples vs {self.ue_positions.shape[0]} UE positions")
@@ -1492,13 +1496,17 @@ class PrismTrainer:
             val_size = min(10, len(self.dataset))  # Reduced from 100 to 10
             self.logger.info(f"📊 Validation size: {val_size}")
             
+            # Ensure val_size and batch_size are integers
+            val_size = int(val_size)
+            batch_size = int(self.batch_size)
+            
             val_indices = torch.randperm(len(self.dataset))[:val_size]
             
             with torch.no_grad():
-                for i in range(0, val_size, self.batch_size):
+                for i in range(0, val_size, batch_size):
                     try:
-                        batch_indices = val_indices[i:i+self.batch_size]
-                        self.logger.debug(f"Processing validation batch {i//self.batch_size + 1}")
+                        batch_indices = val_indices[i:i+batch_size]
+                        self.logger.debug(f"Processing validation batch {i//batch_size + 1}")
                         
                         # Check batch indices validity
                         if torch.any(batch_indices >= len(self.dataset)):
