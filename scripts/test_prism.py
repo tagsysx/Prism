@@ -1530,101 +1530,7 @@ class PrismTester:
         
         logger.info(f"📊 Fallback spatial spectrum plot saved: {plot_path}")
 
-    def _plot_per_antenna_correlation(self, plots_dir: Path):
-        """Plot per-antenna correlation analysis"""
-        logger.info("Creating per-antenna correlation plots...")
-        
-        # Get the metrics from the stored results
-        if not hasattr(self, 'csi_metrics') or self.csi_metrics is None:
-            logger.error("❌ CSI metrics not available for per-antenna correlation plot")
-            return
-        
-        try:
-            # Extract per-antenna correlation data
-            mag_correlations = np.array(self.csi_metrics['per_antenna_mag_correlations'])
-            phase_correlations = np.array(self.csi_metrics['per_antenna_phase_correlations'])
-            
-            num_antennas = len(mag_correlations)
-            antenna_indices = np.arange(num_antennas)
-            
-            # Create figure with subplots
-            fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-            
-            # Plot 1: Magnitude correlation per antenna (bar plot)
-            axes[0, 0].bar(antenna_indices, mag_correlations, alpha=0.7, color='blue', edgecolor='black')
-            axes[0, 0].set_xlabel('BS Antenna Index')
-            axes[0, 0].set_ylabel('Magnitude Correlation')
-            axes[0, 0].set_title('Magnitude Correlation per BS Antenna')
-            axes[0, 0].grid(True, alpha=0.3)
-            axes[0, 0].axhline(y=0, color='red', linestyle='--', alpha=0.5)
-            
-            # Add statistics text
-            mag_stats = self.csi_metrics
-            stats_text = f"Mean: {mag_stats['per_antenna_mag_corr_mean']:.4f}\n"
-            stats_text += f"Std: {mag_stats['per_antenna_mag_corr_std']:.4f}\n"
-            stats_text += f"Range: [{mag_stats['per_antenna_mag_corr_min']:.4f}, {mag_stats['per_antenna_mag_corr_max']:.4f}]"
-            axes[0, 0].text(0.02, 0.98, stats_text, transform=axes[0, 0].transAxes, 
-                           verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-            
-            # Plot 2: Phase correlation per antenna (bar plot)
-            axes[0, 1].bar(antenna_indices, phase_correlations, alpha=0.7, color='red', edgecolor='black')
-            axes[0, 1].set_xlabel('BS Antenna Index')
-            axes[0, 1].set_ylabel('Phase Correlation')
-            axes[0, 1].set_title('Phase Correlation per BS Antenna')
-            axes[0, 1].grid(True, alpha=0.3)
-            axes[0, 1].axhline(y=0, color='red', linestyle='--', alpha=0.5)
-            
-            # Add statistics text
-            phase_stats_text = f"Mean: {mag_stats['per_antenna_phase_corr_mean']:.4f}\n"
-            phase_stats_text += f"Std: {mag_stats['per_antenna_phase_corr_std']:.4f}\n"
-            phase_stats_text += f"Range: [{mag_stats['per_antenna_phase_corr_min']:.4f}, {mag_stats['per_antenna_phase_corr_max']:.4f}]"
-            axes[0, 1].text(0.02, 0.98, phase_stats_text, transform=axes[0, 1].transAxes, 
-                           verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-            
-            # Plot 3: Histogram of magnitude correlations
-            axes[1, 0].hist(mag_correlations, bins=20, alpha=0.7, color='blue', edgecolor='black')
-            axes[1, 0].set_xlabel('Magnitude Correlation')
-            axes[1, 0].set_ylabel('Number of Antennas')
-            axes[1, 0].set_title('Distribution of Magnitude Correlations')
-            axes[1, 0].grid(True, alpha=0.3)
-            axes[1, 0].axvline(x=np.mean(mag_correlations), color='red', linestyle='--', 
-                              label=f'Mean: {np.mean(mag_correlations):.4f}')
-            axes[1, 0].legend()
-            
-            # Plot 4: Histogram of phase correlations
-            axes[1, 1].hist(phase_correlations, bins=20, alpha=0.7, color='red', edgecolor='black')
-            axes[1, 1].set_xlabel('Phase Correlation')
-            axes[1, 1].set_ylabel('Number of Antennas')
-            axes[1, 1].set_title('Distribution of Phase Correlations')
-            axes[1, 1].grid(True, alpha=0.3)
-            axes[1, 1].axvline(x=np.mean(phase_correlations), color='red', linestyle='--', 
-                              label=f'Mean: {np.mean(phase_correlations):.4f}')
-            axes[1, 1].legend()
-            
-            plt.tight_layout()
-            plot_path = plots_dir / 'per_antenna_correlation.png'
-            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            
-            logger.info(f"Per-antenna correlation plot saved: {plot_path}")
-            
-            # Log summary statistics
-            logger.info(f"📊 Per-antenna correlation summary:")
-            logger.info(f"   Magnitude - Best antenna: {np.argmax(mag_correlations)} (corr: {np.max(mag_correlations):.4f})")
-            logger.info(f"   Magnitude - Worst antenna: {np.argmin(mag_correlations)} (corr: {np.min(mag_correlations):.4f})")
-            logger.info(f"   Phase - Best antenna: {np.argmax(phase_correlations)} (corr: {np.max(phase_correlations):.4f})")
-            logger.info(f"   Phase - Worst antenna: {np.argmin(phase_correlations)} (corr: {np.min(phase_correlations):.4f})")
-            
-            # Find antennas with positive correlation
-            positive_mag = np.sum(mag_correlations > 0)
-            positive_phase = np.sum(phase_correlations > 0)
-            logger.info(f"   Antennas with positive magnitude correlation: {positive_mag}/{num_antennas} ({positive_mag/num_antennas*100:.1f}%)")
-            logger.info(f"   Antennas with positive phase correlation: {positive_phase}/{num_antennas} ({positive_phase/num_antennas*100:.1f}%)")
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to create per-antenna correlation plot: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
+
     
     def _evaluate_model(self) -> Dict[str, float]:
         """Perform CSI inference on test data using TrainingInterface"""
@@ -1817,6 +1723,76 @@ class PrismTester:
             logger.error(f"❌ CSI analysis failed: {e}")
             raise
     
+    def _calculate_spatial_spectrum_mse(self, pred_np: np.ndarray, target_np: np.ndarray) -> float:
+        """Calculate MSE between predicted and target spatial spectrums"""
+        try:
+            # Calculate spatial spectrum for predictions and targets
+            # Using simple beamforming approach for spatial spectrum estimation
+            
+            # Shape: (samples, subcarriers, ue_antennas, bs_antennas)
+            num_samples, num_subcarriers, num_ue_antennas, num_bs_antennas = pred_np.shape
+            
+            # Define angular grid for spatial spectrum calculation
+            theta_range = np.linspace(-np.pi/2, np.pi/2, 180)  # Elevation angles
+            phi_range = np.linspace(0, 2*np.pi, 360)          # Azimuth angles
+            
+            # Calculate spatial spectrum for each sample and subcarrier
+            pred_spectrums = []
+            target_spectrums = []
+            
+            # Use a subset of samples for efficiency (first 10 samples)
+            sample_indices = np.linspace(0, num_samples-1, min(10, num_samples), dtype=int)
+            
+            for sample_idx in sample_indices:
+                for subcarrier_idx in range(0, num_subcarriers, max(1, num_subcarriers//4)):  # Sample every 4th subcarrier
+                    # Extract channel matrix for this sample and subcarrier
+                    pred_h = pred_np[sample_idx, subcarrier_idx, :, :]  # (ue_antennas, bs_antennas)
+                    target_h = target_np[sample_idx, subcarrier_idx, :, :]
+                    
+                    # Calculate power spectrum using simple magnitude squared
+                    pred_power = np.mean(np.abs(pred_h)**2)
+                    target_power = np.mean(np.abs(target_h)**2)
+                    
+                    pred_spectrums.append(pred_power)
+                    target_spectrums.append(target_power)
+            
+            pred_spectrums = np.array(pred_spectrums)
+            target_spectrums = np.array(target_spectrums)
+            
+            # Calculate MSE between spatial spectrums
+            spatial_spectrum_mse = np.mean((pred_spectrums - target_spectrums)**2)
+            
+            logger.info(f"   Spatial spectrum MSE: {spatial_spectrum_mse:.6f}")
+            return spatial_spectrum_mse
+            
+        except Exception as e:
+            logger.warning(f"   Failed to calculate spatial spectrum MSE: {e}")
+            return 0.0
+    
+    def _calculate_pdp_mse(self, pred_np: np.ndarray, target_np: np.ndarray) -> float:
+        """Calculate MSE between predicted and target Power Delay Profiles (PDP)"""
+        try:
+            # Calculate PDP by taking IFFT across subcarriers to get delay domain
+            # Shape: (samples, subcarriers, ue_antennas, bs_antennas)
+            
+            # Take IFFT across subcarrier dimension to get delay domain
+            pred_delay = np.fft.ifft(pred_np, axis=1)  # IFFT across subcarriers
+            target_delay = np.fft.ifft(target_np, axis=1)
+            
+            # Calculate power delay profile (PDP) - power vs delay
+            pred_pdp = np.mean(np.abs(pred_delay)**2, axis=(2, 3))  # Average over UE and BS antennas
+            target_pdp = np.mean(np.abs(target_delay)**2, axis=(2, 3))
+            
+            # Calculate MSE between PDPs
+            pdp_mse = np.mean((pred_pdp - target_pdp)**2)
+            
+            logger.info(f"   PDP MSE: {pdp_mse:.6f}")
+            return pdp_mse
+            
+        except Exception as e:
+            logger.warning(f"   Failed to calculate PDP MSE: {e}")
+            return 0.0
+
     def _calculate_csi_metrics(self) -> Dict[str, float]:
         """Calculate detailed CSI comparison metrics"""
         logger.info("Calculating CSI comparison metrics...")
@@ -1857,75 +1833,14 @@ class PrismTester:
         else:
             mse_total = np.mean((pred_np - target_np)**2)
         
-        # Calculate correlation coefficients
-        # 1. Global correlation (original method for backward compatibility)
-        pred_flat = pred_np.flatten()
-        target_flat = target_np.flatten()
+        # Calculate additional metrics: Spatial Spectrum MSE and PDP MSE
+        logger.info("🔍 Calculating spatial spectrum MSE and PDP MSE...")
         
-        if pred_flat.dtype == np.complex64 or pred_flat.dtype == np.complex128:
-            # For complex data, calculate correlation for magnitude and phase separately
-            mag_corr = np.corrcoef(np.abs(pred_flat), np.abs(target_flat))[0, 1]
-            phase_corr = np.corrcoef(np.angle(pred_flat), np.angle(target_flat))[0, 1]
-        else:
-            mag_corr = np.corrcoef(pred_flat, target_flat)[0, 1]
-            phase_corr = 0.0
+        # Calculate Spatial Spectrum MSE
+        spatial_spectrum_mse = self._calculate_spatial_spectrum_mse(pred_np, target_np)
         
-        # 2. Per-antenna correlation analysis
-        logger.info("🔍 Calculating per-antenna correlation...")
-        num_bs_antennas = pred_np.shape[3]  # Shape: (samples, subcarriers, ue_antennas, bs_antennas)
-        
-        per_antenna_mag_corr = []
-        per_antenna_phase_corr = []
-        
-        for ant_idx in range(num_bs_antennas):
-            # Extract data for this specific BS antenna: (samples, subcarriers, ue_antennas)
-            pred_ant = pred_np[:, :, :, ant_idx].flatten()  # Flatten across samples, subcarriers, UE antennas
-            target_ant = target_np[:, :, :, ant_idx].flatten()
-            
-            # Calculate correlation for this antenna
-            if pred_ant.dtype == np.complex64 or pred_ant.dtype == np.complex128:
-                ant_mag_corr = np.corrcoef(np.abs(pred_ant), np.abs(target_ant))[0, 1]
-                ant_phase_corr = np.corrcoef(np.angle(pred_ant), np.angle(target_ant))[0, 1]
-            else:
-                ant_mag_corr = np.corrcoef(pred_ant, target_ant)[0, 1]
-                ant_phase_corr = 0.0
-            
-            # Handle NaN values
-            ant_mag_corr = ant_mag_corr if not np.isnan(ant_mag_corr) else 0.0
-            ant_phase_corr = ant_phase_corr if not np.isnan(ant_phase_corr) else 0.0
-            
-            per_antenna_mag_corr.append(ant_mag_corr)
-            per_antenna_phase_corr.append(ant_phase_corr)
-        
-        per_antenna_mag_corr = np.array(per_antenna_mag_corr)
-        per_antenna_phase_corr = np.array(per_antenna_phase_corr)
-        
-        # Calculate statistics for per-antenna correlations
-        mag_corr_stats = {
-            'mean': float(np.mean(per_antenna_mag_corr)),
-            'std': float(np.std(per_antenna_mag_corr)),
-            'min': float(np.min(per_antenna_mag_corr)),
-            'max': float(np.max(per_antenna_mag_corr)),
-            'median': float(np.median(per_antenna_mag_corr))
-        }
-        
-        phase_corr_stats = {
-            'mean': float(np.mean(per_antenna_phase_corr)),
-            'std': float(np.std(per_antenna_phase_corr)),
-            'min': float(np.min(per_antenna_phase_corr)),
-            'max': float(np.max(per_antenna_phase_corr)),
-            'median': float(np.median(per_antenna_phase_corr))
-        }
-        
-        logger.info(f"📊 Per-antenna magnitude correlation stats:")
-        logger.info(f"   Mean: {mag_corr_stats['mean']:.4f} ± {mag_corr_stats['std']:.4f}")
-        logger.info(f"   Range: [{mag_corr_stats['min']:.4f}, {mag_corr_stats['max']:.4f}]")
-        logger.info(f"   Median: {mag_corr_stats['median']:.4f}")
-        
-        logger.info(f"📊 Per-antenna phase correlation stats:")
-        logger.info(f"   Mean: {phase_corr_stats['mean']:.4f} ± {phase_corr_stats['std']:.4f}")
-        logger.info(f"   Range: [{phase_corr_stats['min']:.4f}, {phase_corr_stats['max']:.4f}]")
-        logger.info(f"   Median: {phase_corr_stats['median']:.4f}")
+        # Calculate PDP MSE
+        pdp_mse = self._calculate_pdp_mse(pred_np, target_np)
         
         # Calculate comprehensive metrics
         metrics = {
@@ -1933,19 +1848,21 @@ class PrismTester:
             'mse_total': float(mse_total),
             'rmse_total': float(np.sqrt(mse_total)),
             
-            # Magnitude metrics
+            # Magnitude metrics (keeping RMSE, removing correlation)
             'magnitude_mae': float(np.mean(mag_error)),
             'magnitude_mse': float(np.mean(mag_error**2)),
             'magnitude_rmse': float(np.sqrt(np.mean(mag_error**2))),
             'magnitude_max_error': float(np.max(mag_error)),
-            'magnitude_correlation': float(mag_corr) if not np.isnan(mag_corr) else 0.0,
             
-            # Phase metrics  
+            # Phase metrics (keeping RMSE, removing correlation)
             'phase_mae': float(np.mean(phase_error)),
             'phase_mse': float(np.mean(phase_error**2)),
             'phase_rmse': float(np.sqrt(np.mean(phase_error**2))),
             'phase_max_error': float(np.max(phase_error)),
-            'phase_correlation': float(phase_corr) if not np.isnan(phase_corr) else 0.0,
+            
+            # New metrics: Spatial Spectrum MSE and PDP MSE
+            'spatial_spectrum_mse': float(spatial_spectrum_mse),
+            'pdp_mse': float(pdp_mse),
             
             # Percentile metrics
             'magnitude_error_50th': float(np.percentile(mag_error, 50)),
@@ -1957,23 +1874,6 @@ class PrismTester:
             'phase_error_90th': float(np.percentile(phase_error, 90)),
             'phase_error_95th': float(np.percentile(phase_error, 95)),
             'phase_error_99th': float(np.percentile(phase_error, 99)),
-            
-            # Per-antenna correlation statistics
-            'per_antenna_mag_corr_mean': mag_corr_stats['mean'],
-            'per_antenna_mag_corr_std': mag_corr_stats['std'],
-            'per_antenna_mag_corr_min': mag_corr_stats['min'],
-            'per_antenna_mag_corr_max': mag_corr_stats['max'],
-            'per_antenna_mag_corr_median': mag_corr_stats['median'],
-            
-            'per_antenna_phase_corr_mean': phase_corr_stats['mean'],
-            'per_antenna_phase_corr_std': phase_corr_stats['std'],
-            'per_antenna_phase_corr_min': phase_corr_stats['min'],
-            'per_antenna_phase_corr_max': phase_corr_stats['max'],
-            'per_antenna_phase_corr_median': phase_corr_stats['median'],
-            
-            # Store individual antenna correlations for detailed analysis
-            'per_antenna_mag_correlations': per_antenna_mag_corr.tolist(),
-            'per_antenna_phase_correlations': per_antenna_phase_corr.tolist(),
             
             # Data statistics
             'num_samples': int(pred_np.shape[0]),
@@ -2034,8 +1934,8 @@ class PrismTester:
         logger.info(f"   • Total RMSE: {metrics['rmse_total']:.6f}")
         logger.info(f"   • Magnitude RMSE: {metrics['magnitude_rmse']:.6f}")
         logger.info(f"   • Phase RMSE: {metrics['phase_rmse']:.6f}")
-        logger.info(f"   • Magnitude Correlation: {metrics['magnitude_correlation']:.4f}")
-        logger.info(f"   • Phase Correlation: {metrics['phase_correlation']:.4f}")
+        logger.info(f"   • Spatial Spectrum MSE: {metrics['spatial_spectrum_mse']:.6f}")
+        logger.info(f"   • PDP MSE: {metrics['pdp_mse']:.6f}")
         if metrics['spatial_spectrum_loss'] is not None:
             logger.info(f"   • Spatial Spectrum Loss: {metrics['spatial_spectrum_loss']:.6f}")
         
@@ -2173,8 +2073,7 @@ class PrismTester:
             # Plot 7: PDP analysis and CDF
             self._plot_pdp_analysis(plots_dir)
             
-            # Plot 8: Per-antenna correlation analysis
-            self._plot_per_antenna_correlation(plots_dir)
+
             
             logger.info("✅ All visualizations created successfully")
             
@@ -2339,10 +2238,10 @@ class PrismTester:
                 logger.info(f"   • Magnitude RMSE: {combined_metrics['magnitude_rmse']:.6f}")
             if 'phase_rmse' in combined_metrics:
                 logger.info(f"   • Phase RMSE: {combined_metrics['phase_rmse']:.6f}")
-            if 'magnitude_correlation' in combined_metrics:
-                logger.info(f"   • Magnitude Correlation: {combined_metrics['magnitude_correlation']:.4f}")
-            if 'phase_correlation' in combined_metrics:
-                logger.info(f"   • Phase Correlation: {combined_metrics['phase_correlation']:.4f}")
+            if 'spatial_spectrum_mse' in combined_metrics:
+                logger.info(f"   • Spatial Spectrum MSE: {combined_metrics['spatial_spectrum_mse']:.6f}")
+            if 'pdp_mse' in combined_metrics:
+                logger.info(f"   • PDP MSE: {combined_metrics['pdp_mse']:.6f}")
             
             logger.info("=" * 80)
             
