@@ -213,7 +213,7 @@ training:
     
     # Spatial Spectrum Loss Configuration
     spatial_spectrum_loss:
-      enabled: false                  # Enable/disable spatial spectrum loss (enabled)
+      enabled: true                   # Enable/disable spatial spectrum loss (enabled)
       weight: 0.1                    # Weight for spatial spectrum loss component
       algorithm: 'bartlett'          # Spatial spectrum estimation algorithm ('bartlett', 'capon', 'music')
       fusion_method: 'average'       # Multi-subcarrier fusion method ('average', 'max')
