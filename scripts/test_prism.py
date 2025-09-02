@@ -605,21 +605,33 @@ class PrismTester:
                 logger.error("  - Device compatibility problems")
                 raise RuntimeError(error_msg) from e
             
-            # Initialize SpatialSpectrumLoss for testing
+            # Initialize SpatialSpectrumLoss for testing (always enabled for analysis)
             try:
                 ssl_config = self.config.get('training', {}).get('loss', {}).get('spatial_spectrum_loss', {})
-                if ssl_config.get('enabled', False):
-                    logger.info("🔧 Initializing SpatialSpectrumLoss for testing...")
-                    full_config = {
-                        'base_station': self.config.get('base_station', {}),
-                        'training': {'loss': {'spatial_spectrum_loss': ssl_config}}
-                    }
-                    self.spatial_spectrum_loss = SpatialSpectrumLoss(full_config)
-                    self.spatial_spectrum_loss.to(self.device)
-                    logger.info("✅ SpatialSpectrumLoss initialized successfully")
-                else:
-                    self.spatial_spectrum_loss = None
-                    logger.info("ℹ️  SpatialSpectrumLoss disabled in configuration")
+                
+                # Force enable spatial spectrum loss for testing analysis
+                ssl_config_for_testing = ssl_config.copy()
+                ssl_config_for_testing['enabled'] = True  # Always enable for testing
+                
+                # Use default values if not configured
+                if not ssl_config_for_testing.get('algorithm'):
+                    ssl_config_for_testing['algorithm'] = 'bartlett'
+                if not ssl_config_for_testing.get('fusion_method'):
+                    ssl_config_for_testing['fusion_method'] = 'average'
+                if not ssl_config_for_testing.get('theta_range'):
+                    ssl_config_for_testing['theta_range'] = [-60.0, 5.0, 60.0]
+                if not ssl_config_for_testing.get('phi_range'):
+                    ssl_config_for_testing['phi_range'] = [0.0, 10.0, 360.0]
+                
+                logger.info("🔧 Initializing SpatialSpectrumLoss for testing (forced enabled)...")
+                full_config = {
+                    'base_station': self.config.get('base_station', {}),
+                    'training': {'loss': {'spatial_spectrum_loss': ssl_config_for_testing}}
+                }
+                self.spatial_spectrum_loss = SpatialSpectrumLoss(full_config)
+                self.spatial_spectrum_loss.to(self.device)
+                logger.info("✅ SpatialSpectrumLoss initialized successfully for testing analysis")
+                
             except Exception as e:
                 logger.warning(f"⚠️  Failed to initialize SpatialSpectrumLoss: {e}")
                 self.spatial_spectrum_loss = None
@@ -1390,6 +1402,134 @@ class PrismTester:
             p_value = np.percentile(pdp_diff_flat, p)
             logger.info(f"  {p}th percentile: {p_value:.6f}")
     
+    def _create_fallback_spatial_spectrum_analysis(self, pred_tensor: torch.Tensor, 
+                                                  target_tensor: torch.Tensor, plots_dir: Path):
+        """
+        Create basic spatial spectrum analysis when SpatialSpectrumLoss is not available
+        
+        Args:
+            pred_tensor: Predicted CSI tensor (batch_size, num_subcarriers, num_ue_antennas, num_bs_antennas)
+            target_tensor: Target CSI tensor (same shape as pred_tensor)
+            plots_dir: Directory to save plots
+        """
+        logger.info("🔧 Creating fallback spatial spectrum analysis...")
+        
+        try:
+            # Use first sample for analysis
+            sample_idx = 0
+            pred_sample = pred_tensor[sample_idx]  # (num_subcarriers, num_ue_antennas, num_bs_antennas)
+            target_sample = target_tensor[sample_idx]
+            
+            # Convert to numpy for processing
+            pred_np = pred_sample.detach().cpu().numpy()
+            target_np = target_sample.detach().cpu().numpy()
+            
+            # Create basic spatial spectrum using simple beamforming
+            # Use uniform linear array assumption for BS antennas
+            num_subcarriers, num_ue_antennas, num_bs_antennas = pred_np.shape
+            
+            # Define angle grid (simplified)
+            theta_angles = np.linspace(-60, 60, 25)  # Elevation angles in degrees
+            phi_angles = np.linspace(0, 360, 37)     # Azimuth angles in degrees
+            
+            # Convert to radians
+            theta_rad = np.deg2rad(theta_angles)
+            phi_rad = np.deg2rad(phi_angles)
+            
+            # Create meshgrid
+            theta_grid, phi_grid = np.meshgrid(theta_rad, phi_rad, indexing='ij')
+            
+            # Compute spatial spectrum for first UE antenna and average over subcarriers
+            pred_spectrum = np.zeros((len(theta_angles), len(phi_angles)))
+            target_spectrum = np.zeros((len(theta_angles), len(phi_angles)))
+            
+            # Simple Bartlett beamforming for each direction
+            for i, theta in enumerate(theta_rad):
+                for j, phi in enumerate(phi_rad):
+                    # Create steering vector (simplified ULA model)
+                    # Assume BS antennas are arranged in a line with half-wavelength spacing
+                    antenna_positions = np.arange(num_bs_antennas) * 0.5  # Half wavelength spacing
+                    
+                    # Steering vector for this direction (simplified)
+                    steering_vector = np.exp(1j * 2 * np.pi * antenna_positions * np.sin(theta) * np.cos(phi))
+                    steering_vector = steering_vector / np.linalg.norm(steering_vector)
+                    
+                    # Compute beamformer output for each subcarrier
+                    pred_powers = []
+                    target_powers = []
+                    
+                    for sc in range(num_subcarriers):
+                        # Extract channel for first UE antenna
+                        pred_h = pred_np[sc, 0, :]  # (num_bs_antennas,)
+                        target_h = target_np[sc, 0, :]
+                        
+                        # Compute beamformer output
+                        pred_output = np.abs(np.dot(np.conj(steering_vector), pred_h))**2
+                        target_output = np.abs(np.dot(np.conj(steering_vector), target_h))**2
+                        
+                        pred_powers.append(pred_output)
+                        target_powers.append(target_output)
+                    
+                    # Average over subcarriers
+                    pred_spectrum[i, j] = np.mean(pred_powers)
+                    target_spectrum[i, j] = np.mean(target_powers)
+            
+            # Normalize spectra
+            pred_spectrum = pred_spectrum / np.max(pred_spectrum)
+            target_spectrum = target_spectrum / np.max(target_spectrum)
+            
+            # Create visualization
+            self._create_fallback_spectrum_plot(
+                pred_spectrum, target_spectrum, theta_angles, phi_angles, 
+                plots_dir, sample_idx
+            )
+            
+            logger.info("✅ Fallback spatial spectrum analysis completed")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to create fallback spatial spectrum analysis: {e}")
+            raise
+    
+    def _create_fallback_spectrum_plot(self, pred_spectrum: np.ndarray, target_spectrum: np.ndarray,
+                                     theta_angles: np.ndarray, phi_angles: np.ndarray,
+                                     plots_dir: Path, sample_idx: int):
+        """Create fallback spatial spectrum comparison plot"""
+        
+        # Create figure with two subplots
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+        
+        # Plot predicted spectrum
+        im1 = ax1.imshow(pred_spectrum, aspect='auto', origin='lower', 
+                        extent=[phi_angles[0], phi_angles[-1], theta_angles[0], theta_angles[-1]],
+                        cmap='viridis')
+        ax1.set_title(f'Predicted Spatial Spectrum (Fallback)\nSample {sample_idx}', 
+                     fontsize=12, fontweight='bold')
+        ax1.set_xlabel('Azimuth (degrees)', fontsize=10)
+        ax1.set_ylabel('Elevation (degrees)', fontsize=10)
+        plt.colorbar(im1, ax=ax1, label='Normalized Power')
+        
+        # Plot target spectrum
+        im2 = ax2.imshow(target_spectrum, aspect='auto', origin='lower',
+                        extent=[phi_angles[0], phi_angles[-1], theta_angles[0], theta_angles[-1]],
+                        cmap='viridis')
+        ax2.set_title(f'Target Spatial Spectrum (Fallback)\nSample {sample_idx}', 
+                     fontsize=12, fontweight='bold')
+        ax2.set_xlabel('Azimuth (degrees)', fontsize=10)
+        ax2.set_ylabel('Elevation (degrees)', fontsize=10)
+        plt.colorbar(im2, ax=ax2, label='Normalized Power')
+        
+        # Add overall title
+        fig.suptitle('Fallback Spatial Spectrum Analysis', fontsize=14, fontweight='bold')
+        plt.tight_layout()
+        
+        # Save plot
+        filename = f'spatial_spectrum_fallback_sample_{sample_idx}.png'
+        plot_path = plots_dir / filename
+        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        logger.info(f"📊 Fallback spatial spectrum plot saved: {plot_path}")
+
     def _plot_per_antenna_correlation(self, plots_dir: Path):
         """Plot per-antenna correlation analysis"""
         logger.info("Creating per-antenna correlation plots...")
@@ -1841,24 +1981,24 @@ class PrismTester:
             'target_shape': list(target_np.shape)
         }
         
-        # Calculate SpatialSpectrumLoss if available
-        if hasattr(self, 'spatial_spectrum_loss') and self.spatial_spectrum_loss is not None:
-            logger.info("🔍 Calculating SpatialSpectrumLoss...")
-            try:
-                # Convert numpy arrays back to tensors for SpatialSpectrumLoss
-                pred_tensor = torch.from_numpy(pred_np).to(self.device)
-                target_tensor = torch.from_numpy(target_np).to(self.device)
-                
-                # Calculate spatial spectrum loss
+        # Calculate SpatialSpectrumLoss and generate spatial spectrum analysis (always performed)
+        logger.info("🔍 Performing spatial spectrum analysis...")
+        try:
+            # Convert numpy arrays back to tensors for analysis
+            pred_tensor = torch.from_numpy(pred_np).to(self.device)
+            target_tensor = torch.from_numpy(target_np).to(self.device)
+            
+            # Try to calculate spatial spectrum loss if available
+            if hasattr(self, 'spatial_spectrum_loss') and self.spatial_spectrum_loss is not None:
+                logger.info("🔧 Using SpatialSpectrumLoss for analysis...")
                 with torch.no_grad():
                     spatial_loss = self.spatial_spectrum_loss(pred_tensor, target_tensor)
                     metrics['spatial_spectrum_loss'] = float(spatial_loss.item())
                 
-                # Generate spatial spectrum visualization
+                # Generate spatial spectrum visualization using the loss function
                 plots_dir = Path(self.config['output']['testing']['plots_dir'])
                 plots_dir.mkdir(parents=True, exist_ok=True)
                 
-                # Use the external visualization method
                 sample_idx = 0  # Use first sample for visualization
                 save_path = str(plots_dir)
                 
@@ -1869,11 +2009,24 @@ class PrismTester:
                 logger.info(f"✅ SpatialSpectrumLoss: {metrics['spatial_spectrum_loss']:.6f}")
                 logger.info(f"✅ Spatial spectrum plots saved to: {save_path}")
                 
-            except Exception as e:
-                logger.warning(f"⚠️  Failed to calculate SpatialSpectrumLoss: {e}")
+            else:
+                # Fallback: Create basic spatial spectrum analysis without loss calculation
+                logger.info("🔧 Using fallback spatial spectrum analysis...")
                 metrics['spatial_spectrum_loss'] = None
-        else:
-            logger.info("ℹ️  SpatialSpectrumLoss not available (disabled or not initialized)")
+                
+                # Generate basic spatial spectrum visualization
+                plots_dir = Path(self.config['output']['testing']['plots_dir'])
+                plots_dir.mkdir(parents=True, exist_ok=True)
+                
+                self._create_fallback_spatial_spectrum_analysis(
+                    pred_tensor, target_tensor, plots_dir
+                )
+                
+                logger.info("✅ Fallback spatial spectrum analysis completed")
+                logger.info(f"✅ Basic spatial spectrum plots saved to: {plots_dir}")
+                
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to perform spatial spectrum analysis: {e}")
             metrics['spatial_spectrum_loss'] = None
         
         # Log key metrics
