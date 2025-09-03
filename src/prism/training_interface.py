@@ -1057,10 +1057,10 @@ class PrismTrainingInterface(nn.Module):
                 pdp_raw = loss_components['pdp_loss']
                 pdp_weighted = loss_function.pdp_weight * pdp_raw
                 logger.info(f"   PDP Loss: {pdp_raw:.6f} (raw) → {pdp_weighted:.6f} (weighted × {loss_function.pdp_weight})")
-            if 'spatial_spectrum_loss' in loss_components:
-                spatial_raw = loss_components['spatial_spectrum_loss']
+            if 'ss_loss' in loss_components:
+                spatial_raw = loss_components['ss_loss']
                 spatial_weighted = loss_function.spatial_spectrum_weight * spatial_raw
-                logger.info(f"   Spatial Spectrum Loss: {spatial_raw:.6f} (raw) → {spatial_weighted:.6f} (weighted × {loss_function.spatial_spectrum_weight})")
+                logger.info(f"   SS Loss: {spatial_raw:.6f} (raw) → {spatial_weighted:.6f} (weighted × {loss_function.spatial_spectrum_weight})")
             
             # Final validation of computed loss
             if torch.isnan(loss) or torch.isinf(loss):
