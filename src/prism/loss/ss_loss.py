@@ -19,7 +19,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-class SpatialSpectrumLoss(nn.Module):
+class SSLoss(nn.Module):
     """
     Spatial Spectrum Loss Functions
     
@@ -34,7 +34,7 @@ class SpatialSpectrumLoss(nn.Module):
         Args:
             config: Full configuration dictionary containing base_station and training sections
         """
-        super(SpatialSpectrumLoss, self).__init__()
+        super(SSLoss, self).__init__()
         
         # Extract base station configuration
         if 'base_station' not in config:
@@ -54,6 +54,18 @@ class SpatialSpectrumLoss(nn.Module):
         
         self.algorithm = ssl_config['algorithm']
         self.fusion_method = ssl_config['fusion_method']
+        
+        # Loss function type - MSE or SSIM
+        self.loss_type = ssl_config.get('loss_type', 'mse')  # Default to MSE for backward compatibility
+        
+        # SSIM parameters
+        if self.loss_type == 'ssim':
+            self.ssim_window_size = ssl_config.get('ssim_window_size', 11)
+            self.ssim_k1 = ssl_config.get('ssim_k1', 0.01)
+            self.ssim_k2 = ssl_config.get('ssim_k2', 0.03)
+            logger.info(f"🎯 Using SSIM loss for spatial spectrum with window_size={self.ssim_window_size}")
+        else:
+            logger.info(f"📊 Using MSE loss for spatial spectrum")
         
         # Antenna array configuration
         if 'antenna_array' not in bs_config:
@@ -161,6 +173,96 @@ class SpatialSpectrumLoss(nn.Module):
                 positions.append([x, y, z])
         
         return torch.tensor(positions, dtype=torch.float32)
+    
+    def _compute_ssim_loss(self, predicted_spectrum: torch.Tensor, target_spectrum: torch.Tensor) -> torch.Tensor:
+        """
+        Compute SSIM loss between spatial spectrums
+        
+        Args:
+            predicted_spectrum: Predicted spatial spectrum (batch_size, theta_points, phi_points)
+            target_spectrum: Target spatial spectrum (batch_size, theta_points, phi_points)
+            
+        Returns:
+            ssim_loss: SSIM-based loss value (scalar tensor)
+        """
+        # Ensure we have batch dimension
+        if predicted_spectrum.dim() == 2:
+            predicted_spectrum = predicted_spectrum.unsqueeze(0)
+        if target_spectrum.dim() == 2:
+            target_spectrum = target_spectrum.unsqueeze(0)
+            
+        # Add channel dimension for SSIM computation (B, C, H, W format)
+        pred_4d = predicted_spectrum.unsqueeze(1)  # (batch_size, 1, theta_points, phi_points)
+        target_4d = target_spectrum.unsqueeze(1)   # (batch_size, 1, theta_points, phi_points)
+        
+        # Compute SSIM
+        ssim_value = self._ssim_pytorch(pred_4d, target_4d, 
+                                       window_size=self.ssim_window_size,
+                                       k1=self.ssim_k1, k2=self.ssim_k2)
+        
+        # Convert SSIM to loss (1 - SSIM, so higher SSIM gives lower loss)
+        ssim_loss = 1.0 - ssim_value
+        
+        return ssim_loss
+    
+    def _ssim_pytorch(self, img1: torch.Tensor, img2: torch.Tensor, 
+                     window_size: int = 11, k1: float = 0.01, k2: float = 0.03) -> torch.Tensor:
+        """
+        PyTorch implementation of SSIM for spatial spectrums
+        
+        Args:
+            img1, img2: Input tensors (B, C, H, W)
+            window_size: Size of the sliding window
+            k1, k2: SSIM constants
+            
+        Returns:
+            SSIM value (scalar tensor)
+        """
+        device = img1.device
+        
+        # Create Gaussian window
+        def create_window(window_size: int, channel: int) -> torch.Tensor:
+            # Create 1D Gaussian kernel
+            coords = torch.arange(window_size, dtype=torch.float32, device=device)
+            coords -= window_size // 2
+            g = torch.exp(-(coords ** 2) / (2 * (window_size / 6) ** 2))
+            g = g / g.sum()
+            
+            # Create 2D Gaussian kernel
+            g_2d = g[:, None] * g[None, :]
+            g_2d = g_2d / g_2d.sum()
+            
+            # Expand for all channels
+            window = g_2d.expand(channel, 1, window_size, window_size).contiguous()
+            return window
+        
+        # Get data range for normalization constants
+        data_range = torch.max(torch.max(img1), torch.max(img2)) - torch.min(torch.min(img1), torch.min(img2))
+        C1 = (k1 * data_range) ** 2
+        C2 = (k2 * data_range) ** 2
+        
+        # Create window
+        channel = img1.size(1)
+        window = create_window(window_size, channel)
+        
+        # Compute local means
+        mu1 = F.conv2d(img1, window, padding=window_size//2, groups=channel)
+        mu2 = F.conv2d(img2, window, padding=window_size//2, groups=channel)
+        
+        mu1_sq = mu1.pow(2)
+        mu2_sq = mu2.pow(2)
+        mu1_mu2 = mu1 * mu2
+        
+        # Compute local variances and covariance
+        sigma1_sq = F.conv2d(img1 * img1, window, padding=window_size//2, groups=channel) - mu1_sq
+        sigma2_sq = F.conv2d(img2 * img2, window, padding=window_size//2, groups=channel) - mu2_sq
+        sigma12 = F.conv2d(img1 * img2, window, padding=window_size//2, groups=channel) - mu1_mu2
+        
+        # Compute SSIM map
+        ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+        
+        # Return mean SSIM
+        return ssim_map.mean()
     
     def _compute_subcarrier_frequencies(self) -> torch.Tensor:
         """
@@ -477,8 +579,13 @@ class SpatialSpectrumLoss(nn.Module):
             predicted_spectrum_normalized = predicted_spectrum
             target_spectrum_normalized = target_spectrum
         
-        # Compute MSE loss between max-normalized spatial spectrums
-        loss = F.mse_loss(predicted_spectrum_normalized, target_spectrum_normalized)
+        # Compute loss based on configured loss type
+        if self.loss_type == 'ssim':
+            # Use SSIM loss for better perceptual quality assessment
+            loss = self._compute_ssim_loss(predicted_spectrum_normalized, target_spectrum_normalized)
+        else:
+            # Default MSE loss
+            loss = F.mse_loss(predicted_spectrum_normalized, target_spectrum_normalized)
         
         return loss
     

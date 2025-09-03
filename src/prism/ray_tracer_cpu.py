@@ -57,7 +57,7 @@ class CPURayTracer(RayTracer):
             
         Common Args (passed to base class):
             azimuth_divisions: Number of azimuth divisions (0° to 360°)
-            elevation_divisions: Number of elevation divisions (-90° to +90°)
+            elevation_divisions: Number of elevation divisions (0° to 90°)
             max_ray_length: Maximum ray length in meters
             scene_bounds: Scene boundaries as {'min': [x,y,z], 'max': [x,y,z]}
             prism_network: PrismNetwork instance for getting attenuation and radiance properties
@@ -195,8 +195,8 @@ class CPURayTracer(RayTracer):
                 theta = j * self.elevation_resolution  # Elevation angle
                 
                 # Convert to Cartesian coordinates using proper spherical coordinates
-                # Elevation: -90° to +90° (-π/2 to +π/2)
-                elevation = theta - (math.pi / 2)
+                # Elevation: 0° to 90° (0 to π/2)
+                elevation = theta
                 x = math.cos(elevation) * math.cos(phi)
                 y = math.cos(elevation) * math.sin(phi)
                 z = math.sin(elevation)
@@ -239,8 +239,8 @@ class CPURayTracer(RayTracer):
         
         # Create direction vector
         # Convert to proper spherical coordinates
-        # Elevation: -90° to +90° (-π/2 to +π/2)
-        elevation = (theta_idx * self.elevation_resolution) - (math.pi / 2)
+        # Elevation: 0° to 90° (0 to π/2)
+        elevation = theta_idx * self.elevation_resolution
         
         direction_vector = torch.tensor([
             math.cos(elevation) * math.cos(phi),
@@ -1649,8 +1649,8 @@ class CPURayTracer(RayTracer):
             theta = theta_idx * self.elevation_resolution
             
             # Convert to proper spherical coordinates
-            # Elevation: -90° to +90° (-π/2 to +π/2)
-            elevation = theta - (math.pi / 2)
+            # Elevation: 0° to 90° (0 to π/2)
+            elevation = theta
             
             direction_vector = torch.tensor([
                 math.cos(elevation) * math.cos(phi),
@@ -1817,8 +1817,8 @@ class CPURayTracer(RayTracer):
             theta = theta_idx * self.elevation_resolution
             
             # Convert to proper spherical coordinates
-            # Elevation: -90° to +90° (-π/2 to +π/2)
-            elevation = theta - (math.pi / 2)
+            # Elevation: 0° to 90° (0 to π/2)
+            elevation = theta
             
             direction_vector = torch.tensor([
                 math.cos(elevation) * math.cos(phi),
@@ -2038,8 +2038,8 @@ class CPURayTracer(RayTracer):
             theta = theta_idx * self.elevation_resolution
             
             # Convert to proper spherical coordinates
-            # Elevation: -90° to +90° (-π/2 to +π/2)
-            elevation = theta - (math.pi / 2)
+            # Elevation: 0° to 90° (0 to π/2)
+            elevation = theta
             
             direction_vector = torch.tensor([
                 math.cos(elevation) * math.cos(phi),
@@ -2146,8 +2146,8 @@ class CPURayTracer(RayTracer):
             theta = theta_idx * self.elevation_resolution
             
             # Convert to proper spherical coordinates
-            # Elevation: -90° to +90° (-π/2 to +π/2)
-            elevation = theta - (math.pi / 2)
+            # Elevation: 0° to 90° (0 to π/2)
+            elevation = theta
             
             direction_vector = torch.tensor([
                 math.cos(elevation) * math.cos(phi),
@@ -2300,8 +2300,8 @@ class CPURayTracer(RayTracer):
             theta = theta_idx * self.elevation_resolution
             
             # Convert to proper spherical coordinates
-            # Elevation: -90° to +90° (-π/2 to +π/2)
-            elevation = theta - (math.pi / 2)
+            # Elevation: 0° to 90° (0 to π/2)
+            elevation = theta
             
             direction_vector = torch.tensor([
                 math.cos(elevation) * math.cos(phi),

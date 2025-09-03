@@ -132,7 +132,7 @@ ray_tracing:
 ray_tracing:
   angular_sampling:
     azimuth_divisions: 18            # Number of azimuth divisions (0° to 360°)
-    elevation_divisions: 9           # Number of elevation divisions (-90° to +90°)
+    elevation_divisions: 9           # Number of elevation divisions (0° to 90°)
     total_directions: 162            # 18 × 9 = 162 angle combinations
     top_k_directions: 32             # Number of top-K directions to select
 ```

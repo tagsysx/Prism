@@ -653,7 +653,7 @@ class PrismTrainer:
         self.progress_check_interval = 30  # Check progress every 30 seconds
         
         # Import and setup loss function
-        from prism.loss import PrismLossFunction, DEFAULT_LOSS_CONFIG
+        from prism.loss import LossFunction, DEFAULT_LOSS_CONFIG
         
         # Create loss configuration
         loss_config = DEFAULT_LOSS_CONFIG.copy()
@@ -666,7 +666,7 @@ class PrismTrainer:
         loss_config['base_station'] = self.config.get('base_station', {})
         
         # Initialize loss function
-        self.criterion = PrismLossFunction(loss_config)
+        self.criterion = LossFunction(loss_config)
         
         self.logger.info(f"🎯 Initialized Multi-Component Loss Function:")
         

@@ -15,13 +15,13 @@ All loss functions are designed to work with PyTorch tensors and support backpro
 
 from .csi_loss import CSILoss
 from .pdp_loss import PDPLoss
-from .spatial_spectrum_loss import SpatialSpectrumLoss
-from .prism_loss_function import PrismLossFunction, DEFAULT_LOSS_CONFIG
+from .ss_loss import SSLoss
+from .loss_function import LossFunction, DEFAULT_LOSS_CONFIG
 
 __all__ = [
     'CSILoss',
     'PDPLoss', 
-    'SpatialSpectrumLoss',
-    'PrismLossFunction',
+    'SSLoss',
+    'LossFunction',
     'DEFAULT_LOSS_CONFIG'
 ]

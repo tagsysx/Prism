@@ -34,10 +34,10 @@ from .spatial_spectrum import (
 )
 
 from .loss import (
-    PrismLossFunction,
+    LossFunction,
     CSILoss,
     PDPLoss,
-    SpatialSpectrumLoss,
+    SSLoss,
     DEFAULT_LOSS_CONFIG
 )
 
@@ -82,10 +82,10 @@ __all__ = [
     'fuse_subcarrier_spectrums',
     
     # Loss functions
-    'PrismLossFunction',
+    'LossFunction',
     'CSILoss',
     'PDPLoss',
-    'SpatialSpectrumLoss',
+    'SSLoss',
     'DEFAULT_LOSS_CONFIG',
     
     # Neural networks

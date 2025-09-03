@@ -40,7 +40,7 @@ from prism.ray_tracer_cpu import CPURayTracer
 from prism.ray_tracer_cuda import CUDARayTracer
 from prism.training_interface import PrismTrainingInterface
 from prism.data_utils import load_and_split_data, check_dataset_compatibility
-from prism.loss import SpatialSpectrumLoss
+from prism.loss import SSLoss
 
 # Configure logging
 logging.basicConfig(
@@ -605,7 +605,7 @@ class PrismTester:
                 logger.error("  - Device compatibility problems")
                 raise RuntimeError(error_msg) from e
             
-            # Initialize SpatialSpectrumLoss for testing (always enabled for analysis)
+            # Initialize SSLoss for testing (always enabled for analysis)
             try:
                 ssl_config = self.config.get('training', {}).get('loss', {}).get('spatial_spectrum_loss', {})
                 
@@ -623,17 +623,17 @@ class PrismTester:
                 if not ssl_config_for_testing.get('phi_range'):
                     ssl_config_for_testing['phi_range'] = [0.0, 10.0, 360.0]
                 
-                logger.info("🔧 Initializing SpatialSpectrumLoss for testing (forced enabled)...")
+                logger.info("🔧 Initializing SSLoss for testing (forced enabled)...")
                 full_config = {
                     'base_station': self.config.get('base_station', {}),
                     'training': {'loss': {'spatial_spectrum_loss': ssl_config_for_testing}}
                 }
-                self.spatial_spectrum_loss = SpatialSpectrumLoss(full_config)
+                self.spatial_spectrum_loss = SSLoss(full_config)
                 self.spatial_spectrum_loss.to(self.device)
-                logger.info("✅ SpatialSpectrumLoss initialized successfully for testing analysis")
+                logger.info("✅ SSLoss initialized successfully for testing analysis")
                 
             except Exception as e:
-                logger.warning(f"⚠️  Failed to initialize SpatialSpectrumLoss: {e}")
+                logger.warning(f"⚠️  Failed to initialize SSLoss: {e}")
                 self.spatial_spectrum_loss = None
             
             # Log successful loading
@@ -2011,7 +2011,7 @@ class PrismTester:
     def _create_fallback_spatial_spectrum_analysis(self, pred_tensor: torch.Tensor, 
                                                   target_tensor: torch.Tensor, plots_dir: Path):
         """
-        Create basic spatial spectrum analysis when SpatialSpectrumLoss is not available
+        Create basic spatial spectrum analysis when SSLoss is not available
         
         Args:
             pred_tensor: Predicted CSI tensor (batch_size, num_subcarriers, num_ue_antennas, num_bs_antennas)
@@ -2399,7 +2399,7 @@ class PrismTester:
     def _calculate_spatial_spectrum_mse(self, pred_np: np.ndarray, target_np: np.ndarray) -> float:
         """Calculate MSE between predicted and target spatial spectrums using configuration-based method"""
         try:
-            from prism.loss import SpatialSpectrumLoss
+            from prism.loss import SSLoss
             import yaml
             import torch
             from pathlib import Path
@@ -2429,10 +2429,10 @@ class PrismTester:
             num_selected_per_sample = np.sum(selection_mask, axis=1)
             logger.info(f"   Selected subcarriers per sample: {num_selected_per_sample[0]}/{num_subcarriers}")
             
-            # Use the improved SpatialSpectrumLoss class with proper mask
+            # Use the improved SSLoss class with proper mask
             try:
-                # Create SpatialSpectrumLoss instance
-                spatial_loss = SpatialSpectrumLoss(config)
+                # Create SSLoss instance
+                spatial_loss = SSLoss(config)
                 
                 # Extract selected subcarriers based on selection mask
                 selected_pred_np = self._extract_selected_subcarriers(pred_np, selection_mask)
@@ -2450,7 +2450,7 @@ class PrismTester:
                 return spatial_spectrum_mse
                 
             except Exception as config_error:
-                logger.warning(f"   Failed to use SpatialSpectrumLoss class: {config_error}")
+                logger.warning(f"   Failed to use SSLoss class: {config_error}")
                 # Fallback to simple power calculation
                 
             # Fallback: Simple power-based calculation using selected subcarriers
@@ -2643,7 +2643,7 @@ class PrismTester:
             'target_shape': list(target_np.shape)
         }
         
-        # Calculate SpatialSpectrumLoss and generate spatial spectrum analysis (always performed)
+        # Calculate SSLoss and generate spatial spectrum analysis (always performed)
         logger.info("🔍 Performing spatial spectrum analysis...")
         try:
             # Convert numpy arrays back to tensors for analysis
@@ -2652,7 +2652,7 @@ class PrismTester:
             
             # Try to calculate spatial spectrum loss if available
             if hasattr(self, 'spatial_spectrum_loss') and self.spatial_spectrum_loss is not None:
-                logger.info("🔧 Using SpatialSpectrumLoss for analysis...")
+                logger.info("🔧 Using SSLoss for analysis...")
                 
                 # Extract selected subcarriers for spatial spectrum analysis
                 # Simulate subcarrier selection based on training configuration
@@ -2689,7 +2689,7 @@ class PrismTester:
                     selected_pred_tensor, selected_target_tensor, save_path, sample_idx
                 )
                 
-                logger.info(f"✅ SpatialSpectrumLoss: {metrics['spatial_spectrum_loss']:.6f}")
+                logger.info(f"✅ SSLoss: {metrics['spatial_spectrum_loss']:.6f}")
                 logger.info(f"✅ Spatial spectrum plots saved to: {save_path}")
                 
             else:

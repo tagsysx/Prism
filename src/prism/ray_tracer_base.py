@@ -65,7 +65,7 @@ class RayTracer(ABC):
         
         Args:
             azimuth_divisions: Number of azimuth divisions (0° to 360°)
-            elevation_divisions: Number of elevation divisions (-90° to +90°)
+            elevation_divisions: Number of elevation divisions (0° to 90°)
             max_ray_length: Maximum ray length in meters
             scene_bounds: Scene boundaries as {'min': [x,y,z], 'max': [x,y,z]}
             device: Device to run computations on
@@ -123,7 +123,7 @@ class RayTracer(ABC):
         
         # Calculate derived parameters
         self.azimuth_resolution = 2 * 3.14159 / azimuth_divisions  # 0° to 360°
-        self.elevation_resolution = 3.14159 / elevation_divisions   # -90° to +90° (π range)
+        self.elevation_resolution = (3.14159 / 2) / elevation_divisions   # 0° to 90° (π/2 range)
         self.total_directions = azimuth_divisions * elevation_divisions
         
         # Validate configuration
@@ -311,7 +311,7 @@ class RayTracer(ABC):
             for theta_idx in range(self.elevation_divisions):
                 # Convert indices to angles
                 phi = phi_idx * self.azimuth_resolution  # 0 to 2π
-                theta = (theta_idx * self.elevation_resolution) - (math.pi / 2)  # -π/2 to π/2
+                theta = theta_idx * self.elevation_resolution  # 0 to π/2
                 
                 # Convert spherical to Cartesian coordinates
                 x = math.cos(theta) * math.cos(phi)

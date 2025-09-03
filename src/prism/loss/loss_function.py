@@ -13,7 +13,7 @@ import logging
 
 from .csi_loss import CSILoss
 from .pdp_loss import PDPLoss
-from .spatial_spectrum_loss import SpatialSpectrumLoss
+from .ss_loss import SSLoss
 
 # Get logger for this module
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ DEFAULT_LOSS_CONFIG = {
 }
 
 
-class PrismLossFunction(nn.Module):
+class LossFunction(nn.Module):
     """
     Main Loss Function Class for Prism Framework
     
@@ -55,7 +55,7 @@ class PrismLossFunction(nn.Module):
         Args:
             config: Configuration dictionary containing loss parameters
         """
-        super(PrismLossFunction, self).__init__()
+        super(LossFunction, self).__init__()
         
         # Extract configuration with reasonable defaults for loss weights
         # These are algorithm parameters, not critical system config
@@ -92,12 +92,12 @@ class PrismLossFunction(nn.Module):
         # Initialize Spatial Spectrum loss (only if enabled and weight > 0)
         ssl_config = config.get('spatial_spectrum_loss', {})
         self.spatial_spectrum_enabled = ssl_config.get('enabled', False)
-        self.spatial_spectrum_loss = None
+        self.ss_loss = None
         if self.spatial_spectrum_weight > 0 and self.spatial_spectrum_enabled:
-            # Pass the full config to SpatialSpectrumLoss (it needs base_station and training sections)
+            # Pass the full config to SSLoss (it needs base_station and training sections)
             full_config = {'base_station': config.get('base_station', {}), 
                           'training': {'loss': {'spatial_spectrum_loss': ssl_config}}}
-            self.spatial_spectrum_loss = SpatialSpectrumLoss(full_config)
+            self.ss_loss = SSLoss(full_config)
         
         # Loss components tracking
         self.loss_components = {}
@@ -155,17 +155,17 @@ class PrismLossFunction(nn.Module):
             loss_components['pdp_loss'] = pdp_loss_val.item()
         
         # Spatial Spectrum loss
-        if (self.spatial_spectrum_loss is not None and 
+        if (self.ss_loss is not None and 
             self.spatial_spectrum_enabled and
             'csi' in predictions and 'csi' in targets and 
             self.spatial_spectrum_weight > 0):
             # Use selected CSI tensors for spatial spectrum loss
-            spatial_loss_val = self.spatial_spectrum_loss(
+            spatial_loss_val = self.ss_loss(
                 predictions['csi'], 
                 targets['csi']
             )
             total_loss = total_loss + self.spatial_spectrum_weight * spatial_loss_val
-            loss_components['spatial_spectrum_loss'] = spatial_loss_val.item()
+            loss_components['ss_loss'] = spatial_loss_val.item()
         
         # Regularization losses
         if ('regularization' in predictions and 
@@ -188,9 +188,9 @@ class PrismLossFunction(nn.Module):
         """
         return self.loss_components.copy()
     
-    def compute_and_visualize_spatial_spectrum_loss(self, predicted_csi: torch.Tensor, 
-                                                   target_csi: torch.Tensor,
-                                                   save_path: str, sample_idx: int = 0) -> Optional[Tuple[float, str]]:
+    def compute_and_visualize_ss_loss(self, predicted_csi: torch.Tensor, 
+                                      target_csi: torch.Tensor,
+                                      save_path: str, sample_idx: int = 0) -> Optional[Tuple[float, str]]:
         """
         Compute spatial spectrum loss and create visualization (for testing)
         
@@ -203,9 +203,9 @@ class PrismLossFunction(nn.Module):
         Returns:
             (loss_value, plot_path) if spatial spectrum loss is enabled, None otherwise
         """
-        if self.spatial_spectrum_loss is None:
+        if self.ss_loss is None:
             return None
             
-        return self.spatial_spectrum_loss.compute_and_visualize_loss(
+        return self.ss_loss.compute_and_visualize_loss(
             predicted_csi, target_csi, save_path, sample_idx
         )
