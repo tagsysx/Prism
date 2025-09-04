@@ -47,19 +47,23 @@ pip install -e .
 
 Generate synthetic channel data using the Sionna-compatible data generator:
 
+**Most concise command - generate 300 positions:**
 ```bash
-# Most concise command - generate 300 positions
 python data/sionna/generator.py --n 300
+```
 
-# Generate custom dataset with specific parameters
+**Generate custom dataset with specific parameters:**
+```bash
 python data/sionna/generator.py \
     --num_positions 300 \
     --num_subcarriers 408 \
     --num_ue_antennas 1 \
     --num_bs_antennas 64 \
     --output_file data/sionna/synthetic_data.h5
+```
 
-# Generate dataset with specific environment parameters
+**Generate dataset with specific environment parameters:**
+```bash
 python data/sionna/generator.py \
     --carrier_frequency 3.5e9 \
     --bandwidth 1.224e7 \
@@ -76,11 +80,13 @@ The generator creates HDF5 files with:
 
 ### Training a Model
 
+**Most concise training command:**
 ```bash
-# Most concise training command
 python scripts/train_prism.py --config configs/sionna.yml
+```
 
-# Train with custom parameters
+**Train with custom parameters:**
+```bash
 python scripts/train_prism.py \
     --config configs/sionna.yml \
     --epochs 100 \
@@ -90,11 +96,13 @@ python scripts/train_prism.py \
 
 ### Testing a Trained Model
 
+**Most concise testing command:**
 ```bash
-# Most concise testing command
 python scripts/test_prism.py --config configs/sionna.yml
+```
 
-# Test with specific checkpoint and output directory
+**Test with specific checkpoint and output directory:**
+```bash
 python scripts/test_prism.py \
     --config configs/sionna.yml \
     --checkpoint results/sionna/training/models/best_model.pt \
