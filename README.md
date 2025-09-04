@@ -77,7 +77,7 @@ The generator creates HDF5 files with:
 ### Training a Model
 
 ```bash
-# Train with default configuration
+# Most concise training command
 python scripts/train_prism.py --config configs/sionna.yml
 
 # Train with custom parameters
@@ -91,7 +91,10 @@ python scripts/train_prism.py \
 ### Testing a Trained Model
 
 ```bash
-# Test trained model
+# Most concise testing command
+python scripts/test_prism.py --config configs/sionna.yml
+
+# Test with specific checkpoint and output directory
 python scripts/test_prism.py \
     --config configs/sionna.yml \
     --checkpoint results/sionna/training/models/best_model.pt \
