@@ -51,9 +51,6 @@ Generate synthetic channel data using the Sionna-compatible data generator:
 # Most concise command - generate 300 positions
 python data/sionna/generator.py --n 300
 
-# Generate synthetic dataset with default parameters
-python data/sionna/generator.py
-
 # Generate custom dataset with specific parameters
 python data/sionna/generator.py \
     --num_positions 300 \
