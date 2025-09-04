@@ -127,7 +127,7 @@ class LossFunction(nn.Module):
         if masks is None:
             masks = {}
         
-        # CSI loss (hybrid: CMSE + Correlation) - use traced CSI for subcarrier-level loss
+        # CSI loss (hybrid: CMSE + Magnitude + Phase) - correlation component has been removed
         if ('traced_csi' in predictions and 'traced_csi' in targets and self.csi_enabled):
             # Convert traced CSI back to tensor format for CSI loss
             traced_pred = predictions['traced_csi']
@@ -144,7 +144,7 @@ class LossFunction(nn.Module):
             total_loss = total_loss + self.csi_weight * csi_loss_val
             loss_components['csi_loss'] = csi_loss_val.item()
         
-        # PDP loss (hybrid: MSE + Correlation + Delay) - use full CSI for frequency domain analysis
+        # PDP loss (hybrid: MSE + Delay) - use full CSI for frequency domain analysis, correlation component has been removed
         if ('csi' in predictions and 'csi' in targets and 
             self.pdp_enabled and self.pdp_weight > 0):
             pdp_loss_val = self.pdp_loss(

@@ -43,6 +43,37 @@ pip install -e .
 
 ## 🚀 Quick Start
 
+### Generating Synthesized Dataset
+
+Generate synthetic channel data using the Sionna-compatible data generator:
+
+```bash
+# Generate synthetic dataset with default parameters
+python data/sionna/generator.py
+
+# Generate custom dataset with specific parameters
+python data/sionna/generator.py \
+    --num_positions 1000 \
+    --num_subcarriers 408 \
+    --num_ue_antennas 1 \
+    --num_bs_antennas 64 \
+    --output_file data/sionna/synthetic_data.h5
+
+# Generate dataset with specific environment parameters
+python data/sionna/generator.py \
+    --carrier_frequency 3.5e9 \
+    --bandwidth 1.224e7 \
+    --scenario "urban_macro" \
+    --output_file data/sionna/urban_dataset.h5
+```
+
+The generator creates HDF5 files with:
+- **Channel responses** for each UE position and subcarrier
+- **UE positions** in 3D coordinates
+- **BS antenna array geometry** (8x8 configuration)
+- **Frequency domain information** (subcarrier frequencies)
+- **Spatial correlation** based on antenna geometry and propagation paths
+
 ### Training a Model
 
 ```bash
