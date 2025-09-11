@@ -19,7 +19,7 @@ in a campus environment.
 - 设计特点: 双极化实现空间复用
 
 UE天线 (User Equipment):
-- 配置: 商用手机双天线 (2×1线性排列) 双极化
+- 配置: 商用手机双天线 (1×2线性排列) 双极化
 - 天线类型: 主天线 + 分集天线，各自双极化
 - 天线间距: 0.7λ (手机内部空间限制)
 - 极化方式: 交叉极化 (提高分集性能)
@@ -66,7 +66,7 @@ DEFAULT_CONFIG = {
     'center_frequency': 3.5e9,  # 3.5 GHz
     'subcarrier_spacing': 30e3,  # 30 kHz
     'num_subcarriers': 408,
-    'num_ue_antennas': 4,  # 商用手机双天线双极化 = 4通道
+    'num_ue_antennas': 4,  # 商用手机1×2双极化 = 4通道
     'num_bs_antennas': 64,  # 4行8列双极化 = 64通道
     
     # Base Station Antenna Configuration
@@ -131,20 +131,29 @@ class RayTracingDataGenerator:
             polarization="cross"        # 交叉极化 (+45°/-45°) 实现双极化效果
         )
         
-        # Configure UE antenna array (商用手机)
-        # 商用手机2×1双极化配置：主天线+分集天线，各自双极化
-        ue_rows = 2  # 2个物理天线
-        ue_cols = 1  # 线性排列
+        # 记录实际创建的天线数量
+        logger.info(f"BS antenna array: {bs_rows}×{bs_cols} with cross polarization")
+        logger.info(f"Expected BS channels: {bs_rows * bs_cols * 2} = {expected_channels}")
         
-        # 商用手机天线配置
+        # Configure UE antenna array (商用手机)
+        # 商用手机1×2双极化配置：2个物理天线，每个双极化产生4通道
+        # 使用1行2列确保2个独立的物理天线位置，每个位置双极化
+        ue_rows = 1  # 1行
+        ue_cols = 2  # 2列，2个物理天线位置
+        
+        # 商用手机天线配置 - 1×2排列，双极化产生4通道
         self.scene.rx_array = PlanarArray(
-            num_rows=ue_rows,  # 2个物理天线
-            num_cols=ue_cols,  # 线性排列
-            vertical_spacing=0.7,    # 手机内天线间距约0.7λ
-            horizontal_spacing=0.0,  # 线性排列，无水平间距
+            num_rows=ue_rows,  # 1行
+            num_cols=ue_cols,  # 2列，确保2个独立的物理位置
+            vertical_spacing=0.5,    # 垂直间距（此配置下不起作用）
+            horizontal_spacing=0.7,  # 水平间距0.7λ，手机内天线间距
             pattern="iso",           # 全向天线方向图(手机天线特性)
-            polarization="cross"     # 交叉极化提高分集性能
+            polarization="cross"     # 交叉极化，每个物理位置产生2个极化通道
         )
+        
+        # 记录实际创建的UE天线数量
+        logger.info(f"UE antenna array: {ue_rows}×{ue_cols} with cross polarization")
+        logger.info(f"Expected UE channels: {ue_rows * ue_cols * 2} = {self.config['num_ue_antennas']}")
         
         # Set carrier frequency
         self.scene.frequency = self.config['center_frequency']
@@ -269,40 +278,111 @@ class RayTracingDataGenerator:
                 normalize=True
             )
             
-            # Extract channel matrix for all antennas and subcarriers
-            # ofdm_channel shape: [batch, tx, rx, symbols, paths, antennas, subcarriers]
-            # We need: [num_subcarriers, num_ue_antennas, num_bs_antennas]
+            # Extract channel matrix properly
+            # ofdm_channel shape: [batch, num_tx, num_rx, num_time_symbols, num_ofdm_symbols, subcarriers]
             ofdm_numpy = ofdm_channel.numpy()
             
-            # Process the channel response properly for MIMO
-            # Sum over paths dimension and extract antenna responses
-            h_full = ofdm_numpy[0, 0, 0, 0, :, :, :]  # [paths, antennas, subcarriers]
-            
-            # Sum multipath components for each antenna pair
-            h_mimo = np.sum(h_full, axis=0)  # [antennas, subcarriers]
-            
-            # Reshape to proper MIMO dimensions
-            # Sionna returns antennas in [tx_ant * rx_ant] format
-            for sc_idx in range(num_subcarriers):
-                # Extract subcarrier response
-                h_sc = h_mimo[:, sc_idx]  # [total_antennas]
+            # 调试：打印实际的维度
+            if pos_idx == 0:
+                logger.info(f"OFDM channel shape: {ofdm_numpy.shape}")
+                logger.info(f"Expected MIMO: TX={num_bs_antennas}, RX={num_ue_antennas}")
+                logger.info(f"Actual TX antennas: {ofdm_numpy.shape[1] if len(ofdm_numpy.shape) > 1 else 'N/A'}")
+                logger.info(f"Actual RX antennas: {ofdm_numpy.shape[2] if len(ofdm_numpy.shape) > 2 else 'N/A'}")
                 
-                # Reshape to MIMO matrix [bs_antennas=64, ue_antennas=4]
-                total_channels = num_bs_antennas * num_ue_antennas  # 64 * 4 = 256
-                if len(h_sc) >= total_channels:
-                    h_matrix = h_sc[:total_channels].reshape(num_bs_antennas, num_ue_antennas)
-                else:
-                    # Handle case where we have fewer paths/antennas than expected
-                    h_matrix = np.zeros((num_bs_antennas, num_ue_antennas), dtype=complex)
-                    available = min(len(h_sc), total_channels)
-                    h_flat = np.zeros(total_channels, dtype=complex)
-                    h_flat[:available] = h_sc[:available]
-                    h_matrix = h_flat.reshape(num_bs_antennas, num_ue_antennas)
+            # Sionna返回格式分析: (1, 1, 4, 1, 64, 1, 408)
+            # 很可能是: [batch, ?, num_rx, ?, num_tx, ?, subcarriers]
+            # 其中 num_rx=4 (UE天线), num_tx=64 (BS天线), subcarriers=408
+            if len(ofdm_numpy.shape) == 7:
+                # 7维格式: 分析每个维度的含义
+                # 形状 (1, 1, 4, 1, 64, 1, 408)
+                # 维度 0: batch=1
+                # 维度 1: ? =1 
+                # 维度 2: num_rx=4 (UE天线)
+                # 维度 3: ? =1
+                # 维度 4: num_tx=64 (BS天线)  
+                # 维度 5: ? =1
+                # 维度 6: subcarriers=408
                 
-                # Store in format [ue_antennas=4, bs_antennas=64]
+                # 提取: [num_tx, num_rx, subcarriers]
+                h_mimo = ofdm_numpy[0, 0, :, 0, :, 0, :]  # [num_rx, num_tx, subcarriers] -> 需要转置
+                h_mimo = np.transpose(h_mimo, (1, 0, 2))  # [num_tx, num_rx, subcarriers]
+                
+                if pos_idx == 0:
+                    logger.info(f"Using 7D format extraction with transpose")
+                    logger.info(f"Raw extracted shape before transpose: {ofdm_numpy[0, 0, :, 0, :, 0, :].shape}")
+                    logger.info(f"Final h_mimo shape after transpose: {h_mimo.shape}")
+                    
+            elif len(ofdm_numpy.shape) >= 6:
+                # 标准格式：取第一个batch, 第一个时间符号, 第一个OFDM符号
+                h_mimo = ofdm_numpy[0, :, :, 0, 0, :]  # [num_tx, num_rx, subcarriers]
+                if pos_idx == 0:
+                    logger.info(f"Using 6D format extraction")
+            else:
+                logger.error(f"Unexpected OFDM shape with {len(ofdm_numpy.shape)} dimensions")
+                # 改为填充零值而不是continue，确保不跳过处理
+                h_mimo = np.zeros((num_bs_antennas, num_ue_antennas, num_subcarriers), dtype=complex)
+                if pos_idx == 0:
+                    logger.warning(f"Using zero-filled fallback for unexpected shape")
+                
+            if pos_idx == 0:
+                logger.info(f"Extracted h_mimo shape: {h_mimo.shape}")
+                logger.info(f"Actual dimensions: TX={h_mimo.shape[0]}, RX={h_mimo.shape[1]}, Subcarriers={h_mimo.shape[2]}")
+                
+                # 检查是否需要调整配置以匹配实际天线数量
+                actual_tx = h_mimo.shape[0]
+                actual_rx = h_mimo.shape[1]
+                
+                if actual_tx != num_bs_antennas:
+                    logger.warning(f"BS antenna mismatch: expected {num_bs_antennas}, got {actual_tx}")
+                    logger.warning(f"Updating num_bs_antennas to {actual_tx}")
+                    num_bs_antennas = actual_tx
+                    self.config['num_bs_antennas'] = actual_tx
+                    
+                if actual_rx != num_ue_antennas:
+                    logger.warning(f"UE antenna mismatch: expected {num_ue_antennas}, got {actual_rx}")
+                    logger.warning(f"Updating num_ue_antennas to {actual_rx}")
+                    num_ue_antennas = actual_rx
+                    self.config['num_ue_antennas'] = actual_rx
+                    
+                    # 重新分配 channel_responses 数组
+                    logger.info(f"Reallocating channel_responses array with new dimensions")
+                    new_shape = (num_positions, num_subcarriers, num_ue_antennas, num_bs_antennas)
+                    channel_responses = np.zeros(new_shape, dtype=complex)
+                
+                logger.info(f"Updated MIMO configuration: {num_bs_antennas}×{num_ue_antennas}")
+                for rx_idx in range(min(4, h_mimo.shape[1])):
+                    power = np.mean(np.abs(h_mimo[:, rx_idx, 0])**2)
+                    logger.info(f"  RX antenna {rx_idx}: average power = {power:.2e}")
+                
+            # 转换为所需格式 [subcarriers, ue_antennas, bs_antennas]
+            for sc_idx in range(min(num_subcarriers, h_mimo.shape[2])):
+                # 提取该子载波的信道矩阵 [num_tx, num_rx]
+                h_matrix = h_mimo[:, :, sc_idx]  # [bs_antennas, ue_antennas]
+                
+                # 现在维度应该匹配，但为了安全起见还是检查一下
+                if h_matrix.shape[0] != num_bs_antennas or h_matrix.shape[1] != num_ue_antennas:
+                    if pos_idx == 0 and sc_idx == 0:
+                        logger.error(f"Critical dimension mismatch after adjustment:")
+                        logger.error(f"h_matrix shape: {h_matrix.shape}")
+                        logger.error(f"Expected: [{num_bs_antennas}, {num_ue_antennas}]")
+                        logger.error(f"This should not happen after the dynamic adjustment above")
+                    
+                    # 简单的截断或填充策略
+                    h_correct = np.zeros((num_bs_antennas, num_ue_antennas), dtype=complex)
+                    
+                    # 计算实际可复制的维度
+                    copy_tx = min(h_matrix.shape[0], num_bs_antennas)
+                    copy_rx = min(h_matrix.shape[1], num_ue_antennas)
+                    
+                    if copy_tx > 0 and copy_rx > 0:
+                        h_correct[:copy_tx, :copy_rx] = h_matrix[:copy_tx, :copy_rx]
+                    
+                    h_matrix = h_correct
+                
+                # Store in format [ue_antennas, bs_antennas]
                 channel_responses[pos_idx, sc_idx, :, :] = h_matrix.T
                 
-                # Calculate path loss
+                # Calculate path loss for this subcarrier
                 channel_power = np.abs(h_matrix)**2
                 path_loss_linear = np.mean(channel_power)
                 if path_loss_linear > 0:
@@ -310,7 +390,7 @@ class RayTracingDataGenerator:
                 else:
                     path_losses[pos_idx, sc_idx] = 150.0
                 
-                # Calculate delay
+                # Calculate delay for this subcarrier
                 tau_array = paths.tau.numpy()[0, 0, 0, :]
                 if len(tau_array) > 0:
                     delays[pos_idx, sc_idx] = np.mean(tau_array)
@@ -517,7 +597,7 @@ def main():
     print(f"=== Ray Tracing 5G OFDM Data Generation ({config['num_positions']} positions) ===")
     print(f"基站天线: {config['bs_antenna_pattern']} ({config['bs_antenna_rows']}行×{config['bs_antenna_cols']}列双极化)")
     print(f"基站通道: {config['num_bs_antennas']}个 (32物理天线×2极化)")
-    print(f"UE天线: 商用手机双极化 {config['num_ue_antennas']}通道 (2物理天线×2极化)")
+    print(f"UE天线: 商用手机1×2双极化 {config['num_ue_antennas']}通道 (2物理天线×2极化)")
     print(f"MIMO配置: {config['num_bs_antennas']}×{config['num_ue_antennas']}")
     print(f"Output path: {config['output_path']}")
     print()
