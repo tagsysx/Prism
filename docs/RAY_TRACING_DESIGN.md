@@ -161,11 +161,7 @@ The ray tracing system integrates with four neural networks:
 
 ### 3.4 Complex Number Preservation Throughout Ray Tracing
 
-**Critical Implementation Requirement**: The ray tracing system maintains complex number representation at every stage of computation to preserve both amplitude and phase information of electromagnetic waves.
-
-
-
-### 3.5 Virtual Link Computation
+The ray tracing system maintains complex number representation at every stage of computation to preserve both amplitude and phase information of electromagnetic waves.
 
 The ray tracer computes accumulated RF signal strength for the optimized set of virtual links:
 
@@ -193,10 +189,10 @@ S_f\big(P_{\mathrm{RX}}, \omega\big)
 &= \sum_{k=1}^{K} 
    e^{-\sum_{j=1}^{k-1} \rho_f(P_j)\,\Delta t}
    \big(1-e^{-\rho_f(P_k)\,\Delta t}\big)\,
-   S_f(P_k, \omega) \\[4pt]
+   S_f(P_k, \omega) \\
 &\approx \sum_{k=1}^{K} 
    \Big(1 - \sum_{j=1}^{k-1} \rho_f(P_j)\,\Delta t\Big)\,
-   \rho_f(P_k)\, S_f(P_k, \omega)\,\Delta t \\[4pt]
+   \rho_f(P_k)\, S_f(P_k, \omega)\,\Delta t \\
 &= \sum_{k=1}^{K} H_f(P_k)\,\rho_f(P_k)\, S_f(P_k, \omega)\,\Delta t,
 \end{aligned}
 $$
@@ -232,7 +228,7 @@ $$
 
 We now define a frequency-independent cumulative spatial vector $\widehat{U}^\rho(P_k)$ that aggregates attenuation contributions along the ray path:
 
-$$\footnotesize
+$$\small
 \widehat{U}^\rho(P_k)^* = \left[ \underbrace{\sum_{j=1}^{k-1} U^\rho_1(P_j)^* \Delta t}_{\widehat{U}^\rho_1 (P_k)^*}, \underbrace{\sum_{j=1}^{k-1} U^\rho_2(P_j)^* \Delta t}_{\widehat{U}^\rho_2 (P_k)^*}, \dots, \underbrace{\sum_{j=1}^{k-1} U^\rho_R(P_j)^* \Delta t}_{\widehat{U}^\rho_R (P_k)^*} \right]^\top.
 $$
 
@@ -254,7 +250,7 @@ Consequently, evaluating $H_f(P_k)$ for any frequency reduces to a simple inner 
 
 ### 4.3 Ray-Tracing Factorization
 
-Revisiting Eqn.~\ref{eqn:simple-ray-tracing}, we observe that all key terms—$H_f$, $\rho_f$, and $S_f$—are now expressed in factorizable form. By substituting Eqn.~\ref{eqn:h-factor}, Eqn.~\ref{eqn:low-rank-rho}, and Eqn.~\ref{eqn:low-rank-s} into Eqn.~\ref{eqn:simple-ray-tracing}, the ray-tracing equation simplifies into a compact expression where the frequency dependence is fully separated:
+The ray-tracing equation simplifies into a compact expression where the frequency dependence is fully separated:
 
 $$\footnotesize
 \boxed{S_f(P_{\mathrm{RX}}, \omega) \approx
