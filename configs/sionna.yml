@@ -1,6 +1,14 @@
 # Configuration for Prism: Neural Network-Based Electromagnetic Ray Tracing System
-# Cleaned and reorganized configuration with clear separation of concerns
+# Updated configuration for refactored PrismNetwork with integrated ray tracing
 #
+# 🔄 NETWORK ARCHITECTURE UPDATE:
+# PrismNetwork now performs internal ray tracing with the following flow:
+# 1. Generate A×B uniform ray directions from BS antenna (36×10 = 360 directions)
+# 2. Sample 64 voxels along each ray (max_ray_length = 250m)
+# 3. Process voxels through AttenuationNetwork → get attenuation + features
+# 4. Process (features, UE_pos, -ray_direction, antenna_embedding) through RadianceNetwork
+# 5. Generate frequency basis vectors through FrequencyNetwork
+# 
 # ⚠️  IMPORTANT: UE Antenna Configuration
 # The system processes only ONE UE antenna at a time for computational efficiency.
 # 
@@ -20,51 +28,51 @@ neural_networks:
   # Enable neural network-based processing
   enabled: true
   
-  # Attenuation Network
+  # PrismNetwork: Main integrated network for ray tracing
+  prism_network:
+    # Core network parameters
+    num_subcarriers: 408          # Total number of subcarriers (from OFDM config)
+    num_bs_antennas: 64           # Number of BS antennas
+    feature_dim: 128              # Spatial feature dimension
+    antenna_embedding_dim: 64     # Antenna embedding dimension
+    
+    # Ray tracing parameters
+    azimuth_divisions: 36         # Number of azimuth divisions (0° to 360°)
+    elevation_divisions: 10       # Number of elevation divisions (0° to 90°)
+    max_ray_length: 250.0         # Maximum ray length in meters
+    num_sampling_points: 64       # Number of sampling points per ray
+    
+    # Encoding and precision
+    use_ipe_encoding: true        # Enable Integrated Positional Encoding
+    use_mixed_precision: false    # Enable mixed precision training
+  
+  # AttenuationNetwork: Spatial position encoding and attenuation computation
   attenuation_network:
-    input_dim: 3                  # 3D spatial position
     hidden_dim: 256               # Hidden layer dimension
-    num_hidden_layers: 8          # Number of hidden layers
-    feature_dim: 128              # Output feature dimension
+    num_layers: 8                 # Number of hidden layers
+    output_dim: 32                # Output dimension for attenuation coefficients
     activation: 'relu'            # Activation function
-    use_shortcut: true            # Enable shortcut connections
+    use_shortcuts: true           # Enable shortcut connections
     
-  # Attenuation Decoder
-  attenuation_decoder:
-    input_dim: 128                # Feature dimension from AttenuationNetwork
-    hidden_dim: 256               # Hidden layer dimension
-    num_hidden_layers: 3          # Number of hidden layers
-    output_dim: 408               # Number of subcarriers
-    num_ue_antennas: 1            # Number of UE antennas (always 1 for single antenna processing)
-    activation: 'relu'            # Activation function
-    
-  # Antenna Codebook
-  antenna_codebook:
-    num_antennas: 64              # Number of BS antennas
-    embedding_dim: 64             # Antenna embedding dimension
-    learnable: true               # Learnable embeddings
-    
-  # Antenna Network (MLP-based direction sampling)
-  antenna_network:
-    input_dim: 64                 # Antenna embedding dimension
+  # FrequencyNetwork: Generate R-dimensional frequency basis vectors
+  frequency_network:
+    input_dim: 63                 # IPE-encoded frequency dimension (3 + 2*10*3 = 63)
     hidden_dim: 128               # Hidden layer dimension
-    num_hidden_layers: 2          # Number of hidden layers
-    output_dim: 360               # A × B directions (36 × 18 = 648) - must match angular_sampling.total_directions
+    output_dim: 32                # R-dimensional frequency basis output
+    num_layers: 3                 # Number of hidden layers
     activation: 'relu'            # Activation function
-    dropout_rate: 0.1             # Dropout rate for regularization
-    max_chunk_size: 256           # Maximum neural network chunk size for memory optimization
+    use_layer_norm: true          # Enable layer normalization
     
-  # Radiance Network
+  # RadianceNetwork: Radiation modeling for each voxel
   radiance_network:
     ue_pos_dim: 63                # UE position dimension (IPE encoded: 3 + 2*10*3 = 63)
     view_dir_dim: 63              # Viewing direction dimension (IPE encoded: 3 + 2*10*3 = 63)
-    spatial_feature_dim: 128      # Spatial feature dimension
+    spatial_feature_dim: 128      # Spatial feature dimension from AttenuationNetwork
     antenna_embedding_dim: 64     # Antenna embedding dimension
     hidden_dim: 256               # Hidden layer dimension
     num_hidden_layers: 4          # Number of hidden layers
-    output_dim: 408               # Number of subcarriers
-    num_ue_antennas: 1            # Number of UE antennas (always 1 for single antenna processing)
-
+    output_dim: 408               # Number of subcarriers (matches num_subcarriers)
+    num_ue_antennas: 1            # Always 1 for single UE processing
     activation: 'relu'            # Activation function
 
 # Base Station Configuration
@@ -102,9 +110,10 @@ user_equipment:
   height_range: [1.0, 2.0]           # UE height range in meters
 
 # Ray Tracing Configuration
+# Note: These parameters are also used by PrismNetwork for internal ray tracing
 ray_tracing:
   # Physical parameters
-  max_ray_length: 250.0              # Maximum ray length in meters
+  max_ray_length: 250.0              # Maximum ray length in meters (used by PrismNetwork)
   signal_threshold: 0.000001         # Signal strength threshold for early termination
   enable_early_termination: true     # Enable early termination optimization
   
@@ -115,14 +124,14 @@ ray_tracing:
   
   # Sampling configuration
   angular_sampling:
-    azimuth_divisions: 36            # Number of azimuth divisions (0° to 360°)
-    elevation_divisions: 10           # Number of elevation divisions (0° to 90°)
+    azimuth_divisions: 36            # Number of azimuth divisions (0° to 360°) - matches PrismNetwork
+    elevation_divisions: 10          # Number of elevation divisions (0° to 90°) - matches PrismNetwork
     total_directions: 360            # 36 × 10 = 360 angle combinations
-    top_k_directions: 36              # Number of top-K directions to select (increased for better spatial resolution)
+    top_k_directions: 36             # Number of top-K directions (not used by PrismNetwork - uses fixed sampling)
   
   radial_sampling:
-    num_sampling_points: 64           # Number of sampling points per ray (memory optimized)
-    resampled_points: 64              # Second stage: importance-based resampled points (memory optimized)
+    num_sampling_points: 64          # Number of sampling points per ray - matches PrismNetwork
+    resampled_points: 64             # Second stage: importance-based resampled points (not used by PrismNetwork)
   
   subcarrier_sampling:
     sampling_ratio: 0.5              # Ratio of subcarriers to select (80%) - improved frequency domain learning

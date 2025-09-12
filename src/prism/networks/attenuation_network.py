@@ -1,8 +1,12 @@
 """
-AttenuationNetwork: Encodes spatial position information into compact feature representations.
+AttenuationNetwork: Computes attenuation coefficients and feature vectors for RF signal modeling.
 
-This network takes IPE-encoded 3D positions and outputs 128-dimensional feature vectors
-that capture spatial information for RF signal modeling.
+Given a 3D voxel location P, the network outputs:
+1. An attenuation coefficient ρ(P) = ln(ΔA) + j*Δφ (R-dimensional complex vector)
+2. A feature vector F(P) for additional spatial information
+
+The attenuation factor ρ(P) = ln(ΔA*e^(j*Δφ)) captures amplitude loss (ΔA in dB/m) 
+and phase rotation (Δφ in rad/m) caused by the voxel's material properties.
 """
 
 import torch
@@ -13,31 +17,34 @@ from typing import Optional, Tuple
 
 class AttenuationNetwork(nn.Module):
     """
-    AttenuationNetwork: Encodes spatial position information into compact feature representations.
+    AttenuationNetwork: Computes attenuation coefficients and feature vectors for RF signal modeling.
+    
+    Given a 3D voxel location P with positional encoding PE(P), outputs:
+    1. Attenuation coefficient ρ(P) = ln(ΔA) + j*Δφ (R-dimensional complex vector)
+    2. Feature vector F(P) for additional spatial information
     
     Architecture: Similar to Standard NeRF density network with 8 layers and shortcuts.
-    Input: IPE-encoded 3D → Hidden: 256D → Output: 128D
-    Outputs complex-valued features for RF signal modeling.
+    Input: PE-encoded 3D → Hidden: 256D → Output: ρ(P) + F(P)
     """
     
     def __init__(
         self,
-        input_dim: int = 63,  # IPE-encoded 3D position (21 frequencies * 3 dimensions)
+        input_dim: int = 63,  # PE-encoded 3D position (21 frequencies * 3 dimensions)
         hidden_dim: int = 256,
-        output_dim: int = 128,
+        feature_dim: int = 128,  # Dimension of feature vector F(P)
+        output_dim: int = 32,  # R-dimensional attenuation coefficient ρ(P)
         num_layers: int = 8,
         use_shortcuts: bool = True,
-        activation: str = "relu",
-        complex_output: bool = True
+        activation: str = "relu"
     ):
         super().__init__()
         
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
+        self.feature_dim = feature_dim
         self.output_dim = output_dim
         self.num_layers = num_layers
         self.use_shortcuts = use_shortcuts
-        self.complex_output = complex_output
         
         # Activation function
         if activation == "relu":
@@ -69,27 +76,29 @@ class AttenuationNetwork(nn.Module):
                 shortcut = nn.Linear(self.hidden_dim, self.hidden_dim)
                 self.hidden_layers.append(shortcut)
         
-        # Output layer
-        if self.complex_output:
-            # For complex output, we output 2 * output_dim (real and imaginary parts)
-            self.output_layer = nn.Linear(self.hidden_dim, 2 * self.output_dim)
-        else:
-            self.output_layer = nn.Linear(self.hidden_dim, self.output_dim)
+        # Output layers - separate heads for attenuation coefficient and feature vector
+        # Attenuation coefficient ρ(P): R-dimensional complex vector (2*R for real/imag parts)
+        self.attenuation_head = nn.Linear(self.hidden_dim, 2 * self.output_dim)
+        
+        # Feature vector F(P): feature_dim dimensional real vector
+        self.feature_head = nn.Linear(self.hidden_dim, self.feature_dim)
             
         # Layer normalization for stability
         self.layer_norms = nn.ModuleList([
             nn.LayerNorm(self.hidden_dim) for _ in range(self.num_layers - 1)
         ])
         
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass through the AttenuationNetwork.
         
         Args:
-            x: Input tensor of shape (batch_size, input_dim) containing IPE-encoded positions
+            x: Input tensor of shape (batch_size, input_dim) containing PE-encoded positions
             
         Returns:
-            Output tensor of shape (batch_size, output_dim) or (batch_size, output_dim, 2) for complex
+            Tuple of:
+            - attenuation_coeff: Complex attenuation coefficient ρ(P) of shape (batch_size, attenuation_dim)
+            - feature_vector: Feature vector F(P) of shape (batch_size, feature_dim)
         """
         batch_size = x.shape[0]
         
@@ -113,26 +122,37 @@ class AttenuationNetwork(nn.Module):
                 h = self.layer_norms[i + 1](h)
             h = self.activation(h)
         
-        # Output layer
-        output = self.output_layer(h)
+        # Output heads
+        # Attenuation coefficient ρ(P) = ln(ΔA) + j*Δφ
+        attenuation_raw = self.attenuation_head(h)  # (batch_size, 2*output_dim)
+        attenuation_raw = attenuation_raw.view(batch_size, self.output_dim, 2)
         
-        if self.complex_output:
-            # Reshape to (batch_size, output_dim, 2) for complex representation
-            output = output.view(batch_size, self.output_dim, 2)
-            # Convert to complex tensor with explicit dtype to avoid ComplexHalf warning
-            real_part = output[..., 0].to(torch.float32)
-            imag_part = output[..., 1].to(torch.float32)
-            output = torch.complex(real_part, imag_part)
+        # Convert to complex tensor: ρ(P) = ln(ΔA) + j*Δφ
+        ln_delta_a = attenuation_raw[..., 0].to(torch.float32)  # ln(ΔA) - amplitude loss
+        delta_phi = attenuation_raw[..., 1].to(torch.float32)   # Δφ - phase rotation
+        attenuation_coeff = torch.complex(ln_delta_a, delta_phi)
         
-        return output
+        # Feature vector F(P)
+        feature_vector = self.feature_head(h)  # (batch_size, feature_dim)
+        
+        return attenuation_coeff, feature_vector
     
     def get_feature_dim(self) -> int:
-        """Get the output feature dimension."""
+        """Get the feature vector dimension."""
+        return self.feature_dim
+    
+    def get_attenuation_dim(self) -> int:
+        """Get the attenuation coefficient dimension."""
         return self.output_dim
     
-    def is_complex(self) -> bool:
-        """Check if the network outputs complex values."""
-        return self.complex_output
+    def get_output_info(self) -> dict:
+        """Get information about network outputs."""
+        return {
+            'feature_dim': self.feature_dim,
+            'attenuation_dim': self.output_dim,
+            'attenuation_is_complex': True,
+            'feature_is_complex': False
+        }
 
 
 class AttenuationNetworkConfig:
@@ -142,33 +162,34 @@ class AttenuationNetworkConfig:
         self,
         input_dim: int = 63,
         hidden_dim: int = 256,
-        output_dim: int = 128,
+        feature_dim: int = 128,
+        output_dim: int = 32,
         num_layers: int = 8,
         use_shortcuts: bool = True,
-        activation: str = "relu",
-        complex_output: bool = True
+        activation: str = "relu"
     ):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
+        self.feature_dim = feature_dim
         self.output_dim = output_dim
         self.num_layers = num_layers
         self.use_shortcuts = use_shortcuts
         self.activation = activation
-        self.complex_output = complex_output
     
     def to_dict(self) -> dict:
         """Convert configuration to dictionary."""
         return {
             'input_dim': self.input_dim,
             'hidden_dim': self.hidden_dim,
+            'feature_dim': self.feature_dim,
             'output_dim': self.output_dim,
             'num_layers': self.num_layers,
             'use_shortcuts': self.use_shortcuts,
-            'activation': self.activation,
-            'complex_output': self.complex_output
+            'activation': self.activation
         }
     
     @classmethod
     def from_dict(cls, config_dict: dict) -> 'AttenuationNetworkConfig':
         """Create configuration from dictionary."""
         return cls(**config_dict)
+

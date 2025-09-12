@@ -78,16 +78,6 @@ BS Antenna (Center) → Ray Direction 1 → Sampling Points → Signal Propagati
 
 **Unified Implementation**: All ray tracers use a consistent view direction calculation implemented in the base class:
 
-```python
-def _compute_view_directions(self, sampled_positions: torch.Tensor, bs_position: torch.Tensor) -> torch.Tensor:
-    """
-    Compute view directions from sampled positions to BS antenna.
-    Direction: sampled_position -> BS_antenna
-    """
-    view_directions = bs_position - sampled_positions  # (num_samples, 3)
-    view_directions = view_directions / (torch.norm(view_directions, dim=1, keepdim=True) + 1e-8)
-    return view_directions
-```
 
 **Physical Interpretation**:
 - **Direction Definition**: From each sampling point toward the BS antenna (radiation center)
@@ -104,344 +94,21 @@ For each antenna of the base station, the system traces RF energy along all $A \
 3. **Attenuation modeling**: Apply material-dependent attenuation coefficients at each voxel intersection
 4. **Energy accumulation**: Compute cumulative energy received at user equipment (UE) locations
 
-### 2.3 Advanced Ray Tracing Techniques
+### 2.3 Uniform Sampling Strategy
 
-The system implements two key optimization strategies (as detailed in the Specification):
+The system uses uniform sampling along rays for computational efficiency and simplicity:
 
-#### 2.3.1 Importance-Based Sampling
+#### 2.3.1 Uniform Ray Sampling
 
-**Two-Stage Sampling Process**:
+**Sampling Process**:
+The system implements uniform sampling along each ray direction:
 
-The system implements a sophisticated two-stage sampling strategy to optimize computational efficiency while maintaining accuracy:
 
-#### Importance Weight Formula
-
-The importance weights are calculated using the physically-based formula from SPECIFICATION.md 8.1.2:
-
-```math
-w_k = (1 - e^{-\beta_k \Delta t}) \, \exp\Bigl(-\sum_{j<k}\beta_j\,\Delta t\Bigr)
-```
-
-Where:
-- $\beta_k = \Re(\rho(P_v(t_k)))$: Real part of the attenuation coefficient at position $k$
-- $\Delta t$: Step size along the ray
-- $(1 - e^{-\beta_k \Delta t})$: Local absorption probability at position $k$
-- $\exp(-\sum_{j<k}\beta_j\,\Delta t)$: Cumulative transmission probability up to position $k$
-
-This formula ensures that:
-1. **Physical accuracy**: Weights reflect the actual electromagnetic absorption and transmission
-2. **Cumulative attenuation**: Earlier high-attenuation regions reduce the importance of later regions
-3. **Energy conservation**: The total probability is properly normalized
-
-**Stage 1: Uniform Sampling for Weight Computation**
-```python
-def uniform_sampling_stage(ray, ue_pos, num_uniform_samples=128):
-    """
-    Stage 1: Uniform sampling along ray to compute importance weights
-    Ray tracing is from BS antenna (ray.origin) in the given direction.
-    UE position is only used as input to RadianceNetwork.
-    
-    Args:
-        ray: Ray object with origin (BS antenna) and direction
-        ue_pos: User equipment position (for RadianceNetwork input only)
-        num_uniform_samples: Number of uniform samples (typically 128)
-    
-    Returns:
-        uniform_positions: Uniformly sampled positions along ray
-        importance_weights: Computed importance weights for each position
-    """
-    # Ray tracing from BS antenna up to max_ray_length
-    # UE position is not used for ray length calculation
-    ray_length = max_ray_length
-    
-    # Uniform sampling along ray from BS antenna
-    t_values = torch.linspace(0, ray_length, num_uniform_samples, device=device)
-    uniform_positions = ray.origin.unsqueeze(0) + t_values.unsqueeze(1) * ray.direction.unsqueeze(0)
-    
-    # Get neural network outputs for uniform samples
-    with torch.no_grad():
-        network_outputs = prism_network(
-            sampled_positions=uniform_positions.unsqueeze(0),
-            ue_positions=ue_pos.unsqueeze(0),
-            view_directions=self._compute_view_directions(uniform_positions, ray.origin),
-            antenna_indices=antenna_indices
-        )
-    
-    # Extract attenuation factors for importance weight computation
-    attenuation_factors = network_outputs['attenuation_factors'][0, :, 0, subcarrier_idx]
-    
-    # Compute importance weights using the correct formula from SPECIFICATION.md 8.1.2
-    delta_t = ray_length / num_uniform_samples
-    importance_weights = compute_importance_weights(attenuation_factors, delta_t)
-    importance_weights = importance_weights / (importance_weights.sum() + 1e-8)  # Normalize
-    
-    return uniform_positions, importance_weights
-```
-
-**Stage 2: Importance-Based Resampling**
-```python
-def importance_based_resampling(uniform_positions, importance_weights, num_final_samples=64):
-    """
-    Stage 2: Resample points based on computed importance weights
-    
-    Args:
-        uniform_positions: Uniformly sampled positions from Stage 1
-        importance_weights: Normalized importance weights
-        num_final_samples: Final number of samples for integration (typically 64)
-    
-    Returns:
-        resampled_positions: Importance-based resampled positions
-    """
-    # Sample indices based on importance weights
-    try:
-        sampled_indices = torch.multinomial(
-            importance_weights, 
-            num_samples=min(num_final_samples, len(importance_weights)), 
-            replacement=True
-        )
-    except RuntimeError:
-        # Fallback to uniform sampling if multinomial fails
-        sampled_indices = torch.randint(0, len(uniform_positions), (num_final_samples,))
-    
-    # Extract resampled positions
-    resampled_positions = uniform_positions[sampled_indices]
-    
-    return resampled_positions
-
-def compute_importance_weights(attenuation_factors, delta_t):
-    """
-    Compute importance weights using the formula from SPECIFICATION.md 8.1.2:
-    w_k = (1 - e^(-β_k * Δt)) * exp(-Σ_{j<k} β_j * Δt)
-    
-    Args:
-        attenuation_factors: Complex attenuation factors from neural network
-        delta_t: Step size along the ray
-    
-    Returns:
-        importance_weights: Normalized importance weights
-    """
-    # Extract real part β_k = Re(ρ(P_v(t_k))) for importance weight calculation
-    beta_k = torch.real(attenuation_factors)  # (num_samples,)
-    beta_k = torch.clamp(beta_k, min=0.0)  # Ensure non-negative for physical validity
-    
-    # Term 1: (1 - e^(-β_k * Δt)) - local absorption probability
-    local_absorption = 1.0 - torch.exp(-beta_k * delta_t)
-    
-    # Term 2: exp(-Σ_{j<k} β_j * Δt) - cumulative transmission up to point k
-    cumulative_beta = torch.cumsum(beta_k, dim=0)
-    cumulative_beta_prev = torch.cat([torch.zeros(1, device=beta_k.device), cumulative_beta[:-1]])
-    cumulative_transmission = torch.exp(-cumulative_beta_prev * delta_t)
-    
-    # Combine terms: w_k = local_absorption * cumulative_transmission
-    importance_weights = local_absorption * cumulative_transmission + 1e-8
-    
-    # Normalize to probability distribution
-    return importance_weights / torch.sum(importance_weights)
-```
-
-**Complete Two-Stage Integration**
-```python
-def two_stage_ray_tracing(ray, ue_pos, subcarrier_idx, antenna_embedding):
-    """
-    Complete two-stage importance sampling for ray tracing
-    
-    Returns:
-        complex_signal: Complex signal computed using importance sampling
-    """
-    # Stage 1: Uniform sampling and weight computation
-    uniform_positions, importance_weights = uniform_sampling_stage(
-        ray, ue_pos, num_uniform_samples=128
-    )
-    
-    # Stage 2: Importance-based resampling
-    resampled_positions = importance_based_resampling(
-        uniform_positions, importance_weights, num_final_samples=64
-    )
-    
-    # Get neural network outputs for resampled points
-    with torch.no_grad():
-        final_network_outputs = prism_network(
-            sampled_positions=resampled_positions.unsqueeze(0),
-            ue_positions=ue_pos.unsqueeze(0),
-            view_directions=self._compute_view_directions(resampled_positions, ray.origin),
-            antenna_indices=antenna_embedding
-        )
-    
-    # Extract final attenuation and radiation factors
-    final_attenuation = final_network_outputs['attenuation_factors'][0, :, 0, subcarrier_idx]
-    final_radiation = final_network_outputs['radiation_factors'][0, 0, subcarrier_idx]
-    
-    # Integrate signal using discrete radiance field model
-    # Note: No importance correction needed since we already resampled
-    complex_signal = integrate_discrete_radiance_field(
-        resampled_positions, final_attenuation, final_radiation
-    )
-    
-    return complex_signal
-```
-
-**Signal Integration with Resampled Points**
-```python
-def integrate_discrete_radiance_field(sampled_positions, attenuation_factors, radiation_factors):
-    """
-    Integrate signal using discrete radiance field model on resampled points
-    
-    Args:
-        sampled_positions: Resampled positions along ray (num_samples, 3)
-        attenuation_factors: Complex attenuation factors (num_samples,)
-        radiation_factors: Complex radiation factors (scalar or num_samples,)
-    
-    Returns:
-        complex_signal: Integrated complex signal
-    """
-    num_samples = len(sampled_positions)
-    
-    # Calculate dynamic step sizes between consecutive points
-    if num_samples > 1:
-        delta_t = torch.norm(sampled_positions[1:] - sampled_positions[:-1], dim=1)
-        first_delta_t = torch.norm(sampled_positions[1] - sampled_positions[0], dim=0).unsqueeze(0)
-        delta_t = torch.cat([first_delta_t, delta_t], dim=0)
-    else:
-        delta_t = torch.tensor([1.0], device=sampled_positions.device)
-    
-    # Discrete radiance field integration (complex throughout)
-    # S(P_RX, ω) ≈ Σ[k=1 to K] exp(-Σ[j=1 to k-1] ρ(P_v^j) Δt_j) × (1 - e^(-ρ(P_v^k) Δt_k)) × S(P_v^k, -ω)
-    
-    # Vectorized cumulative attenuation
-    attenuation_deltas = attenuation_factors * delta_t  # Complex multiplication
-    padded_deltas = torch.cat([torch.zeros(1, dtype=attenuation_deltas.dtype, device=sampled_positions.device), 
-                               attenuation_deltas[:-1]], dim=0)
-    cumulative_attenuation = torch.cumsum(padded_deltas, dim=0)
-    
-    # Vectorized computation (all complex operations)
-    attenuation_exp = torch.exp(-cumulative_attenuation)  # Complex exponential
-    local_absorption = 1.0 - torch.exp(-attenuation_deltas)  # Complex absorption
-    
-    # Broadcast radiation if scalar
-    if radiation_factors.dim() == 0:
-        radiation_vector = radiation_factors.expand(num_samples)
-    else:
-        radiation_vector = radiation_factors
-    
-    # Final integration (no importance weights - already accounted for in resampling)
-    signal_contributions = attenuation_exp * local_absorption * radiation_vector
-    complex_signal = torch.sum(signal_contributions)
-    
-    return complex_signal
-```
-
-**Key Implementation Principles**:
-- **Two-stage sampling process**: 
-  1. **Uniform sampling**: Sample points uniformly along the ray to compute importance weights
-  2. **Importance-based resampling**: Resample points based on computed importance weights
-- **Adaptive sampling density**: Concentrates computational resources in high-attenuation regions
-- **Non-uniform discretization**: Optimizes sampling based on material properties
-- **Efficiency improvement**: Reduces ineffective computation in low-attenuation areas
-- **No importance correction in integration**: Since resampling is already done, no additional importance weights are needed in signal integration
-
-#### 2.3.2 Pyramid Ray Tracing
-- **Spatial subdivision**: Divides directional space into pyramidal regions
-- **Hierarchical sampling**: Implements multi-level sampling strategy
-- **Monte Carlo integration**: Improves accuracy within truncated cone regions
-
-#### 2.3.3 MLP-Based Direction Sampling
-The system implements an intelligent direction sampling strategy using a shallow Multi-Layer Perceptron (MLP) to optimize ray tracing efficiency:
-
-**MLP Architecture**:
-- **Input layer**: Accepts the base station's antenna embedding parameter $C$ (typically a high-dimensional vector)
-- **Hidden layers**: 2-3 fully connected layers with ReLU activation functions
-- **Output layer**: Produces an $A \times B$ indicator matrix $M_{ij}$ where each element $M_{ij} \in \{0, 1\}$
-- **Activation**: Sigmoid activation at the output layer, followed by thresholding to produce binary indicators
-
-**Direction Selection Process**:
-```math
-M_{ij} = \text{Threshold}(\text{MLP}(C)_{ij}) = \begin{cases} 
-1 & \text{if } \text{MLP}(C)_{ij} > \tau \\
-0 & \text{otherwise}
-\end{cases}
-```
-
-Where:
-- $M_{ij}$: Binary indicator for direction $(\phi_i, \theta_j)$
-- $\text{MLP}(C)_{ij}$: MLP output for direction $(\phi_i, \theta_j)$ given antenna embedding $C$
-- $\tau$: Threshold parameter (typically $\tau = 0.5$)
-
-**Training Strategy**:
-- **Supervised learning**: Train on historical ray tracing data with known optimal direction sets
-- **Loss function**: Binary cross-entropy loss comparing predicted indicators with ground truth optimal directions
-- **Regularization**: L2 regularization to prevent overfitting
-- **Data augmentation**: Generate training samples from different antenna configurations and environmental conditions
-
-**Implementation Benefits**:
-- **Adaptive sampling**: Automatically adjusts direction sampling based on antenna characteristics
-- **Computational efficiency**: Reduces ray count from $A \times B$ to $\sum_{i,j} M_{ij}$ directions
-- **Antenna-specific optimization**: Learns optimal sampling patterns for different antenna types and configurations
-- **Real-time adaptation**: Can be updated online as antenna parameters change
-
-**Integration with Ray Tracing**:
-The MLP-based direction sampling integrates seamlessly with the existing ray tracing pipeline:
-
-```python
-def mlp_direction_sampling(antenna_embedding, mlp_model):
-    """
-    Use trained MLP to determine which directions to trace
-    
-    Args:
-        antenna_embedding: Base station's antenna embedding parameter C
-        mlp_model: Trained MLP model for direction sampling
-    
-    Returns:
-        A x B binary indicator matrix M_ij
-    """
-    # Forward pass through MLP
-    raw_output = mlp_model(antenna_embedding)
-    
-    # Apply sigmoid and threshold to get binary indicators
-    threshold = 0.5
-    indicator_matrix = (raw_output > threshold).astype(int)
-    
-    return indicator_matrix
-
-def adaptive_ray_tracing(base_station_pos, antenna_embedding, ue_positions, 
-                        selected_subcarriers, mlp_model):
-    """
-    Perform ray tracing only on MLP-selected directions
-    
-    Args:
-        base_station_pos: Base station position
-        antenna_embedding: Base station's antenna embedding parameter C
-        ue_positions: List of UE positions
-        selected_subcarriers: Dictionary mapping UE to selected subcarriers
-        mlp_model: Trained MLP model for direction sampling
-    
-    Returns:
-        Accumulated signal strength for selected directions only
-    """
-    # Get direction indicators from MLP
-    direction_indicators = mlp_direction_sampling(antenna_embedding, mlp_model)
-    
-    accumulated_signals = {}
-    
-    # Only trace rays for directions indicated by MLP
-    for phi in range(num_azimuth_divisions):
-        for theta in range(num_elevation_divisions):
-            if direction_indicators[phi, theta] == 1:
-                direction = (phi, theta)
-                
-                # Trace ray for this selected direction
-                ray_results = trace_ray(
-                    base_station_pos, direction, ue_positions, 
-                    selected_subcarriers, antenna_embedding
-                )
-                
-                # Accumulate signals
-                for (ue_pos, subcarrier), signal_strength in ray_results.items():
-                    if (ue_pos, subcarrier) not in accumulated_signals:
-                        accumulated_signals[(ue_pos, subcarrier)] = 0
-                    accumulated_signals[(ue_pos, subcarrier)] += signal_strength
-    
-    return accumulated_signals
-```
+**Benefits of Uniform Sampling**:
+- **Simplicity**: Straightforward implementation without complex weight calculations
+- **Predictable performance**: Consistent computational cost across different scenarios
+- **Numerical stability**: Avoids potential issues with importance weight computation
+- **Memory efficiency**: No need to store and compute importance weights
 
 ## 3. RF Signal Computation
 
@@ -498,39 +165,6 @@ The ray tracing system integrates with four neural networks:
 
 #### 3.4.1 Complex Signal Flow
 
-```python
-def _compute_signal_at_spatial_point(spatial_position, ue_pos, subcarrier_idx, antenna_embedding):
-    # Neural networks output complex values
-    attenuation_factor = attenuation_network(spatial_position)  # Complex
-    radiation_factor = radiance_network(ue_pos, view_dir, antenna_embedding)  # Complex
-    
-    # Preserve complex computation throughout
-    complex_signal = attenuation_factor * radiation_factor  # Complex multiplication
-    
-    return complex_signal  # Return complex tensor
-
-def accumulate_signals(bs_pos, ue_positions, selected_subcarriers, antenna_embedding):
-    accumulated_signals = {}
-    
-    for (ue_pos, subcarrier), complex_signal in ray_results.items():
-        if (ue_pos, subcarrier) not in accumulated_signals:
-            # Initialize with complex zero
-            accumulated_signals[(ue_pos, subcarrier)] = torch.tensor(0.0 + 0.0j, dtype=torch.complex64)
-        
-        # Complex accumulation preserves phase relationships
-        accumulated_signals[(ue_pos, subcarrier)] += complex_signal
-    
-    return accumulated_signals  # Returns complex signals
-
-def compute_loss(predictions, targets, loss_function):
-    # predictions and targets are complex CSI values
-    # Convert to real only during loss computation
-    pred_magnitude = torch.abs(predictions)  # Complex → Real
-    target_magnitude = torch.abs(targets)    # Complex → Real
-    
-    loss = loss_function(pred_magnitude, target_magnitude)
-    return loss
-```
 
 #### 3.4.2 Physical Significance
 
@@ -1059,7 +693,112 @@ DiscreteRayTracer(
 - **Dynamic UE positioning**: Support for mobile user equipment
 - **Frequency domain flexibility**: Adaptable to different wireless standards
 
-## 7. Integration with Discrete Radiance Field Model
+## 7. Low-Rank Factorization in Ray Tracing
+
+### 7.1 Factorized Ray Tracing Theory
+
+Now, we investigate whether the ray tracing procedure itself can be factorized in a manner consistent with the low-rank representations of attenuation and radiance. Assuming both the attenuation coefficient $\rho_f(P)$ and radiance $S_f(P, \omega)$ admit separable low-rank forms, we examine how this structure propagates through the rendering equation.
+
+To this end, we extend the discrete ray-tracing formula by explicitly introducing frequency dependence through $\rho_f$ and $S_f$:
+
+$$\small\label{eqn:simple-ray-tracing}
+\begin{aligned}
+S_f\big(P_{\mathrm{RX}}, \omega\big) 
+&= \sum_{k=1}^{K} 
+   e^{-\sum_{j=1}^{k-1} \rho_f(P_j)\,\Delta t}
+   \big(1-e^{-\rho_f(P_k)\,\Delta t}\big)\,
+   S_f(P_k, \omega) \\[4pt]
+&\approx \sum_{k=1}^{K} 
+   \Big(1 - \sum_{j=1}^{k-1} \rho_f(P_j)\,\Delta t\Big)\,
+   \rho_f(P_k)\, S_f(P_k, \omega)\,\Delta t \\[4pt]
+&= \sum_{k=1}^{K} H_f(P_k)\,\rho_f(P_k)\, S_f(P_k, \omega)\,\Delta t,
+\end{aligned}
+$$
+
+where the first-order Taylor approximations $(1-e^{-x}) \approx x$ and $e^{-x}\approx 1-x$ are applied to linearize the exponential attenuation terms, yielding a form that is more amenable to factorization analysis. The channel coefficient from the sample $k$ to the receiver is defined as:
+
+$$\small
+H_f(P_k) \;=\; 
+\exp\!\Big(-\sum_{j=1}^{k-1} \rho_f(P_j)\,\Delta t\Big)
+\;\approx\; 1 - \sum_{j=1}^{k-1} \rho_f(P_j)\,\Delta t.
+$$
+
+where $k=2,4,\dots, K$.
+
+### 7.2 Channel Factorization
+
+Let us first study the factorizability of the channel coefficient $H_f(P_k)$ under the first-order Taylor approximation:
+
+$$\small
+\begin{aligned}
+	H_f(P_k) &=  1 - \sum_{j=1}^{k-1} \rho_f(P_j) \Delta t.
+\end{aligned}
+$$
+
+Substituting the low-rank attenuation representation from Eqn.~\ref{eqn:low-rank-rho} into the summation yields:
+
+$$\small
+\begin{aligned}
+\sum_{j=1}^{k-1} \rho_f(P_j)\,\Delta t &= \sum_{j=1}^{k-1} \left( \sum_{r=1}^R U^\rho_r(P_j)^* V_r(f) \right) \Delta t \\
+&= \sum_{r=1}^R V_r(f) \left( \sum_{j=1}^{k-1} U^\rho_r(P_j)^* \Delta t \right).
+\end{aligned}
+$$
+
+We now define a frequency-independent cumulative spatial vector $\widehat{U}^\rho(P_k)$ that aggregates attenuation contributions along the ray path:
+
+$$\footnotesize
+\widehat{U}^\rho(P_k)^* = \left[ \underbrace{\sum_{j=1}^{k-1} U^\rho_1(P_j)^* \Delta t}_{\widehat{U}^\rho_1 (P_k)^*}, \underbrace{\sum_{j=1}^{k-1} U^\rho_2(P_j)^* \Delta t}_{\widehat{U}^\rho_2 (P_k)^*}, \dots, \underbrace{\sum_{j=1}^{k-1} U^\rho_R(P_j)^* \Delta t}_{\widehat{U}^\rho_R (P_k)^*} \right]^\top.
+$$
+
+This vector captures the integrated spatial attenuation of all $R$ latent components from voxel $P_k$ to the RX. Crucially, $\widehat{U}^\rho(P_k)$ depends solely on scene geometry and material properties and is independent of frequency $f$, enabling its precomputation during ray marching for efficient reuse across all frequencies.
+
+Consequently, the sum can now be expressed compactly using the Hermitian form:
+
+$$\small
+\sum_{j=1}^{k-1} \rho_f(P_j)\,\Delta t = \langle \widehat{U}^\rho(P_k), V(f)\rangle = \sum_{r=1}^R \widehat{U}^\rho_r(P_k)^* V_r(f),
+$$
+
+where the Hermitian transpose ensures proper complex conjugation for the inner product operation. Finally, the channel coefficient is factorized to:
+
+$$\label{eqn:h-factor}
+H_f (P_k)  \approx 1 - \langle \widehat{U}^\rho(P_k), V(f)\rangle .
+$$
+
+Consequently, evaluating $H_f(P_k)$ for any frequency reduces to a simple inner product between frequency-independent spatial feature accumulations and frequency-dependent spectral basis.
+
+### 7.3 Ray-Tracing Factorization
+
+Revisiting Eqn.~\ref{eqn:simple-ray-tracing}, we observe that all key terms—$H_f$, $\rho_f$, and $S_f$—are now expressed in factorizable form. By substituting Eqn.~\ref{eqn:h-factor}, Eqn.~\ref{eqn:low-rank-rho}, and Eqn.~\ref{eqn:low-rank-s} into Eqn.~\ref{eqn:simple-ray-tracing}, the ray-tracing equation simplifies into a compact expression where the frequency dependence is fully separated:
+
+$$\footnotesize
+\boxed{S_f(P_{\mathrm{RX}}, \omega) \approx
+\left\langle \boldsymbol{\mathcal{U}}^{(1)}(\omega),\ \boldsymbol{\mathcal{V}}^{(1)}(f) \right\rangle
+\left\langle \boldsymbol{\mathcal{U}}^{(2)}(\omega),\ \boldsymbol{\mathcal{V}}^{(2)}(f) \right\rangle}
+$$
+
+where
+
+$$\small
+\begin{cases}
+\boldsymbol{\mathcal{U}}^{(1)}(\omega) = \sum\limits_{k=1}^{K} \big(U^S(P_k, -\omega) \otimes U^\rho(P_k)\big) \Delta t  \\
+\boldsymbol{\mathcal{U}}^{(2)}(\omega) = -\sum\limits_{k=1}^{K} \big(U^S(P_k, -\omega) \otimes U^\rho(P_k) \otimes \widehat{U}^\rho(P_k)\big) \Delta t 
+\end{cases}
+$$
+
+and
+
+$$\small
+\begin{cases}
+\boldsymbol{\mathcal{V}}^{(1)}(f) &= V(f) \otimes V(f)  \\
+\boldsymbol{\mathcal{V}}^{(2)}(f) &= V(f) \otimes V(f) \otimes V(f) 
+\end{cases}
+$$
+
+Here, $\boldsymbol{\mathcal{U}^{(1)}}$ and $\boldsymbol{\mathcal{U}}^{(2)}$ are the consolidated frequency-agnostic spatial tensors that aggregate all path-dependent scene interactions, while $\boldsymbol{\mathcal{V}}^{(1)}$ and $\boldsymbol{\mathcal{V}}^{(2)}$ are the spectral tensors that combine frequency components of different orders. For clarity, the detailed derivation of this result is shown in Appendix~\ref{appendix:ray-tracing}.
+
+Conceptually, this factorization shows that ray tracing reduces to weighted combinations of spatial feature components (i.e., $U^\rho(P_k)$, $U^S(P_k, -\omega)$, and $\widehat{U}^\rho(P_k)$) paired with spectral basis functions $V(f)$. Since $\boldsymbol{\mathcal{U}}$ are frequency independent, they can be precomputed once. Evaluating the received signal at a new frequency $f$ then requires only combining the precomputed $\boldsymbol{\mathcal{V}}$ with the corresponding $V(f)$, achieving the elegant goal of **"one trace, all tones!"**
+
+## 8. Integration with Discrete Radiance Field Model
 
 The ray tracing system integrates seamlessly with the discrete radiance field model:
 
@@ -1067,18 +806,19 @@ The ray tracing system integrates seamlessly with the discrete radiance field mo
 2. **Attenuation modeling**: Complex attenuation coefficients applied at each intersection
 3. **Signal propagation**: Exponential decay model for cumulative attenuation
 4. **Radiation calculation**: Direction-dependent voxel radiation properties
+5. **Low-rank factorization**: Frequency-independent spatial features enable efficient multi-frequency computation
 
-## 8. Neural Network Batch Processing Optimization
+## 9. Neural Network Batch Processing Optimization
 
-### 8.1 Overview
+### 9.1 Overview
 
 The PRISM ray tracing system implements sophisticated neural network batch processing optimizations to maximize GPU utilization and minimize memory usage during large-scale ray tracing operations. These optimizations are critical for handling the massive computational workload generated by the combination of multiple antennas, directions, UEs, and subcarriers.
 
 **Computational Scale**: For a typical configuration with 64 antennas, 32 directions, 4 UEs, and 408 subcarriers, the system must process over **3.3 million neural network combinations** per training iteration.
 
-### 8.2 Adaptive Batch Size Optimization
+### 9.2 Adaptive Batch Size Optimization
 
-#### 8.2.1 Dynamic Memory-Based Batch Sizing
+#### 9.2.1 Dynamic Memory-Based Batch Sizing
 
 The system implements intelligent batch size calculation that adapts to available GPU memory:
 
@@ -1101,7 +841,7 @@ def _get_optimal_neural_batch_size(self, total_combinations: int) -> int:
 - **Safety Margin**: Uses 80% of available GPU memory to prevent out-of-memory errors
 - **Fallback Mechanism**: Graceful degradation to smaller batch sizes when memory is limited
 
-#### 8.2.2 Performance Impact
+#### 9.2.2 Performance Impact
 
 **Memory Efficiency**:
 - **Before**: Fixed batch sizes could lead to memory overflow or underutilization
@@ -1113,9 +853,9 @@ def _get_optimal_neural_batch_size(self, total_combinations: int) -> int:
 - **Large Problems** (> 2K combinations): Automatic chunking with optimal batch sizes
 - **Performance Gain**: 20-50% improvement in GPU utilization efficiency
 
-### 8.3 Intelligent Chunked Processing
+### 9.3 Intelligent Chunked Processing
 
-#### 8.3.1 Hierarchical Batch Processing Strategy
+#### 9.3.1 Hierarchical Batch Processing Strategy
 
 The system implements a multi-level batch processing approach:
 
@@ -1137,7 +877,7 @@ def _process_neural_network_in_chunks(self, batch_data, subcarrier_indices, chun
 2. **Level 2**: Neural network combination chunking (adaptive)
 3. **Level 3**: Internal neural network batching (optimized)
 
-#### 8.3.2 Chunking Algorithm
+#### 9.3.2 Chunking Algorithm
 
 **Chunk Size Determination**:
 ```math
@@ -1150,7 +890,7 @@ def _process_neural_network_in_chunks(self, batch_data, subcarrier_indices, chun
 3. **Result Aggregation**: Efficiently concatenate chunk outputs
 4. **Memory Management**: Clear intermediate results to prevent accumulation
 
-#### 8.3.3 Memory Management Benefits
+#### 9.3.3 Memory Management Benefits
 
 **Memory Usage Pattern**:
 - **Traditional**: Peak memory = total_combinations × memory_per_combination
@@ -1162,9 +902,9 @@ def _process_neural_network_in_chunks(self, batch_data, subcarrier_indices, chun
 - **After**: Can process arbitrarily large problems
 - **Example**: Process 1M+ combinations on 8GB GPU (previously impossible)
 
-### 8.4 Batch Processing Strategies
+### 9.4 Batch Processing Strategies
 
-#### 8.4.1 Strategy Selection Matrix
+#### 9.4.1 Strategy Selection Matrix
 
 | Problem Size | Strategy | Batch Size | Memory Efficiency | Compute Efficiency |
 |--------------|----------|------------|-------------------|-------------------|
@@ -1172,7 +912,7 @@ def _process_neural_network_in_chunks(self, batch_data, subcarrier_indices, chun
 | 1K - 10K combinations | Adaptive Batching | 256-1024 | Optimal | Optimal |
 | > 10K combinations | Hierarchical Chunking | 512-2048 | High | Medium |
 
-#### 8.4.2 Mega Batching (Small Scale)
+#### 9.4.2 Mega Batching (Small Scale)
 
 **Use Case**: Small to medium problems (< 2K combinations)
 **Strategy**: Process all combinations in a single neural network call
@@ -1188,7 +928,7 @@ if total_combinations <= optimal_batch_size:
     batch_outputs = self.prism_network(batch_data)
 ```
 
-#### 8.4.3 Hierarchical Chunking (Large Scale)
+#### 9.4.3 Hierarchical Chunking (Large Scale)
 
 **Use Case**: Large problems (> 2K combinations)
 **Strategy**: Divide combinations into memory-safe chunks
@@ -1206,9 +946,9 @@ else:
     )
 ```
 
-### 8.5 Performance Optimization Results
+### 9.5 Performance Optimization Results
 
-#### 8.5.1 Memory Optimization
+#### 9.5.1 Memory Optimization
 
 **GPU Memory Utilization**:
 - **Before Optimization**: 30-60% average utilization
@@ -1220,7 +960,7 @@ else:
 - **After**: Zero OOM errors with automatic chunking
 - **Reliability**: 100% success rate for memory management
 
-#### 8.5.2 Computational Performance
+#### 9.5.2 Computational Performance
 
 **Processing Speed**:
 - **Small Problems**: 10-15% improvement through optimal batching
@@ -1232,7 +972,7 @@ else:
 - **Memory Scaling**: Linear memory usage regardless of problem size
 - **Time Scaling**: Near-linear time scaling with problem size
 
-#### 8.5.3 System Stability
+#### 9.5.3 System Stability
 
 **Error Reduction**:
 - **Memory Errors**: Reduced from frequent to zero
@@ -1244,9 +984,9 @@ else:
 - **Progress Tracking**: Detailed logging for large-scale operations
 - **Performance Analytics**: Automatic optimization recommendations
 
-### 8.6 Configuration and Usage
+### 9.6 Configuration and Usage
 
-#### 8.6.1 Configuration Parameters
+#### 9.6.1 Configuration Parameters
 
 ```yaml
 system:
@@ -1298,7 +1038,7 @@ system:
       model_path: "models/batch_opt"  # 🧠 Path to optimization models
 ```
 
-#### 8.6.2 Usage Examples
+#### 9.6.2 Usage Examples
 
 **Automatic Optimization** (Recommended):
 ```python
@@ -1319,9 +1059,9 @@ ray_tracer = CUDARayTracer(
 )
 ```
 
-### 8.7 Implementation Status and Future Enhancements
+### 9.7 Implementation Status and Future Enhancements
 
-#### 8.7.1 Currently Implemented Optimizations ✅
+#### 9.7.1 Currently Implemented Optimizations ✅
 
 **Adaptive Batch Size Optimization** ✅ **IMPLEMENTED**
 - ✅ Real-time GPU memory monitoring
@@ -1346,7 +1086,7 @@ ray_tracer = CUDARayTracer(
 - **Status**: Fully operational in production
 - **Performance**: Optimal strategy for each workload
 
-#### 8.7.2 Planned Optimizations 🔄
+#### 9.7.2 Planned Optimizations 🔄
 
 **Enhanced Memory Management** 🔄 **IN DEVELOPMENT**
 - 🔄 Gradient checkpointing integration
@@ -1362,7 +1102,7 @@ ray_tracer = CUDARayTracer(
 - **Timeline**: Q2 2024
 - **Expected Impact**: 15-25% performance improvement
 
-#### 8.7.3 Future Research Directions 🚀
+#### 9.7.3 Future Research Directions 🚀
 
 **Multi-GPU Batch Distribution** 🚀 **PLANNED**
 - 🚀 Distribute large batches across multiple GPUs
@@ -1391,7 +1131,7 @@ ray_tracer = CUDARayTracer(
 - **Expected Impact**: 10-30% computation reduction
 - **Requirements**: Memory analysis and optimization
 
-#### 8.7.4 Machine Learning-Based Optimization 🧠
+#### 9.7.4 Machine Learning-Based Optimization 🧠
 
 **Adaptive Batch Size Learning** 🧠 **RESEARCH**
 - 🧠 Learn optimal batch sizes from historical performance data
@@ -1419,7 +1159,7 @@ ray_tracer = CUDARayTracer(
 - **Expected Impact**: Revolutionary batch processing
 - **Requirements**: Advanced ML research
 
-#### 8.7.5 Hardware-Specific Optimizations 🔧
+#### 9.7.5 Hardware-Specific Optimizations 🔧
 
 **GPU Architecture Optimization** 🔧 **PLANNED**
 - 🔧 NVIDIA A100/H100 specific optimizations
@@ -1437,7 +1177,7 @@ ray_tracer = CUDARayTracer(
 - **Timeline**: 2024-2025
 - **Expected Impact**: 10-20% memory efficiency improvement
 
-#### 8.7.6 Integration Enhancements 🔗
+#### 9.7.6 Integration Enhancements 🔗
 
 **Configuration System Enhancement** 🔗 **PLANNED**
 - 🔗 Auto-detection of optimal parameters
@@ -1455,7 +1195,7 @@ ray_tracer = CUDARayTracer(
 - **Timeline**: Q3 2024
 - **Expected Impact**: Improved system observability
 
-### 8.8 Optimization Roadmap Summary
+### 9.8 Optimization Roadmap Summary
 
 #### Implementation Priority Matrix
 
@@ -1483,7 +1223,7 @@ ray_tracer = CUDARayTracer(
 - **Medium-term** (2025): 2-8x multi-GPU scaling
 - **Long-term** (2026+): Fully automated optimization system
 
-### 8.9 Quick Reference: Implementation Status
+### 9.9 Quick Reference: Implementation Status
 
 #### Legend
 - ✅ **IMPLEMENTED**: Fully operational in production
@@ -1556,15 +1296,15 @@ system:
       cache_size_mb: 2048
 ```
 
-## 9. Future Enhancements
+## 10. Future Enhancements
 
-### 9.1 Advanced Optimization Techniques
+### 10.1 Advanced Optimization Techniques
 
-- **Machine learning-based directional sampling**: The system now implements MLP-based direction sampling (Section 2.3.3) that automatically learns optimal direction selection based on antenna embedding $C$.
-- **Dynamic threshold optimization**: Adaptive threshold adjustment for MLP outputs based on performance metrics and computational constraints.
-- **Multi-antenna coordination**: Extend MLP to handle multiple antenna scenarios and learn coordinated direction sampling strategies.
+- **Adaptive sampling strategies**: Future implementations may explore adaptive sampling techniques based on scene characteristics
+- **Dynamic ray length optimization**: Adaptive ray length adjustment based on scene geometry and signal propagation requirements
+- **Multi-antenna coordination**: Coordinated ray tracing strategies for multiple antenna scenarios
 
-### 9.2 Parallel Processing Roadmap
+### 10.2 Parallel Processing Roadmap
 
 **Current Status (Implemented)**:
 - ✅ **Direction-level parallelization**: 32x acceleration for typical workloads

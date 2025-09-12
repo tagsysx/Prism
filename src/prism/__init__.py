@@ -9,16 +9,9 @@ __version__ = "2.0.0"
 __author__ = "Prism Project Team"
 __email__ = "contact@prism-project.org"
 
-from .ray_tracer_cpu import (
-    CPURayTracer,
-)
-
-from .ray_tracer_base import (
+from .ray_tracer import (
     Ray,
-)
-
-from .ray_tracer_cuda import (
-    CUDARayTracer
+    RayTracer
 )
 
 from .spatial_spectrum import (
@@ -43,13 +36,13 @@ from .loss import (
 
 from .networks import (
     AttenuationNetwork,
-    AttenuationDecoder,
+    FrequencyNetwork,
     AntennaEmbeddingCodebook,
     AntennaNetwork,
     RadianceNetwork,
     PrismNetwork,
     AttenuationNetworkConfig,
-    AttenuationDecoderConfig,
+    FrequencyNetworkConfig,
     AntennaEmbeddingCodebookConfig,
     AntennaNetworkConfig,
     RadianceNetworkConfig,
@@ -64,11 +57,8 @@ from .training_interface import (
 
 __all__ = [
     # Core ray tracing
-    'CPURayTracer',
     'Ray',
-    
-    # CUDA-accelerated ray tracing
-    'CUDARayTracer',
+    'RayTracer',
     
     # Spatial spectrum estimation
     'csi_to_spatial_spectrum',
@@ -90,13 +80,13 @@ __all__ = [
     
     # Neural networks
     'AttenuationNetwork',
-    'AttenuationDecoder',
+    'FrequencyNetwork',
     'AntennaEmbeddingCodebook',
     'AntennaNetwork',
     'RadianceNetwork',
     'PrismNetwork',
     'AttenuationNetworkConfig',
-    'AttenuationDecoderConfig',
+    'FrequencyNetworkConfig',
     'AntennaEmbeddingCodebookConfig',
     'AntennaNetworkConfig',
     'RadianceNetworkConfig',

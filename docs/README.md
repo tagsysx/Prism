@@ -14,6 +14,7 @@ Welcome to the documentation for **Prism: Wideband RF Neural Radiance Fields for
 - [Ray Tracing Design](RAY_TRACING_DESIGN.md) - Advanced ray tracing system design
 - [Loss Functions](LOSS_FUNCTIONS.md) - Complete loss function system documentation
 - [Spatial Spectrum](SPATIAL_SPECTRUM.md) - CSI-based spatial spectrum generation methods and algorithms
+- [Dataset Format](DATASET.md) - HDF5 data format specification and usage guide
 
 ### **API & Reference**
 - [API Reference](API_REFERENCE.md) - Complete API documentation with examples
@@ -34,6 +35,7 @@ Welcome to the documentation for **Prism: Wideband RF Neural Radiance Fields for
 - **Technical details?** Read the [Specification](SPECIFICATION.md)
 - **Ray tracing implementation?** Explore [Ray Tracing Design](RAY_TRACING_DESIGN.md)
 - **CSI spatial spectrum analysis?** See [Spatial Spectrum](SPATIAL_SPECTRUM.md)
+- **Dataset format and usage?** Check [Dataset Format](DATASET.md)
 - **API documentation?** Check the [API Reference](API_REFERENCE.md)
 - **Having issues?** Consult the [Troubleshooting Guide](TROUBLESHOOTING.md)
 

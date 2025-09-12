@@ -8,7 +8,7 @@ The Prism system consists of four main neural network components:
 1. **AttenuationNetwork**: Encodes spatial position information into compact feature representations
 2. **AttenuationDecoder**: Converts spatial features into attenuation factors for all UE antenna channels
 3. **RadianceNetwork**: Processes UE position, viewing direction, and spatial features for radiation modeling
-4. **AntNetwork**: Generates directional importance indicators for efficient ray tracing sampling
+4. **AntennaNetwork**: Generates directional importance indicators for efficient ray tracing sampling
 
 ## 1. Discrete Radiance Field Model Architecture
 
@@ -59,7 +59,7 @@ where $\text{PE}(\cdot)$ is the standard positional encoding and $C$ is the ante
 - Input: Voxel features, direction encoding, transmitter position encoding, and antenna embedding
 - Output: Direction-dependent voxel radiation intensity $S(P_v^i,\omega)$
 
-#### (4) AntNetwork ($f_\alpha$)
+#### (4) AntennaNetwork ($f_\alpha$)
 ```math
 f_\alpha\!\left(C\right) \to M_{ij}
 ```
