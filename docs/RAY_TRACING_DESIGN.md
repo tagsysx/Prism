@@ -191,21 +191,28 @@ Where:
 - $C$: Base station's antenna embedding parameter
 - $S_{\text{ray}}(\phi_i, \theta_j, P_{\text{UE}}, f_k, C)$: RF signal strength received from direction $(\phi_i, \theta_j)$ at frequency $f_k$ with antenna embedding $C$
 
-## 4. Performance Considerations
+## 4. Low-Rank Factorization in Ray Tracing
 
-### 4.1 Vectorized Ray Tracing and GPU Acceleration
+### 4.1 Factorized Ray Tracing Theory
 
-**Vectorization Architecture**: The ray tracing system has been completely redesigned around vectorized tensor operations, achieving massive performance improvements through GPU parallelization.
+Now, we investigate whether the ray tracing procedure itself can be factorized in a manner consistent with the low-rank representations of attenuation and radiance. Assuming both the attenuation coefficient $\rho_f(P)$ and radiance $S_f(P, \omega)$ admit separable low-rank forms, we examine how this structure propagates through the rendering equation.
 
-**Key Performance Features**:
-- **Tensor-Based Computing**: All operations use optimized PyTorch/CUDA kernels
-- **Batch Processing**: Multiple rays, voxels, and subcarriers processed simultaneously
-- **Memory Coalescing**: Optimal GPU memory access patterns for maximum bandwidth
-- **Minimal Branching**: GPU-friendly code with reduced thread divergence
+To this end, we extend the discrete ray-tracing formula by explicitly introducing frequency dependence through $\rho_f$ and $S_f$:
+- Others computed directions from BS to sampling points  
+- Training interface had a separate implementation with different semantics
 
-**Acceleration Strategies**:
-- **Primary: GPU Vectorization**: 300+x speedup through tensor operations
-- **Secondary: Multi-GPU**: Scale across multiple GPUs for massive workloads  
+**Solution**: Unified implementation in `RayTracer` base class with consistent physical interpretation:
+
+**Benefits**:
+- **Consistency**: All ray tracers use identical view direction calculation
+- **Maintainability**: Single implementation reduces code duplication
+- **Physical Correctness**: Direction represents radiation toward receiving antenna
+- **Simplified Debugging**: Uniform behavior across all implementations
+
+**Migration**: All existing implementations have been updated to use this unified method:
+- `CUDARayTracer`: Updated both uniform and resampled view direction calculations
+- `CPURayTracer`: Updated both uniform and resampled view direction calculations
+- `TrainingInterface`: Removed duplicate implementation  
 - **Tertiary: Distributed Computing**: Multi-node scaling for production deployments
 
 **Ray Independence**: While individual rays remain mathematically independent, the vectorized implementation processes them in optimized batches to maximize hardware utilization.
