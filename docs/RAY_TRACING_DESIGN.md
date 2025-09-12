@@ -94,11 +94,11 @@ For each antenna of the base station, the system traces RF energy along all $A \
 3. **Attenuation modeling**: Apply material-dependent attenuation coefficients at each voxel intersection
 4. **Energy accumulation**: Compute cumulative energy received at user equipment (UE) locations
 
-### 2.3 Uniform Sampling Strategy
+### 2.5 Uniform Sampling Strategy
 
 The system uses uniform sampling along rays for computational efficiency and simplicity:
 
-#### 2.3.1 Uniform Ray Sampling
+#### 2.5.1 Uniform Ray Sampling
 
 **Sampling Process**:
 The system implements uniform sampling along each ray direction:
@@ -162,18 +162,6 @@ The ray tracing system integrates with four neural networks:
 ### 3.4 Complex Number Preservation Throughout Ray Tracing
 
 **Critical Implementation Requirement**: The ray tracing system maintains complex number representation at every stage of computation to preserve both amplitude and phase information of electromagnetic waves.
-
-#### 3.4.1 Complex Signal Flow
-
-
-#### 3.4.2 Physical Significance
-
-**Why Complex Numbers Are Essential**:
-- **Amplitude Information**: `|z|` represents signal strength/power
-- **Phase Information**: `arg(z)` represents wave phase/timing
-- **Coherent Superposition**: Complex addition correctly models wave interference
-- **Frequency Domain**: Natural representation for OFDM subcarriers
-- **Channel State Information**: CSI inherently complex-valued in wireless systems
 
 
 
@@ -296,13 +284,5 @@ Here, $\boldsymbol{\mathcal{U}^{(1)}}$ and $\boldsymbol{\mathcal{U}}^{(2)}$ are 
 
 Conceptually, this factorization shows that ray tracing reduces to weighted combinations of spatial feature components (i.e., $U^\rho(P_k)$, $U^S(P_k, -\omega)$, and $\widehat{U}^\rho(P_k)$) paired with spectral basis functions $V(f)$. Since $\boldsymbol{\mathcal{U}}$ are frequency independent, they can be precomputed once. Evaluating the received signal at a new frequency $f$ then requires only combining the precomputed $\boldsymbol{\mathcal{V}}$ with the corresponding $V(f)$, achieving the elegant goal of **"one trace, all tones!"**
 
-## 5. Integration with Discrete Radiance Field Model
 
-The ray tracing system integrates seamlessly with the discrete radiance field model:
-
-1. **Voxel interaction**: Rays intersect with voxels to determine material properties
-2. **Attenuation modeling**: Complex attenuation coefficients applied at each intersection
-3. **Signal propagation**: Exponential decay model for cumulative attenuation
-4. **Radiation calculation**: Direction-dependent voxel radiation properties
-5. **Low-rank factorization**: Frequency-independent spatial features enable efficient multi-frequency computation
 
