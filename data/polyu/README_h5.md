@@ -12,7 +12,7 @@
 
 ### 变量格式
 - `channel_responses`：包含信道响应数据，预期形状为 `(num_data_size, num_ue_antennas, num_bs_antennas, num_subcarriers)`，（例如300个数据,接收阵列天线数为8，基站天线数为1，子载波数为64，则shape应为300×8×1×64）。
-- `ue_position`：包含 UE 位置数据，预期形状为 `(num_positions, 3)`，num_positions表示数据数量，应和channel_responses的num_data_size相等且顺序对应，后一维度包含x、y、z坐标。
+- `ue_position`：包含UE位置数据，预期形状为 `(num_positions, 4)`，num_positions表示数据数量，应和channel_responses的num_data_size相等且顺序对应，后一维度包含UE的x、y、z坐标以及基站ap的id号。
 - `bs_position`：包含基站的x，y，z坐标，预期形状为`(3,)`
 
 ## 文件结构
@@ -47,7 +47,7 @@ HDF5 文件包含两个主要组：
 - **组：`/data`**
   - 数据集：
     - `bs_position`：基站位置，1D NumPy 数组，形状 `(3,)`，包含 x、y、z 坐标（例如 [250.0, 250.0, 25.0]）。
-    - `ue_position`：UE位置，2D NumPy 数组，形状 `(num_positions, 3)`，包含每个 UE 的 x、y、z 坐标。
+    - `ue_position`：UE位置，2D NumPy 数组，形状 `(num_positions, 4)`，包含每个UE的 x、y、z 坐标以及基站ap的id号。
     - `channel_responses`：信道响应数据，4D NumPy 数组，形状 `(num_positions, num_ue_antennas, num_bs_antennas, num_subcarriers)`（例如 300×8×1×64），数据类型为 complex128。
 
 ## 访问数据
@@ -81,7 +81,7 @@ with h5py.File('simulation_data.h5', 'r') as f:
 ```
 配置参数：{'num_positions': 300, 'output_path': '../sionna/simulation', ...}
 基站位置：[250. 250.  25.]
-UE 位置形状：(300, 3)
+UE 位置形状：(300, 4)
 信道响应形状：(300, 8, 1, 64)
 样本信道响应（第一个位置、第一个 UE 天线、第一个 BS 天线、第一个子载波）：(1.23+4.56j)
 ```
