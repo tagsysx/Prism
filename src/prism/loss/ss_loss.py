@@ -1,249 +1,419 @@
 """
 Spatial Spectrum Loss Functions
 
-Computes MSE loss between spatial spectrum matrices derived from CSI data.
-Extracts configuration from base_station.antenna_array and training.loss.spatial_spectrum_loss sections.
+Simplified implementation: CSI -> Spatial Spectrum -> SSIM Loss
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 import numpy as np
 import logging
-import matplotlib.pyplot as plt
-import os
-from pathlib import Path
 
-# Get logger for this module
 logger = logging.getLogger(__name__)
 
 
 class SSLoss(nn.Module):
     """
-    Spatial Spectrum Loss Functions
+    Spatial Spectrum Loss using SSIM
     
-    Computes MSE loss between spatial spectrum matrices derived from CSI data.
-    Extracts configuration from base_station.antenna_array and training.loss.spatial_spectrum_loss sections.
+    Core workflow:
+    1. CSI -> Spatial Spectrum (using Bartlett beamforming)
+    2. SSIM loss between predicted and target spectrums
     """
     
     def __init__(self, config: Dict):
-        """
-        Initialize spatial spectrum loss function from configuration
-        
-        Args:
-            config: Full configuration dictionary containing base_station and training sections
-        """
+        """Initialize spatial spectrum loss from configuration"""
         super(SSLoss, self).__init__()
         
-        # Extract base station configuration
-        if 'base_station' not in config:
-            raise ValueError("Configuration must contain 'base_station' section")
+        # Extract configurations
         bs_config = config['base_station']
-        
-        # Extract spatial spectrum loss configuration
-        if 'training' not in config or 'loss' not in config['training'] or 'spatial_spectrum_loss' not in config['training']['loss']:
-            raise ValueError("Configuration must contain 'training.loss.spatial_spectrum_loss' section")
         ssl_config = config['training']['loss']['spatial_spectrum_loss']
         
-        # Algorithm and fusion method - no defaults, must be specified
-        if 'algorithm' not in ssl_config:
-            raise ValueError("Configuration must contain 'training.loss.spatial_spectrum_loss.algorithm'")
-        if 'fusion_method' not in ssl_config:
-            raise ValueError("Configuration must contain 'training.loss.spatial_spectrum_loss.fusion_method'")
-        
-        self.algorithm = ssl_config['algorithm']
-        self.fusion_method = ssl_config['fusion_method']
-        
-        # Loss function type - MSE or SSIM
-        self.loss_type = ssl_config.get('loss_type', 'mse')  # Default to MSE for backward compatibility
-        
-        # SSIM parameters
-        if self.loss_type == 'ssim':
-            self.ssim_window_size = ssl_config.get('ssim_window_size', 11)
-            self.ssim_k1 = ssl_config.get('ssim_k1', 0.01)
-            self.ssim_k2 = ssl_config.get('ssim_k2', 0.03)
-            logger.info(f"🎯 Using SSIM loss for spatial spectrum with window_size={self.ssim_window_size}")
-        else:
-            logger.info(f"📊 Using MSE loss for spatial spectrum")
-        
         # Antenna array configuration
-        if 'antenna_array' not in bs_config:
-            raise ValueError("Base station configuration must contain 'antenna_array' section")
-        antenna_config = bs_config['antenna_array']
-        
-        # Parse antenna array configuration (e.g., '8x8' -> M=8, N=8)
-        if 'configuration' not in antenna_config:
-            raise ValueError("Antenna array configuration must contain 'configuration' key")
-        array_config = antenna_config['configuration']
+        array_config = bs_config['antenna_array']['configuration']  # e.g., "8x8"
         self.M, self.N = map(int, array_config.split('x'))
         self.num_antennas = self.M * self.N
         
-        # OFDM system parameters
-        if 'ofdm' not in bs_config:
-            raise ValueError("Base station configuration must contain 'ofdm' section")
+        # OFDM parameters
         ofdm_config = bs_config['ofdm']
-        
-        # Handle string values from YAML (scientific notation) - no defaults
-        if 'center_frequency' not in ofdm_config:
-            raise ValueError("Configuration must contain 'base_station.ofdm.center_frequency'")
-        if 'bandwidth' not in ofdm_config:
-            raise ValueError("Configuration must contain 'base_station.ofdm.bandwidth'")
-        if 'num_subcarriers' not in ofdm_config:
-            raise ValueError("Configuration must contain 'base_station.ofdm.num_subcarriers'")
-        
-        center_freq = ofdm_config['center_frequency']
-        bandwidth = ofdm_config['bandwidth']
-        
-        self.center_frequency = float(center_freq) if isinstance(center_freq, str) else center_freq
-        self.bandwidth = float(bandwidth) if isinstance(bandwidth, str) else bandwidth
+        self.center_frequency = float(ofdm_config['center_frequency'])
+        self.bandwidth = float(ofdm_config['bandwidth'])
         self.num_subcarriers = ofdm_config['num_subcarriers']
         
-        # Calculate wavelength and antenna spacing - no defaults
+        # Physical parameters
         self.wavelength = 3e8 / self.center_frequency
+        self.dx = self.dy = 0.5 * self.wavelength  # Half-wavelength spacing
         
-        if 'element_spacing' not in antenna_config:
-            raise ValueError("Configuration must contain 'base_station.antenna_array.element_spacing'")
-        
-        element_spacing_type = antenna_config['element_spacing']
-        
-        if element_spacing_type == 'half_wavelength':
-            self.dx = self.dy = 0.5 * self.wavelength
-        elif element_spacing_type == 'custom':
-            if 'custom_spacing' not in antenna_config:
-                raise ValueError("Configuration must contain 'base_station.antenna_array.custom_spacing' when element_spacing is 'custom'")
-            self.dx = self.dy = antenna_config['custom_spacing']
-        else:
-            raise ValueError(f"Unsupported element spacing type: {element_spacing_type}")
-        
-        # Parse angle ranges from [min, step, max] format - no defaults
-        if 'theta_range' not in ssl_config:
-            raise ValueError("Configuration must contain 'training.loss.spatial_spectrum_loss.theta_range'")
-        if 'phi_range' not in ssl_config:
-            raise ValueError("Configuration must contain 'training.loss.spatial_spectrum_loss.phi_range'")
-        
-        theta_range = ssl_config['theta_range']
+        # Angle ranges
+        theta_range = ssl_config['theta_range']  # [min, step, max]
         phi_range = ssl_config['phi_range']
         
-        # Convert degrees to radians and generate grids
-        theta_min, theta_step, theta_max = theta_range
-        phi_min, phi_step, phi_max = phi_range
+        # SSIM parameters
+        self.ssim_window_size = ssl_config.get('ssim_window_size', 11)
+        self.ssim_k1 = ssl_config.get('ssim_k1', 0.01)
+        self.ssim_k2 = ssl_config.get('ssim_k2', 0.03)
         
-        # Convert to radians
-        theta_min_rad = np.deg2rad(theta_min)
-        theta_max_rad = np.deg2rad(theta_max)
-        theta_step_rad = np.deg2rad(theta_step)
+        # Spectrum computation method
+        self.use_covariance_bartlett = ssl_config.get('use_covariance_bartlett', True)
         
-        phi_min_rad = np.deg2rad(phi_min)
-        phi_max_rad = np.deg2rad(phi_max)
-        phi_step_rad = np.deg2rad(phi_step)
+        # Frequency-dependent steering
+        self.use_frequency_dependent_steering = ssl_config.get('use_frequency_dependent_steering', True)
         
-        # Generate angle grids
-        self.theta_grid = torch.arange(theta_min_rad, theta_max_rad + theta_step_rad/2, theta_step_rad)
-        self.phi_grid = torch.arange(phi_min_rad, phi_max_rad + phi_step_rad/2, phi_step_rad)
+        # Subcarrier sampling for performance optimization
+        self.num_sampled_subcarriers = ssl_config.get('num_sampled_subcarriers', 20)
         
-        # Precompute angle combinations for vectorized processing
-        theta_points = len(self.theta_grid)
-        phi_points = len(self.phi_grid)
-        theta_mesh, phi_mesh = torch.meshgrid(self.theta_grid, self.phi_grid, indexing='ij')
-        self.theta_flat = theta_mesh.flatten()  # (num_angles,)
-        self.phi_flat = phi_mesh.flatten()      # (num_angles,)
-        self.num_angles = len(self.theta_flat)
+        # 预计算固定的子载波采样索引，确保GT和预测保持一致
+        if self.num_sampled_subcarriers < self.num_subcarriers:
+            # 均匀采样子载波索引
+            sampled_indices = torch.linspace(0, self.num_subcarriers - 1, self.num_sampled_subcarriers, dtype=torch.long)
+            self.register_buffer('sampled_subcarrier_indices', sampled_indices)
+            logger.info(f"子载波采样: 从{self.num_subcarriers}个中均匀采样{self.num_sampled_subcarriers}个")
+        else:
+            # 如果采样数量大于等于总数，使用所有子载波
+            self.register_buffer('sampled_subcarrier_indices', torch.arange(self.num_subcarriers))
+            logger.info(f"使用所有{self.num_subcarriers}个子载波")
         
-        # Pre-compute antenna positions for steering vector calculation
-        self.antenna_positions = self._compute_antenna_positions()
+        # Create angle grids and register as buffers first
+        theta_grid = self._create_angle_grid(*theta_range)
+        phi_grid = self._create_angle_grid(*phi_range)
+        self.register_buffer('theta_grid', theta_grid)
+        self.register_buffer('phi_grid', phi_grid)
         
-        logger.info(f"🔧 Spatial spectrum grid: {theta_points} × {phi_points} = {self.num_angles} angles")
-        logger.info(f"🚀 Optimization: Precomputed angle combinations for vectorized processing")
+        # Compute and register antenna positions first
+        antenna_positions = self._compute_antenna_positions()
+        self.register_buffer('antenna_positions', antenna_positions)
+        
+        # Precompute steering vectors for center frequency (after antenna_positions is registered)
+        steering_vectors = self._precompute_steering_vectors()
+        self.register_buffer('steering_vectors', steering_vectors)
+        
+        # Precompute subcarrier frequencies if using frequency-dependent steering
+        if self.use_frequency_dependent_steering:
+            subcarrier_frequencies = self._compute_subcarrier_frequencies()
+            self.register_buffer('subcarrier_frequencies', subcarrier_frequencies)
+        
+        logger.info(f"🔧 SSLoss: {len(self.theta_grid)}×{len(self.phi_grid)} angles "
+                   f"(θ: {theta_range[0]}°-{theta_range[2]}° step {theta_range[1]}°, "
+                   f"φ: {phi_range[0]}°-{phi_range[2]}° step {phi_range[1]}°), "
+                   f"{self.M}×{self.N} antenna array, "
+                   f"method: {'covariance-Bartlett' if self.use_covariance_bartlett else 'classical-Bartlett'}, "
+                   f"frequency-dependent: {self.use_frequency_dependent_steering}")
+    
+    def _create_angle_grid(self, min_deg: float, step_deg: float, max_deg: float) -> torch.Tensor:
+        """Create angle grid in radians"""
+        # Use arange to avoid endpoint duplication for azimuth
+        angles_deg = torch.arange(min_deg, max_deg, step_deg)
+        if len(angles_deg) == 0 or angles_deg[-1] + step_deg <= max_deg + 1e-6:
+            # Include max_deg if it's exactly reachable
+            angles_deg = torch.cat([angles_deg, torch.tensor([max_deg])])
+        return torch.deg2rad(angles_deg)
     
     def _compute_antenna_positions(self) -> torch.Tensor:
-        """
-        Compute 3D positions of all antennas in the array
+        """Compute 3D positions of all antennas in the array"""
+        # Create antenna grid centered at origin
+        m_range = torch.arange(self.M, dtype=torch.float32) - (self.M - 1) / 2
+        n_range = torch.arange(self.N, dtype=torch.float32) - (self.N - 1) / 2
         
-        Returns:
-            positions: Tensor of antenna positions (num_antennas, 3) in meters
-        """
-        positions = []
-        for m in range(self.M):
-            for n in range(self.N):
-                # Antenna position relative to array center
-                x = (m - (self.M - 1) / 2) * self.dx
-                y = (n - (self.N - 1) / 2) * self.dy
-                z = 0.0  # Assume planar array
-                positions.append([x, y, z])
+        m_grid, n_grid = torch.meshgrid(m_range, n_range, indexing='ij')
         
-        return torch.tensor(positions, dtype=torch.float32)
+        # Calculate positions
+        x = m_grid.flatten() * self.dx
+        y = n_grid.flatten() * self.dy
+        z = torch.zeros_like(x)  # Planar array
+        
+        return torch.stack([x, y, z], dim=1)  # [num_antennas, 3]
     
-    def _compute_ssim_loss(self, predicted_spectrum: torch.Tensor, target_spectrum: torch.Tensor) -> torch.Tensor:
+    def _compute_subcarrier_frequencies(self) -> torch.Tensor:
+        """Compute frequencies for all subcarriers"""
+        # Frequency spacing
+        delta_f = self.bandwidth / self.num_subcarriers
+        
+        # Subcarrier indices (centered around 0)
+        subcarrier_indices = torch.arange(self.num_subcarriers, dtype=torch.float32) - (self.num_subcarriers - 1) / 2
+        
+        # Frequencies for each subcarrier
+        frequencies = self.center_frequency + subcarrier_indices * delta_f
+        
+        return frequencies
+    
+    def _precompute_steering_vectors(self) -> torch.Tensor:
+        """Precompute steering vectors for all angle combinations"""
+        # Create angle meshgrid
+        theta_mesh, phi_mesh = torch.meshgrid(self.theta_grid, self.phi_grid, indexing='ij')
+        theta_flat = theta_mesh.flatten()
+        phi_flat = phi_mesh.flatten()
+        
+        # Compute direction vectors for all angles
+        directions = torch.stack([
+            torch.sin(theta_flat) * torch.cos(phi_flat),  # x
+            torch.sin(theta_flat) * torch.sin(phi_flat),  # y
+            torch.cos(theta_flat)                         # z
+        ], dim=1)  # [num_angles, 3]
+        
+        # Compute steering vectors: exp(+j * k * r · d)
+        # Note: Using positive phase for standard array response definition
+        k = 2 * np.pi / self.wavelength
+        phase_shifts = k * torch.matmul(self.antenna_positions, directions.T)  # [num_antennas, num_angles]
+        steering_vectors = torch.exp(1j * phase_shifts)
+        
+        # Reshape to [theta_points, phi_points, num_antennas]
+        return steering_vectors.T.reshape(len(self.theta_grid), len(self.phi_grid), self.num_antennas)
+    
+    def _csi_to_spatial_spectrum(self, csi: torch.Tensor) -> torch.Tensor:
         """
-        Compute SSIM loss between spatial spectrums
+        Convert CSI to spatial spectrum using Bartlett beamforming
+        
+        Two methods available:
+        1. Covariance-based Bartlett (more robust): R = E[x*x^H], spectrum = a^H * R * a
+        2. Classical averaged power: spectrum = mean_s |a^H * x_s|^2
         
         Args:
-            predicted_spectrum: Predicted spatial spectrum (batch_size, theta_points, phi_points)
-            target_spectrum: Target spatial spectrum (batch_size, theta_points, phi_points)
+            csi: CSI tensor [batch_size, bs_antennas, subcarriers]
             
         Returns:
-            ssim_loss: SSIM-based loss value (scalar tensor)
+            spectrum: Spatial spectrum [batch_size, theta_points, phi_points]
         """
-        # Ensure we have batch dimension
-        if predicted_spectrum.dim() == 2:
-            predicted_spectrum = predicted_spectrum.unsqueeze(0)
-        if target_spectrum.dim() == 2:
-            target_spectrum = target_spectrum.unsqueeze(0)
+        batch_size, num_bs_antennas, num_subcarriers = csi.shape
+        device = csi.device
+        
+        # Validate antenna count
+        if num_bs_antennas != self.num_antennas:
+            raise ValueError(f"CSI antenna count {num_bs_antennas} does not match expected {self.num_antennas}. "
+                           "Check antenna index mapping in your data.")
+        
+        # CSI data is already in the correct format
+        csi_data = csi  # [batch_size, bs_antennas, subcarriers]
+        
+        # Get angle grid dimensions
+        theta_points, phi_points = len(self.theta_grid), len(self.phi_grid)
+        
+        if self.use_covariance_bartlett:
+            return self._covariance_bartlett_spectrum(csi_data, theta_points, phi_points)
+        else:
+            return self._classical_bartlett_spectrum(csi_data, theta_points, phi_points)
+    
+    def _covariance_bartlett_spectrum(self, csi_data: torch.Tensor, theta_points: int, phi_points: int) -> torch.Tensor:
+        """
+        Compute spatial spectrum using covariance-based Bartlett method
+        
+        Args:
+            csi_data: [batch_size, bs_antennas, subcarriers]
             
-        # Add channel dimension for SSIM computation (B, C, H, W format)
-        pred_4d = predicted_spectrum.unsqueeze(1)  # (batch_size, 1, theta_points, phi_points)
-        target_4d = target_spectrum.unsqueeze(1)   # (batch_size, 1, theta_points, phi_points)
+        Returns:
+            spectrum: [batch_size, theta_points, phi_points]
+        """
+        batch_size, num_antennas, num_subcarriers = csi_data.shape
+        device = csi_data.device
+        
+        batch_spectrums = []
+        
+        for b in range(batch_size):
+            # Compute sample covariance matrix: R = (1/S) * sum_s x_s * x_s^H
+            csi_batch = csi_data[b]  # [num_antennas, num_subcarriers]
+            
+            # Check for zero CSI
+            if torch.abs(csi_batch).max() < 1e-8:
+                logger.info(f"Ground truth CSI is zero for batch index {b} (likely no signal coverage). Using zero spectrum.")
+                spectrum = torch.zeros(theta_points, phi_points, device=device)
+                batch_spectrums.append(spectrum)
+                continue
+            
+            if self.use_frequency_dependent_steering:
+                # 优化的频率相关协方差方法：批量计算提高性能
+                spectrum = torch.zeros(theta_points, phi_points, device=device)
+                
+                # 预计算所有角度的方向向量 [num_angles, 3]
+                theta_mesh, phi_mesh = torch.meshgrid(self.theta_grid, self.phi_grid, indexing='ij')
+                theta_flat = theta_mesh.flatten().to(device)
+                phi_flat = phi_mesh.flatten().to(device)
+                
+                directions = torch.stack([
+                    torch.sin(theta_flat) * torch.cos(phi_flat),
+                    torch.sin(theta_flat) * torch.sin(phi_flat),
+                    torch.cos(theta_flat)
+                ], dim=1)  # [num_angles, 3]
+                
+                # 使用采样的子载波批量计算所有角度的功率
+                subcarrier_spectrums = []
+                antenna_positions = self.antenna_positions.to(device)
+                sampled_indices = self.sampled_subcarrier_indices.to(device)
+                
+                for s_idx in sampled_indices:
+                    s = s_idx.item()  # 转换为标量索引
+                    csi_subcarrier = csi_batch[:, s]  # [num_antennas]
+                    
+                    # 跳过零子载波
+                    if torch.abs(csi_subcarrier).max() < 1e-8:
+                        continue
+                    
+                    # 计算该子载波的波数
+                    freq_s = self.subcarrier_frequencies[s].to(device)
+                    k_s = 2 * np.pi * freq_s / 3e8
+                    
+                    # 批量计算所有角度的相位偏移 [num_antennas, num_angles]
+                    phase_shifts = k_s * torch.matmul(antenna_positions, directions.T)
+                    
+                    # 批量计算所有角度的导向矢量 [num_antennas, num_angles]
+                    steering_vectors = torch.exp(1j * phase_shifts)
+                    
+                    # 批量计算所有角度的Bartlett功率 [num_angles]
+                    beamformer_output = torch.matmul(torch.conj(steering_vectors).T, csi_subcarrier)  # [num_angles]
+                    powers = torch.abs(beamformer_output) ** 2 / self.num_antennas
+                    
+                    # 重塑为频谱形状 [theta_points, phi_points]
+                    spectrum_s = powers.reshape(theta_points, phi_points)
+                    subcarrier_spectrums.append(spectrum_s)
+                
+                # 对所有子载波的频谱求平均
+                if len(subcarrier_spectrums) > 0:
+                    spectrum = torch.stack(subcarrier_spectrums).mean(dim=0)
+                else:
+                    logger.info(f"Ground truth CSI is zero for batch index {b} (likely no signal coverage). Using zero spectrum.")
+                    spectrum = torch.zeros(theta_points, phi_points, device=device)
+            else:
+                # 传统协方差方法：假设窄带信号
+                # Covariance matrix: R = E[x * x^H]
+                R = torch.matmul(csi_batch, torch.conj(csi_batch).T) / num_subcarriers  # [num_antennas, num_antennas]
+                
+                # Compute spectrum for all angle pairs
+                spectrum = torch.zeros(theta_points, phi_points, device=device)
+                
+                for t_idx in range(theta_points):
+                    for p_idx in range(phi_points):
+                        # Get steering vector for this angle (center frequency)
+                        steering_vec = self.steering_vectors[t_idx, p_idx, :].to(device)  # [num_antennas]
+                        
+                        # Bartlett spectrum: a^H * R * a
+                        spectrum_value = torch.real(torch.matmul(torch.conj(steering_vec), torch.matmul(R, steering_vec)))
+                        spectrum[t_idx, p_idx] = spectrum_value / (self.num_antennas ** 2)  # Normalize
+            
+            batch_spectrums.append(spectrum)
+        
+        return torch.stack(batch_spectrums)
+    
+    def _classical_bartlett_spectrum(self, csi_data: torch.Tensor, theta_points: int, phi_points: int) -> torch.Tensor:
+        """
+        Compute spatial spectrum using classical Bartlett method with frequency-dependent steering
+        
+        Args:
+            csi_data: [batch_size, bs_antennas, subcarriers]
+            
+        Returns:
+            spectrum: [batch_size, theta_points, phi_points]
+        """
+        batch_size, num_antennas, num_subcarriers = csi_data.shape
+        device = csi_data.device
+        
+        batch_spectrums = []
+        
+        for b in range(batch_size):
+            subcarrier_spectrums = []
+            sampled_indices = self.sampled_subcarrier_indices.to(device)
+            
+            for s_idx in sampled_indices:
+                s = s_idx.item()  # 转换为标量索引
+                csi_subcarrier = csi_data[b, :, s]  # [num_antennas]
+                
+                # Skip if all zeros
+                if torch.abs(csi_subcarrier).max() < 1e-8:
+                    continue
+                
+                # Get steering vectors for this subcarrier
+                if self.use_frequency_dependent_steering:
+                    # Compute frequency-dependent steering vectors
+                    freq_s = self.subcarrier_frequencies[s].to(device)
+                    k_s = 2 * np.pi * freq_s / 3e8  # c = 3e8 m/s
+                    steering_vectors_s = self._compute_steering_vectors_for_frequency(k_s, device)
+                else:
+                    steering_vectors_s = self.steering_vectors.to(device)
+                
+                # Bartlett beamforming: |a^H * x|^2
+                beamformer_output = torch.matmul(torch.conj(steering_vectors_s), csi_subcarrier)  # [theta_points, phi_points]
+                spectrum_subcarrier = torch.abs(beamformer_output) ** 2  # [theta_points, phi_points]
+                spectrum_subcarrier = spectrum_subcarrier / self.num_antennas  # Normalize
+                
+                subcarrier_spectrums.append(spectrum_subcarrier)
+            
+            # Average over all valid subcarriers
+            if len(subcarrier_spectrums) > 0:
+                avg_spectrum = torch.stack(subcarrier_spectrums).mean(dim=0)
+            else:
+                logger.info(f"Ground truth CSI is zero for batch index {b} (likely no signal coverage). Using zero spectrum.")
+                avg_spectrum = torch.zeros(theta_points, phi_points, device=device)
+            
+            batch_spectrums.append(avg_spectrum)
+        
+        return torch.stack(batch_spectrums)
+    
+    def _compute_steering_vectors_for_frequency(self, k: torch.Tensor, device: torch.device) -> torch.Tensor:
+        """
+        Compute steering vectors for a specific wavenumber k
+        
+        Args:
+            k: Wavenumber (2π * frequency / c)
+            device: Target device
+            
+        Returns:
+            steering_vectors: [theta_points, phi_points, num_antennas]
+        """
+        # Create angle meshgrid
+        theta_mesh, phi_mesh = torch.meshgrid(self.theta_grid, self.phi_grid, indexing='ij')
+        theta_flat = theta_mesh.flatten()
+        phi_flat = phi_mesh.flatten()
+        
+        # Compute direction vectors for all angles
+        directions = torch.stack([
+            torch.sin(theta_flat) * torch.cos(phi_flat),  # x
+            torch.sin(theta_flat) * torch.sin(phi_flat),  # y
+            torch.cos(theta_flat)                         # z
+        ], dim=1).to(device)  # [num_angles, 3]
+        
+        # Get antenna positions on device
+        antenna_positions = self.antenna_positions.to(device)
+        
+        # Compute phase shifts
+        phase_shifts = k * torch.matmul(antenna_positions, directions.T)  # [num_antennas, num_angles]
+        steering_vectors = torch.exp(1j * phase_shifts)
+        
+        # Reshape to [theta_points, phi_points, num_antennas]
+        return steering_vectors.T.reshape(len(self.theta_grid), len(self.phi_grid), self.num_antennas)
+    
+    def _compute_ssim_loss(self, pred_spectrum: torch.Tensor, target_spectrum: torch.Tensor) -> torch.Tensor:
+        """Compute SSIM loss between spatial spectrums"""
+        # Add channel dimension for SSIM: [batch, 1, height, width]
+        pred_4d = pred_spectrum.unsqueeze(1)
+        target_4d = target_spectrum.unsqueeze(1)
         
         # Compute SSIM
-        ssim_value = self._ssim_pytorch(pred_4d, target_4d, 
-                                       window_size=self.ssim_window_size,
-                                       k1=self.ssim_k1, k2=self.ssim_k2)
+        ssim_value = self._ssim(pred_4d, target_4d)
         
-        # Convert SSIM to loss (1 - SSIM, so higher SSIM gives lower loss)
-        ssim_loss = 1.0 - ssim_value
-        
-        return ssim_loss
+        # Convert to loss (1 - SSIM)
+        return 1.0 - ssim_value
     
-    def _ssim_pytorch(self, img1: torch.Tensor, img2: torch.Tensor, 
-                     window_size: int = 11, k1: float = 0.01, k2: float = 0.03) -> torch.Tensor:
-        """
-        PyTorch implementation of SSIM for spatial spectrums
-        
-        Args:
-            img1, img2: Input tensors (B, C, H, W)
-            window_size: Size of the sliding window
-            k1, k2: SSIM constants
-            
-        Returns:
-            SSIM value (scalar tensor)
-        """
+    def _ssim(self, img1: torch.Tensor, img2: torch.Tensor) -> torch.Tensor:
+        """Compute SSIM between two images"""
         device = img1.device
+        channel = img1.size(1)
         
         # Create Gaussian window
-        def create_window(window_size: int, channel: int) -> torch.Tensor:
-            # Create 1D Gaussian kernel
-            coords = torch.arange(window_size, dtype=torch.float32, device=device)
-            coords -= window_size // 2
-            g = torch.exp(-(coords ** 2) / (2 * (window_size / 6) ** 2))
-            g = g / g.sum()
-            
-            # Create 2D Gaussian kernel
-            g_2d = g[:, None] * g[None, :]
-            g_2d = g_2d / g_2d.sum()
-            
-            # Expand for all channels
-            window = g_2d.expand(channel, 1, window_size, window_size).contiguous()
-            return window
+        window_size = self.ssim_window_size
+        sigma = window_size / 6.0
         
-        # Get data range for normalization constants
-        data_range = torch.max(torch.max(img1), torch.max(img2)) - torch.min(torch.min(img1), torch.min(img2))
-        C1 = (k1 * data_range) ** 2
-        C2 = (k2 * data_range) ** 2
+        # 1D Gaussian kernel
+        coords = torch.arange(window_size, dtype=torch.float32, device=device)
+        coords -= window_size // 2
+        g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+        g = g / g.sum()
         
-        # Create window
-        channel = img1.size(1)
-        window = create_window(window_size, channel)
+        # 2D Gaussian kernel
+        window = g[:, None] * g[None, :]
+        window = window.expand(channel, 1, window_size, window_size)
+        
+        # SSIM constants
+        C1 = (self.ssim_k1) ** 2
+        C2 = (self.ssim_k2) ** 2
         
         # Compute local means
         mu1 = F.conv2d(img1, window, padding=window_size//2, groups=channel)
@@ -258,435 +428,256 @@ class SSLoss(nn.Module):
         sigma2_sq = F.conv2d(img2 * img2, window, padding=window_size//2, groups=channel) - mu2_sq
         sigma12 = F.conv2d(img1 * img2, window, padding=window_size//2, groups=channel) - mu1_mu2
         
-        # Compute SSIM map
-        ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+        # Compute SSIM
+        numerator = (2 * mu1_mu2 + C1) * (2 * sigma12 + C2)
+        denominator = (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
+        ssim_map = numerator / denominator
         
-        # Return mean SSIM
         return ssim_map.mean()
     
-    def _compute_subcarrier_frequencies(self) -> torch.Tensor:
-        """
-        Compute frequencies for all subcarriers
-        
-        Returns:
-            frequencies: Tensor of subcarrier frequencies (num_subcarriers,)
-        """
-        # Generate subcarrier indices centered around 0
-        indices = torch.arange(self.num_subcarriers) - self.num_subcarriers // 2
-        
-        # Calculate frequency offsets
-        subcarrier_spacing = self.bandwidth / self.num_subcarriers
-        freq_offsets = indices * subcarrier_spacing
-        
-        # Calculate actual frequencies
-        frequencies = self.center_frequency + freq_offsets
-        
-        return frequencies
-    
-    def _generate_steering_vectors(self, theta_batch: torch.Tensor, phi_batch: torch.Tensor, 
-                                 frequency: float, device: torch.device) -> torch.Tensor:
-        """
-        Generate steering vectors for angles (supports both single and batch processing)
-        
-        Args:
-            theta_batch: Elevation angles tensor (scalar or num_angles,) in radians
-            phi_batch: Azimuth angles tensor (scalar or num_angles,) in radians
-            frequency: Signal frequency in Hz
-            device: Device for tensor computation
-            
-        Returns:
-            steering_vectors: Complex steering vectors (num_antennas, 1) or (num_antennas, num_angles)
-        """
-        wavelength = 3e8 / frequency
-        positions = self.antenna_positions.to(device)  # (num_antennas, 3)
-        
-        # Handle both scalar and batch inputs
-        if theta_batch.dim() == 0:  # Scalar input
-            theta_batch = theta_batch.unsqueeze(0)
-            phi_batch = phi_batch.unsqueeze(0)
-            single_output = True
-        else:
-            single_output = False
-        
-        # Compute direction vectors for all angles at once
-        # directions: (num_angles, 3)
-        directions = torch.stack([
-            torch.sin(theta_batch) * torch.cos(phi_batch),  # x components
-            torch.sin(theta_batch) * torch.sin(phi_batch),  # y components  
-            torch.cos(theta_batch)                          # z components
-        ], dim=1)  # (num_angles, 3)
-        
-        # Calculate phase shifts for all antennas and all angles
-        k = 2 * np.pi / wavelength
-        phase_shifts = k * torch.matmul(positions, directions.T)  # (num_antennas, num_angles)
-        
-        # Generate complex steering vectors for all angles
-        steering_vectors = torch.exp(-1j * phase_shifts)  # (num_antennas, num_angles)
-        
-        # Return appropriate shape
-        if single_output:
-            return steering_vectors.unsqueeze(-1)  # (num_antennas, 1)
-        else:
-            return steering_vectors  # (num_antennas, num_angles)
-    
-    def _compute_spatial_spectrum(self, csi: torch.Tensor, subcarrier_idx: int) -> torch.Tensor:
-        """
-        Compute spatial spectrum from CSI for a single subcarrier (optimized vectorized version)
-        
-        Args:
-            csi: CSI tensor for single subcarrier (num_antennas, 1) - single snapshot
-            subcarrier_idx: Subcarrier index for frequency calculation
-            
-        Returns:
-            spectrum: Spatial spectrum (theta_points, phi_points)
-        """
-        device = csi.device
-        
-        # Get frequency for this subcarrier
-        subcarrier_frequencies = self._compute_subcarrier_frequencies()
-        frequency = subcarrier_frequencies[subcarrier_idx].item()
-        
-        # Normalize CSI magnitude to reduce numerical issues
-        # Keep phase information but normalize magnitude
-        csi_magnitude = torch.abs(csi) + 1e-8  # Add small epsilon to avoid division by zero
-        csi_normalized = csi / csi_magnitude  # Magnitude = 1, phase preserved
-        
-        # For single snapshot, covariance matrix is R = csi * csi^H
-        R_xx = torch.matmul(csi_normalized, torch.conj(csi_normalized).transpose(-2, -1))  # (num_antennas, num_antennas)
-        
-        # Use precomputed angle combinations
-        theta_flat = self.theta_flat.to(device)
-        phi_flat = self.phi_flat.to(device)
-        
-        # Generate all steering vectors at once using unified method
-        all_steering_vectors = self._generate_steering_vectors(theta_flat, phi_flat, frequency, device)
-        # Shape: (num_antennas, num_angles)
-        
-        if self.algorithm == 'bartlett':
-            # Vectorized Bartlett beamformer: a^H * R * a for all angles
-            R_A = torch.matmul(R_xx, all_steering_vectors)  # (num_antennas, num_angles)
-            powers = torch.real(torch.sum(torch.conj(all_steering_vectors) * R_A, dim=0))  # (num_angles,)
-            
-            # Reshape back to (theta_points, phi_points)
-            theta_points = len(self.theta_grid)
-            phi_points = len(self.phi_grid)
-            spectrum = powers.reshape(theta_points, phi_points)
-        else:
-            raise NotImplementedError(f"Algorithm '{self.algorithm}' not implemented")
-        
-        return spectrum
-    
-    def _compute_spectrum_all_subcarriers(self, csi_batch: torch.Tensor, device: torch.device, 
-                                        subcarrier_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        Compute spatial spectrum for selected subcarriers only (optimized)
-        
-        Args:
-            csi_batch: CSI tensor for one batch sample (num_subcarriers, 1, num_bs_antennas)
-            device: Device for computation
-            subcarrier_mask: Boolean mask indicating which subcarriers to use (num_subcarriers,)
-            
-        Returns:
-            fused_spectrum: Fused spatial spectrum (theta_points, phi_points)
-        """
-        num_subcarriers = csi_batch.shape[0]
-        theta_points = len(self.theta_grid)
-        phi_points = len(self.phi_grid)
-        
-        # Determine which subcarriers to use
-        if subcarrier_mask is not None:
-            # Use provided mask to select subcarriers
-            valid_indices = torch.where(subcarrier_mask)[0].tolist()
-        else:
-            # Use all subcarriers in the input (assumes they are already selected)
-            valid_indices = list(range(num_subcarriers))
-        
-        if len(valid_indices) == 0:
-            # No valid subcarriers, return zero spectrum
-            return torch.zeros((theta_points, phi_points), device=device, dtype=torch.float32)
-        
-        # Use precomputed angle combinations
-        theta_flat = self.theta_flat.to(device)
-        phi_flat = self.phi_flat.to(device)
-        
-        # Get all subcarrier frequencies
-        subcarrier_frequencies = self._compute_subcarrier_frequencies()
-        
-        # Initialize spectrum accumulator
-        if self.fusion_method == 'average':
-            spectrum_accumulator = torch.zeros((theta_points, phi_points), device=device, dtype=torch.float32)
-        elif self.fusion_method == 'max':
-            spectrum_accumulator = torch.full((theta_points, phi_points), -float('inf'), device=device, dtype=torch.float32)
-        else:
-            raise ValueError(f"Unsupported fusion method: {self.fusion_method}")
-        
-        # Process only selected subcarriers
-        valid_count = 0
-        for i, k in enumerate(valid_indices):
-            # Get CSI for this subcarrier: (num_bs_antennas, 1)
-            csi_k = csi_batch[k, 0, :].unsqueeze(1)  # (num_bs_antennas, 1)
-            
-            # For frequency calculation:
-            # If we have a mask, k is the original subcarrier index
-            # If no mask, k is just the index in the selected data, use center frequency
-            if subcarrier_mask is not None:
-                frequency = subcarrier_frequencies[k].item()
-            else:
-                # Use center frequency for simplicity when processing already-selected data
-                frequency = self.center_frequency
-            
-            # Skip zero-valued subcarriers
-            csi_magnitude = torch.abs(csi_k)
-            if torch.max(csi_magnitude) < 1e-10:
-                continue
-            
-            valid_count += 1
-            
-            # Normalize CSI magnitude to use only phase information
-            csi_k_normalized = csi_k / (csi_magnitude + 1e-8)  # Magnitude = 1, phase preserved
-            
-            # Covariance matrix using normalized CSI (phase-only)
-            R_xx = torch.matmul(csi_k_normalized, torch.conj(csi_k_normalized).transpose(-2, -1))  # (num_bs_antennas, num_bs_antennas)
-            
-            # Generate all steering vectors for this frequency using unified method
-            all_steering_vectors = self._generate_steering_vectors(theta_flat, phi_flat, frequency, device)
-            # Shape: (num_bs_antennas, num_angles)
-            
-            if self.algorithm == 'bartlett':
-                # Vectorized Bartlett beamformer for all angles
-                R_A = torch.matmul(R_xx, all_steering_vectors)  # (num_bs_antennas, num_angles)
-                powers = torch.real(torch.sum(torch.conj(all_steering_vectors) * R_A, dim=0))  # (num_angles,)
-                spectrum_k = powers.reshape(theta_points, phi_points)
-            else:
-                raise NotImplementedError(f"Algorithm '{self.algorithm}' not implemented")
-            
-            # Accumulate spectrum
-            if self.fusion_method == 'average':
-                spectrum_accumulator += spectrum_k
-            elif self.fusion_method == 'max':
-                spectrum_accumulator = torch.maximum(spectrum_accumulator, spectrum_k)
-        
-        # Finalize fusion (use actual number of valid subcarriers)
-        if self.fusion_method == 'average' and valid_count > 0:
-            fused_spectrum = spectrum_accumulator / valid_count
-        elif self.fusion_method == 'max':
-            fused_spectrum = spectrum_accumulator
-        else:
-            # No valid subcarriers processed
-            fused_spectrum = torch.zeros((theta_points, phi_points), device=device, dtype=torch.float32)
-        
-        return fused_spectrum
-    
-    def _csi_to_spatial_spectrum(self, csi: torch.Tensor, subcarrier_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        Convert CSI tensor to spatial spectrum
-        
-        Args:
-            csi: CSI tensor with shape (batch_size, num_subcarriers, num_ue_antennas, num_bs_antennas)
-                 If subcarrier_mask is None, assumes all subcarriers in csi are already selected
-            subcarrier_mask: Optional mask indicating which subcarriers to use 
-                           Shape: (batch_size, num_ue_antennas, num_subcarriers) or (batch_size, num_subcarriers)
-                           If None, uses all subcarriers in the input csi tensor
-            
-        Returns:
-            spectrum: Spatial spectrum tensor (batch_size, theta_points, phi_points)
-        """
-        batch_size = csi.shape[0]
-        device = csi.device
-        
-        # Validate input shape
-        if csi.dim() != 4:
-            raise ValueError(f"Expected 4D CSI tensor (batch, subcarriers, ue_antennas, bs_antennas), got {csi.shape}")
-        
-        num_subcarriers, num_ue_antennas, num_bs_antennas = csi.shape[1], csi.shape[2], csi.shape[3]
-        
-        # Extract single UE antenna (should always be 1 after data loading)
-        if num_ue_antennas != 1:
-            logger.warning(f"Expected single UE antenna, got {num_ue_antennas}. Using first antenna.")
-            csi = csi[:, :, :1, :]  # Take only the first UE antenna
-            num_ue_antennas = 1
-        
-        # Validate BS antenna count matches array configuration
-        if num_bs_antennas != self.num_antennas:
-            raise ValueError(f"BS antennas ({num_bs_antennas}) doesn't match array config ({self.M}x{self.N}={self.num_antennas})")
-        
-        # Initialize output spectrum
-        theta_points = len(self.theta_grid)
-        phi_points = len(self.phi_grid)
-        batch_spectrums = torch.zeros((batch_size, theta_points, phi_points), 
-                                    device=device, dtype=torch.float32)
-        
-        # Process each batch sample
-        for b in range(batch_size):
-            # Get CSI for this batch: (num_subcarriers, 1, num_bs_antennas)
-            csi_batch = csi[b]  # (num_subcarriers, 1, num_bs_antennas)
-            
-            # Get subcarrier mask for this batch
-            batch_mask = None
-            if subcarrier_mask is not None:
-                if subcarrier_mask.dim() == 3:
-                    # Shape: (batch_size, num_ue_antennas, num_subcarriers)
-                    batch_mask = subcarrier_mask[b, 0, :]  # Use first UE antenna
-                elif subcarrier_mask.dim() == 2:
-                    # Shape: (batch_size, num_subcarriers)
-                    batch_mask = subcarrier_mask[b, :]
-                else:
-                    logger.warning(f"Unexpected subcarrier_mask shape: {subcarrier_mask.shape}")
-            
-            # Vectorized computation for selected subcarriers only
-            fused_spectrum = self._compute_spectrum_all_subcarriers(csi_batch, device, batch_mask)
-            batch_spectrums[b] = fused_spectrum
-        
-        return batch_spectrums
-        
     def forward(self, predicted_csi: torch.Tensor, target_csi: torch.Tensor) -> torch.Tensor:
         """
-        Compute spatial spectrum loss between predicted and target CSI
+        Compute spatial spectrum SSIM loss
         
         Args:
-            predicted_csi: Predicted CSI tensor from selected subcarriers
-                          Shape: (batch_size, num_selected_subcarriers, num_ue_antennas, num_bs_antennas)
-            target_csi: Target CSI tensor from selected subcarriers
-                       Shape: same as predicted_csi
-        
-        Returns:
-            loss: Computed MSE loss between spatial spectrums (scalar tensor)
-        """
-        # Validate input shapes
-        if predicted_csi.shape != target_csi.shape:
-            raise ValueError(f"Shape mismatch: predicted {predicted_csi.shape} vs target {target_csi.shape}")
-        
-        # Ensure complex tensors
-        if not predicted_csi.is_complex():
-            predicted_csi = predicted_csi.to(torch.complex64)
-        if not target_csi.is_complex():
-            target_csi = target_csi.to(torch.complex64)
-        
-        # Convert CSI to spatial spectrum (no mask needed since data is already selected)
-        predicted_spectrum = self._csi_to_spatial_spectrum(predicted_csi)
-        target_spectrum = self._csi_to_spatial_spectrum(target_csi)
-        
-        # Normalize spectrums using maximum value normalization
-        # This preserves relative magnitude information better than L2 normalization
-        pred_max = torch.max(predicted_spectrum)
-        target_max = torch.max(target_spectrum)
-        
-        if pred_max > 1e-8 and target_max > 1e-8:
-            predicted_spectrum_normalized = predicted_spectrum / pred_max
-            target_spectrum_normalized = target_spectrum / target_max
-        else:
-            # Fallback if normalization fails
-            predicted_spectrum_normalized = predicted_spectrum
-            target_spectrum_normalized = target_spectrum
-        
-        # Compute loss based on configured loss type
-        if self.loss_type == 'ssim':
-            # Use SSIM loss for better perceptual quality assessment
-            loss = self._compute_ssim_loss(predicted_spectrum_normalized, target_spectrum_normalized)
-        else:
-            # Default MSE loss
-            loss = F.mse_loss(predicted_spectrum_normalized, target_spectrum_normalized)
-        
-        return loss
-    
-    def compute_and_visualize_loss(self, predicted_csi: torch.Tensor, target_csi: torch.Tensor,
-                                  save_path: str, sample_idx: int = 0) -> Tuple[float, str]:
-        """
-        Compute spatial spectrum loss and save visualization for testing
-        
-        Args:
-            predicted_csi: Predicted CSI tensor from selected subcarriers
-                          Shape: (batch_size, num_selected_subcarriers, num_ue_antennas, num_bs_antennas)
-            target_csi: Target CSI tensor from selected subcarriers (same shape as predicted_csi)
-            save_path: Directory path to save the visualization plot
-            sample_idx: Which sample in the batch to visualize (default: 0)
-        
-        Returns:
-            loss_value: Computed loss value (float)
-            plot_path: Path to the saved plot file
-        """
-        if predicted_csi.shape != target_csi.shape:
-            raise ValueError(f"Shape mismatch: predicted {predicted_csi.shape} vs target {target_csi.shape}")
-        
-        # Compute loss (no mask needed since data is already selected)
-        loss = self.forward(predicted_csi, target_csi)
-        loss_value = loss.item()
-        
-        # Convert CSI to spatial spectrum for visualization
-        predicted_spectrum = self._csi_to_spatial_spectrum(predicted_csi)
-        target_spectrum = self._csi_to_spatial_spectrum(target_csi)
-        
-        # Select sample to visualize
-        if sample_idx >= predicted_spectrum.shape[0]:
-            sample_idx = 0
-        
-        pred_spec = predicted_spectrum[sample_idx].detach().cpu().numpy()
-        target_spec = target_spectrum[sample_idx].detach().cpu().numpy()
-        
-        # Create visualization
-        plot_path = self._create_spectrum_comparison_plot(
-            pred_spec, target_spec, save_path, loss_value, sample_idx
-        )
-        
-        return loss_value, plot_path
-    
-    def _create_spectrum_comparison_plot(self, predicted_spectrum: np.ndarray, 
-                                       target_spectrum: np.ndarray,
-                                       save_path: str, loss_value: float,
-                                       sample_idx: int) -> str:
-        """
-        Create and save spatial spectrum comparison plot
-        
-        Args:
-            predicted_spectrum: Predicted spatial spectrum (theta_points, phi_points)
-            target_spectrum: Target spatial spectrum (theta_points, phi_points)
-            save_path: Directory to save the plot
-            loss_value: Loss value to display in title
-            sample_idx: Sample index for filename
+            predicted_csi: Predicted CSI [batch_size, bs_antennas, subcarriers]
+            target_csi: Target CSI [batch_size, bs_antennas, subcarriers]
             
         Returns:
-            plot_path: Path to saved plot file
+            loss: SSIM loss scalar
         """
-        # Create save directory if it doesn't exist
-        Path(save_path).mkdir(parents=True, exist_ok=True)
+        # Convert CSI to spatial spectrum
+        pred_spectrum = self._csi_to_spatial_spectrum(predicted_csi)
+        target_spectrum = self._csi_to_spatial_spectrum(target_csi)
         
-        # Convert angle grids to degrees for display
-        theta_deg = np.rad2deg(self.theta_grid.cpu().numpy())
-        phi_deg = np.rad2deg(self.phi_grid.cpu().numpy())
+        # Normalize spectrums to [0, 1]
+        pred_norm = pred_spectrum / (pred_spectrum.amax(dim=(1, 2), keepdim=True) + 1e-8)
+        target_norm = target_spectrum / (target_spectrum.amax(dim=(1, 2), keepdim=True) + 1e-8)
         
-        # Create figure with two subplots
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+        # Compute SSIM loss
+        return self._compute_ssim_loss(pred_norm, target_norm)
+    
+    def compute_spatial_spectrum(self, csi: torch.Tensor) -> torch.Tensor:
+        """
+        Public interface to compute spatial spectrum from CSI
         
-        # Plot predicted spectrum
-        im1 = ax1.imshow(predicted_spectrum, aspect='auto', origin='lower', 
-                        extent=[phi_deg[0], phi_deg[-1], theta_deg[0], theta_deg[-1]],
-                        cmap='viridis')
-        ax1.set_title(f'Predicted Spatial Spectrum\nSample {sample_idx}', fontsize=12, fontweight='bold')
-        ax1.set_xlabel('Azimuth (degrees)', fontsize=10)
-        ax1.set_ylabel('Elevation (degrees)', fontsize=10)
-        plt.colorbar(im1, ax=ax1, label='Power')
+        Args:
+            csi: CSI tensor [batch_size, bs_antennas, subcarriers]
+            
+        Returns:
+            spectrum: Spatial spectrum [batch_size, theta_points, phi_points]
+        """
+        return self._csi_to_spatial_spectrum(csi)
+    
+    def validate_with_plane_wave(self, theta_deg: float, phi_deg: float, 
+                                 amplitude: float = 1.0, noise_level: float = 0.01) -> Dict[str, float]:
+        """
+        Validate spatial spectrum implementation with a synthetic plane wave
         
-        # Plot target spectrum
-        im2 = ax2.imshow(target_spectrum, aspect='auto', origin='lower',
-                        extent=[phi_deg[0], phi_deg[-1], theta_deg[0], theta_deg[-1]],
-                        cmap='viridis')
-        ax2.set_title(f'Target Spatial Spectrum\nSample {sample_idx}', fontsize=12, fontweight='bold')
-        ax2.set_xlabel('Azimuth (degrees)', fontsize=10)
-        ax2.set_ylabel('Elevation (degrees)', fontsize=10)
-        plt.colorbar(im2, ax=ax2, label='Power')
+        Args:
+            theta_deg: Elevation angle in degrees [0, 90]
+            phi_deg: Azimuth angle in degrees [0, 360]
+            amplitude: Plane wave amplitude
+            noise_level: Additive noise standard deviation
+            
+        Returns:
+            validation_metrics: Dictionary with peak location and beam quality metrics
+        """
+        device = self.steering_vectors.device
         
-        # Add overall title with loss information
-        fig.suptitle(f'Spatial Spectrum Comparison - Loss: {loss_value:.6f}\n'
-                    f'Algorithm: {self.algorithm.upper()}, Fusion: {self.fusion_method}', 
-                    fontsize=14, fontweight='bold')
+        # Convert angles to radians
+        theta_rad = torch.deg2rad(torch.tensor(theta_deg, device=device))
+        phi_rad = torch.deg2rad(torch.tensor(phi_deg, device=device))
         
-        # Adjust layout
-        plt.tight_layout()
+        # Generate direction vector for the plane wave
+        direction = torch.tensor([
+            torch.sin(theta_rad) * torch.cos(phi_rad),
+            torch.sin(theta_rad) * torch.sin(phi_rad),
+            torch.cos(theta_rad)
+        ], device=device)
         
-        # Save plot
-        filename = f'spatial_spectrum_comparison_sample_{sample_idx}.png'
-        plot_path = os.path.join(save_path, filename)
-        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
-        plt.close()
+        # Compute phase shifts for all antennas
+        k = 2 * np.pi / self.wavelength
+        phase_shifts = k * torch.matmul(self.antenna_positions, direction)
         
-        return plot_path
+        # Generate synthetic CSI as a plane wave (matching steering vector convention)
+        synthetic_csi = amplitude * torch.exp(1j * phase_shifts)  # [num_antennas]
+        
+        # Add noise
+        if noise_level > 0:
+            noise_real = torch.randn_like(synthetic_csi.real) * noise_level
+            noise_imag = torch.randn_like(synthetic_csi.imag) * noise_level
+            synthetic_csi += torch.complex(noise_real, noise_imag)
+        
+        # Create batch format: [1, bs_antennas, num_subcarriers]
+        # 复制CSI到足够的子载波数量以支持采样
+        csi_subcarriers = synthetic_csi.unsqueeze(1).repeat(1, self.num_subcarriers)  # [num_antennas, num_subcarriers]
+        csi_batch = csi_subcarriers.unsqueeze(0)  # [1, num_antennas, num_subcarriers]
+        
+        # Compute spatial spectrum
+        spectrum = self._csi_to_spatial_spectrum(csi_batch)[0]  # [theta_points, phi_points]
+        
+        # Find peak location
+        peak_idx = torch.argmax(spectrum.flatten())
+        peak_theta_idx = peak_idx // spectrum.shape[1]
+        peak_phi_idx = peak_idx % spectrum.shape[1]
+        
+        # Convert back to degrees
+        peak_theta_deg = torch.rad2deg(self.theta_grid[peak_theta_idx]).item()
+        peak_phi_deg = torch.rad2deg(self.phi_grid[peak_phi_idx]).item()
+        
+        # Compute validation metrics
+        theta_error = abs(peak_theta_deg - theta_deg)
+        phi_error = abs(peak_phi_deg - phi_deg)
+        if phi_error > 180:
+            phi_error = 360 - phi_error  # Handle wrap-around
+        
+        # Beam quality metrics
+        peak_value = spectrum.max().item()
+        mean_value = spectrum.mean().item()
+        peak_to_average_ratio = peak_value / (mean_value + 1e-8)
+        
+        validation_metrics = {
+            'input_theta_deg': theta_deg,
+            'input_phi_deg': phi_deg,
+            'peak_theta_deg': peak_theta_deg,
+            'peak_phi_deg': peak_phi_deg,
+            'theta_error_deg': theta_error,
+            'phi_error_deg': phi_error,
+            'peak_value': peak_value,
+            'peak_to_average_ratio': peak_to_average_ratio,
+            'validation_passed': theta_error < 2.0 and phi_error < 4.0  # Allow small tolerance
+        }
+        
+        return validation_metrics
+    
+    def validate_antenna_mapping(self, csi_sample: torch.Tensor, expected_theta_deg: float, 
+                                expected_phi_deg: float, tolerance_deg: float = 5.0) -> Dict[str, float]:
+        """
+        Validate antenna index mapping by checking if a known signal direction is correctly detected
+        
+        Args:
+            csi_sample: CSI sample [bs_antennas, subcarriers] for a known signal direction
+            expected_theta_deg: Expected elevation angle in degrees
+            expected_phi_deg: Expected azimuth angle in degrees  
+            tolerance_deg: Tolerance for angle error in degrees
+            
+        Returns:
+            validation_result: Dictionary with detected angles and validation status
+            
+        Raises:
+            ValueError: If antenna mapping validation fails
+        """
+        # Add batch dimension if needed
+        if csi_sample.dim() == 2:
+            csi_batch = csi_sample.unsqueeze(0)  # [1, bs_antennas, subcarriers]
+        else:
+            csi_batch = csi_sample
+            
+        # Validate antenna count
+        if csi_batch.shape[1] != self.num_antennas:
+            raise ValueError(f"CSI antenna count {csi_batch.shape[1]} does not match expected {self.num_antennas}")
+        
+        # Compute spatial spectrum
+        spectrum = self._csi_to_spatial_spectrum(csi_batch)[0]  # [theta_points, phi_points]
+        
+        # Find peak location
+        peak_idx = torch.argmax(spectrum.flatten())
+        peak_theta_idx = peak_idx // spectrum.shape[1]
+        peak_phi_idx = peak_idx % spectrum.shape[1]
+        
+        # Convert back to degrees
+        detected_theta_deg = torch.rad2deg(self.theta_grid[peak_theta_idx]).item()
+        detected_phi_deg = torch.rad2deg(self.phi_grid[peak_phi_idx]).item()
+        
+        # Compute errors
+        theta_error = abs(detected_theta_deg - expected_theta_deg)
+        phi_error = abs(detected_phi_deg - expected_phi_deg)
+        if phi_error > 180:
+            phi_error = 360 - phi_error  # Handle wrap-around
+        
+        # Validation result
+        validation_passed = theta_error <= tolerance_deg and phi_error <= tolerance_deg
+        
+        result = {
+            'expected_theta_deg': expected_theta_deg,
+            'expected_phi_deg': expected_phi_deg,
+            'detected_theta_deg': detected_theta_deg,
+            'detected_phi_deg': detected_phi_deg,
+            'theta_error_deg': theta_error,
+            'phi_error_deg': phi_error,
+            'peak_value': spectrum.max().item(),
+            'validation_passed': validation_passed
+        }
+        
+        if not validation_passed:
+            error_msg = (f"Antenna mapping validation failed! "
+                        f"Expected: (θ={expected_theta_deg}°, φ={expected_phi_deg}°), "
+                        f"Detected: (θ={detected_theta_deg:.1f}°, φ={detected_phi_deg:.1f}°), "
+                        f"Errors: (θ={theta_error:.1f}°, φ={phi_error:.1f}°). "
+                        f"This indicates incorrect antenna index → (m,n) position mapping. "
+                        f"Check your CSI data antenna ordering.")
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        logger.info(f"✅ Antenna mapping validation passed: "
+                   f"θ_error={theta_error:.1f}°, φ_error={phi_error:.1f}°")
+        
+        return result
+    
+    def debug_antenna_mapping(self, csi_sample: torch.Tensor, save_debug_plot: bool = True) -> Dict[str, any]:
+        """
+        Debug antenna mapping using phase pattern analysis
+        
+        Args:
+            csi_sample: CSI sample [bs_antennas, subcarriers] 
+            save_debug_plot: Whether to save debug visualization to .temp/
+            
+        Returns:
+            debug_result: Dictionary with analysis results and suggestions
+        """
+        try:
+            # Import debug tool (only when needed)
+            import sys
+            import os
+            debug_tool_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
+                                          '..', '..', '.temp')
+            sys.path.insert(0, debug_tool_path)
+            from antenna_mapping_debug import visualize_csi_phase_pattern, suggest_antenna_permutation
+            
+            # Prepare save path
+            save_path = None
+            if save_debug_plot:
+                import os
+                temp_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
+                                       '..', '..', '.temp')
+                save_path = os.path.join(temp_dir, 'antenna_mapping_debug.png')
+                
+            # Run analysis
+            analysis_result = visualize_csi_phase_pattern(
+                csi_sample, (self.M, self.N), save_path=save_path
+            )
+            
+            # Get suggestions
+            suggestions = suggest_antenna_permutation(csi_sample, (self.M, self.N))
+            
+            debug_result = {
+                'phase_linearity_analysis': analysis_result,
+                'mapping_suggestions': suggestions,
+                'array_shape': (self.M, self.N),
+                'debug_plot_path': save_path if save_debug_plot else None
+            }
+            
+            logger.info(f"Antenna mapping debug completed. Quality: {analysis_result['mapping_quality']}")
+            if analysis_result['mapping_quality'] == 'poor':
+                logger.warning("⚠️ Poor antenna mapping detected! Check debug plot and suggestions.")
+                logger.warning(suggestions)
+            
+            return debug_result
+            
+        except ImportError as e:
+            logger.error(f"Could not import debug tool: {e}")
+            raise ValueError(f"Debug tool not available: {e}")
+        except Exception as e:
+            logger.error(f"Antenna mapping debug failed: {e}")
+            raise ValueError(f"Debug analysis failed: {e}")

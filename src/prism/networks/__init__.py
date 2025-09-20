@@ -11,7 +11,6 @@ This module contains all the neural network components for the Prism system:
 """
 
 from .attenuation_network import AttenuationNetwork, AttenuationNetworkConfig
-from .frequency_network import FrequencyNetwork, FrequencyNetworkConfig
 from .antenna_codebook import AntennaEmbeddingCodebook, AntennaEmbeddingCodebookConfig
 from .antenna_network import AntennaNetwork, AntennaNetworkConfig
 from .radiance_network import RadianceNetwork, RadianceNetworkConfig
@@ -20,7 +19,6 @@ from .prism_network import PrismNetwork, PrismNetworkConfig
 __all__ = [
     # Individual networks
     'AttenuationNetwork',
-    'FrequencyNetwork',
     'AntennaEmbeddingCodebook',
     'AntennaNetwork',
     'RadianceNetwork',
@@ -30,7 +28,6 @@ __all__ = [
     
     # Configuration classes
     'AttenuationNetworkConfig',
-    'FrequencyNetworkConfig',
     'AntennaEmbeddingCodebookConfig',
     'AntennaNetworkConfig',
     'RadianceNetworkConfig',

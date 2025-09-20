@@ -13,11 +13,7 @@ graph TD
     A --> D["Spatial Spectrum Loss<br/>(空间域验证)"]
     A --> E["Regularization Loss<br/>(正则化)"]
     
-    B --> B1["MSE Loss"]
-    B --> B2["MAE Loss"]
-    B --> B3["Complex MSE"]
-    B --> B4["Magnitude-Phase"]
-    B --> B5["Hybrid Loss ⭐"]
+    B --> B1["Subcarrier-Precise Loss ⭐"]
     
     C --> C1["MSE Loss"]
     C --> C2["Delay Loss"]
@@ -27,60 +23,53 @@ graph TD
     D --> D2["Spatial Spectrum MSE"]
     
     style A fill:#e1f5fe
-    style B5 fill:#4caf50
+    style B1 fill:#4caf50
     style C3 fill:#4caf50
 ```
 
 ## 1. CSI损失函数 (CSILoss)
 
 ### 1.1 概述
-CSI损失函数专门用于比较复数值的信道状态信息矩阵，提供5种不同的计算方法。
+CSI损失函数专门用于比较复数值的信道状态信息矩阵，采用子载波精确损失方法，解决复数MSE与每子载波精度之间的悖论。
 
-### 1.2 损失类型
+### 1.2 子载波精确损失 (Subcarrier-Precise Loss)
 
-#### **MSE损失** (`'mse'`)
-标准的复数均方误差损失：
+#### **子载波精确损失** ⭐ **唯一方法**
+专门设计的损失函数，强调子载波级别的准确性：
+
 ```python
-diff = predicted_csi - target_csi
-loss = torch.mean(torch.abs(diff)**2)
-```
+# 1. 每子载波幅度MSE (不跨子载波平均)
+subcarrier_mag_mse = torch.mean((pred_mag - target_mag)**2, dim=1)  # [num_subcarriers]
+subcarrier_mag_loss = torch.mean(subcarrier_mag_mse)  # 跨子载波平均
 
-#### **MAE损失** (`'mae'`)
-复数平均绝对误差损失：
-```python
-diff = predicted_csi - target_csi
-loss = torch.mean(torch.abs(diff))
-```
+# 2. 幅度分布保持
+pred_mag_mean = torch.mean(pred_mag, dim=1)  # 每子载波均值
+target_mag_mean = torch.mean(target_mag, dim=1)
+pred_mag_std = torch.std(pred_mag, dim=1)    # 每子载波标准差
+target_mag_std = torch.std(target_mag, dim=1)
 
-#### **复数MSE损失** (`'complex_mse'`)
-分别计算实部和虚部的MSE：
-```python
-real_loss = F.mse_loss(predicted_csi.real, target_csi.real)
-imag_loss = F.mse_loss(predicted_csi.imag, target_csi.imag)
-loss = real_loss + imag_loss
-```
+mean_distribution_loss = F.mse_loss(pred_mag_mean, target_mag_mean)
+std_distribution_loss = F.mse_loss(pred_mag_std, target_mag_std)
 
-#### **幅度-相位损失** (`'magnitude_phase'`)
-分别计算幅度和相位的损失：
-```python
-# 幅度损失
-magnitude_loss = F.mse_loss(torch.abs(predicted_csi), torch.abs(target_csi))
+# 3. 每子载波相位一致性
+pred_phase = torch.atan2(predicted_csi.imag, predicted_csi.real + 1e-8)
+target_phase = torch.atan2(target_csi.imag, target_csi.real + 1e-8)
 
-# 相位损失 (循环相位差)
-pred_phase = torch.angle(predicted_csi + 1e-8)
-target_phase = torch.angle(target_csi + 1e-8)
 phase_diff = torch.remainder(pred_phase - target_phase + π, 2π) - π
-phase_loss = torch.mean(phase_diff**2)
+subcarrier_phase_mse = torch.mean(phase_diff**2, dim=1)  # [num_subcarriers]
+subcarrier_phase_loss = torch.mean(subcarrier_phase_mse)
 
-loss = magnitude_weight * magnitude_loss + phase_weight * phase_loss
-```
+# 4. 复数相关性保持 (保持复数关系)
+pred_complex_norm = predicted_csi / (torch.abs(predicted_csi) + 1e-8)
+target_complex_norm = target_csi / (torch.abs(target_csi) + 1e-8)
+correlation_loss = torch.mean(torch.abs(pred_complex_norm - target_complex_norm)**2)
 
-#### **混合损失** (`'hybrid'`) ⭐ **推荐**
-组合复数MSE、幅度和相位损失：
-```python
-loss = cmse_weight * cmse_loss + 
-       magnitude_weight * magnitude_loss + 
-       phase_weight * phase_loss
+# 组合损失，强调子载波级别准确性
+loss = (magnitude_weight * subcarrier_mag_loss +
+        0.5 * magnitude_weight * mean_distribution_loss +
+        0.3 * magnitude_weight * std_distribution_loss +
+        phase_weight * subcarrier_phase_loss +
+        0.2 * correlation_loss)
 ```
 
 ### 1.3 相位计算说明
@@ -90,13 +79,12 @@ loss = cmse_weight * cmse_loss +
 - 循环相位差处理：`torch.remainder(phase_diff + π, 2π) - π`
 - 数值稳定性：添加小量 `1e-8` 避免零值
 
-### 1.4 配置示例
+### 1.3 配置示例
 ```yaml
 csi_loss:
-  type: 'hybrid'
   phase_weight: 1.0
   magnitude_weight: 1.0
-  cmse_weight: 1.0
+  normalize_weights: true
 ```
 
 ## 2. PDP损失函数 (PDPLoss)

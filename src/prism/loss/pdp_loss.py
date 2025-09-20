@@ -22,8 +22,9 @@ class PDPLoss(nn.Module):
     Supports MSE, correlation, delay, and hybrid PDP losses.
     """
     
-    def __init__(self, loss_type: str = 'hybrid', fft_size: int = 1024,
-                 normalize_pdp: bool = True):
+    def __init__(self, loss_type: str = 'hybrid', fft_size: int = 2046,
+                 normalize_pdp: bool = True, mse_weight: float = 0.7, 
+                 delay_weight: float = 0.3):
         """
         Initialize PDP loss function
         
@@ -32,11 +33,20 @@ class PDPLoss(nn.Module):
                       Note: 'correlation' type is disabled due to incorrect implementation
             fft_size: FFT size for PDP computation
             normalize_pdp: Whether to normalize PDPs before comparison
+            mse_weight: Weight for MSE component in hybrid loss
+            delay_weight: Weight for delay component in hybrid loss
         """
         super(PDPLoss, self).__init__()
         self.loss_type = loss_type
         self.fft_size = int(fft_size)  # Ensure fft_size is always an integer
         self.normalize_pdp = normalize_pdp
+        self.mse_weight = mse_weight
+        self.delay_weight = delay_weight
+        
+        # Validate hybrid loss weights if applicable
+        if loss_type == 'hybrid':
+            if abs(self.mse_weight + self.delay_weight - 1.0) > 1e-6:
+                logger.warning(f"PDP hybrid loss weights ({self.mse_weight:.3f} + {self.delay_weight:.3f} = {self.mse_weight + self.delay_weight:.3f}) do not sum to 1.0, consider normalizing for better interpretability")
         
     def forward(self, predicted_csi: torch.Tensor, target_csi: torch.Tensor) -> torch.Tensor:
         """
@@ -51,11 +61,16 @@ class PDPLoss(nn.Module):
         Returns:
             loss: Computed PDP loss value (scalar tensor)
         """
-        # Ensure complex tensors
+        # Ensure complex tensors with simplified conversion
         if not predicted_csi.is_complex():
-            predicted_csi = predicted_csi.to(torch.complex64)
+            predicted_csi = torch.view_as_complex(
+                torch.stack([predicted_csi, torch.zeros_like(predicted_csi)], dim=-1)
+            )
+                
         if not target_csi.is_complex():
-            target_csi = target_csi.to(torch.complex64)
+            target_csi = torch.view_as_complex(
+                torch.stack([target_csi, torch.zeros_like(target_csi)], dim=-1)
+            )
             
         # Compute PDPs
         pdp_pred = self._compute_pdp(predicted_csi)
@@ -75,14 +90,12 @@ class PDPLoss(nn.Module):
             loss = self._compute_delay_loss(pdp_pred, pdp_target)
             
         elif self.loss_type == 'hybrid':
-            # Modified Hybrid PDP Loss: MSE + Delay (removed correlation)
+            # Hybrid PDP Loss: MSE + Delay with customizable weights
             mse_loss = F.mse_loss(pdp_pred, pdp_target)
             delay_loss = self._compute_delay_loss(pdp_pred, pdp_target)
             
-            # Rebalance weights since we removed correlation component
-            # Original: mse_weight=0.5, correlation_weight=0.3, delay_weight=0.2
-            # New: mse_weight=0.7, delay_weight=0.3 (maintain relative importance)
-            loss = (0.7 * mse_loss + 0.3 * delay_loss)
+            # Use customizable weights instead of hardcoded values
+            loss = (self.mse_weight * mse_loss + self.delay_weight * delay_loss)
             
         else:
             raise ValueError(f"Unknown PDP loss type: {self.loss_type}")
@@ -91,7 +104,7 @@ class PDPLoss(nn.Module):
     
     def _compute_pdp(self, csi_data: torch.Tensor) -> torch.Tensor:
         """
-        Compute Power Delay Profile from CSI data using IFFT
+        Power Delay Profile computation using IFFT - each CSI sequence separately
         
         Args:
             csi_data: CSI data tensor (complex)
@@ -101,49 +114,25 @@ class PDPLoss(nn.Module):
             pdp: Power delay profile tensor
                 Shape: (..., fft_size)
         """
-        device = csi_data.device
+        # Save original shape
         original_shape = csi_data.shape
         
-        # Flatten all dimensions except the last one (subcarriers)
-        if len(original_shape) > 1:
-            # Reshape to (batch_size, N) where batch_size is product of all dims except last
-            batch_size = torch.prod(torch.tensor(original_shape[:-1])).item()
-            N = original_shape[-1]
-            csi_flat = csi_data.reshape(batch_size, N)
+        # Handle empty input edge case
+        if csi_data.numel() == 0:
+            return torch.zeros(original_shape[:-1] + (self.fft_size,), device=csi_data.device)
+        
+        # Zero-pad or truncate each CSI sequence to fft_size
+        if csi_data.shape[-1] < self.fft_size:
+            # Zero-pad each sequence
+            pad_size = self.fft_size - csi_data.shape[-1]
+            padded_csi = F.pad(csi_data, (0, pad_size), mode='constant', value=0)
         else:
-            batch_size = 1
-            N = original_shape[0]
-            csi_flat = csi_data.unsqueeze(0)
+            # Truncate each sequence
+            padded_csi = csi_data[..., :self.fft_size]
         
-        # Validate dimensions
-        if batch_size <= 0:
-            raise ValueError(f"Invalid batch_size: {batch_size}, original_shape: {original_shape}")
-        if N <= 0:
-            raise ValueError(f"Invalid number of subcarriers: {N}, original_shape: {original_shape}")
-        if self.fft_size <= 0:
-            raise ValueError(f"Invalid fft_size: {self.fft_size}")
-        
-        # Zero-pad to fft_size for each batch
-        if N >= self.fft_size:
-            # If we have more data than FFT size, truncate
-            padded_csi = csi_flat[:, :self.fft_size]
-        else:
-            # Zero-pad to fft_size
-            padded_csi = torch.zeros(batch_size, self.fft_size, dtype=csi_data.dtype, device=device)
-            padded_csi[:, :N] = csi_flat
-        
-        # Compute IFFT along the last dimension
+        # Compute IFFT for each CSI sequence separately (along the last dimension)
         time_domain = torch.fft.ifft(padded_csi, dim=-1)
-        
-        # Compute power delay profile
         pdp = torch.abs(time_domain) ** 2
-        
-        # Reshape back to original shape (except last dim is now fft_size)
-        if len(original_shape) > 1:
-            new_shape = original_shape[:-1] + (self.fft_size,)
-            pdp = pdp.reshape(new_shape)
-        else:
-            pdp = pdp.squeeze(0)
         
         return pdp
     
@@ -162,38 +151,86 @@ class PDPLoss(nn.Module):
     def _compute_delay_loss(self, pdp_pred: torch.Tensor, 
                            pdp_target: torch.Tensor) -> torch.Tensor:
         """
-        Compute dominant path delay loss using soft argmax for differentiability
+        Improved delay loss computation with adaptive temperature scaling
         """
-        # Handle multi-dimensional PDPs by working on the last dimension
-        original_shape = pdp_pred.shape
-        last_dim_size = original_shape[-1]
-        
-        # Create indices for the last dimension
-        indices = torch.arange(last_dim_size, dtype=torch.float32, device=pdp_pred.device)
+        # Get device for tensor operations
+        device = pdp_pred.device
         
         # Flatten all dimensions except the last one
-        if len(original_shape) > 1:
-            batch_size = torch.prod(torch.tensor(original_shape[:-1])).item()
-            pdp_pred_flat = pdp_pred.reshape(batch_size, last_dim_size)
-            pdp_target_flat = pdp_target.reshape(batch_size, last_dim_size)
-            
-            # Expand indices to match batch size
-            indices = indices.unsqueeze(0).expand(batch_size, -1)
-        else:
-            pdp_pred_flat = pdp_pred.unsqueeze(0)
-            pdp_target_flat = pdp_target.unsqueeze(0)
-            indices = indices.unsqueeze(0)
+        original_shape = pdp_pred.shape
+        pdp_pred_flat = pdp_pred.reshape(-1, original_shape[-1])
+        pdp_target_flat = pdp_target.reshape(-1, original_shape[-1])
         
-        # Soft argmax for predicted PDP (along last dimension)
-        pred_weights = torch.softmax(pdp_pred_flat * 10, dim=-1)  # Temperature scaling
-        pred_soft_idx = torch.sum(indices * pred_weights, dim=-1)
+        # Create delay indices with proper device placement
+        indices = torch.arange(original_shape[-1], dtype=torch.float32, device=device)
         
-        # Soft argmax for target PDP (along last dimension)
-        target_weights = torch.softmax(pdp_target_flat * 10, dim=-1)
-        target_soft_idx = torch.sum(indices * target_weights, dim=-1)
+        # Adaptive temperature scaling based on PDP dynamic range
+        pred_range = pdp_pred_flat.max(dim=-1, keepdim=True)[0] - pdp_pred_flat.min(dim=-1, keepdim=True)[0]
+        target_range = pdp_target_flat.max(dim=-1, keepdim=True)[0] - pdp_target_flat.min(dim=-1, keepdim=True)[0]
         
-        # Compute delay difference (normalized by FFT size)
-        delay_diff = torch.abs(pred_soft_idx - target_soft_idx) / self.fft_size
+        # Avoid division by zero
+        pred_range = torch.clamp(pred_range, min=1e-8)
+        target_range = torch.clamp(target_range, min=1e-8)
         
-        # Return mean across all batch dimensions
+        # Dynamic temperature parameters for better stability
+        pred_temp = 10.0 / pred_range
+        target_temp = 10.0 / target_range
+        
+        # Soft argmax with improved numerical stability using log-space computation
+        pred_logits = pdp_pred_flat * pred_temp - torch.logsumexp(pdp_pred_flat * pred_temp, dim=-1, keepdim=True)
+        pred_weights = torch.exp(pred_logits)
+        
+        target_logits = pdp_target_flat * target_temp - torch.logsumexp(pdp_target_flat * target_temp, dim=-1, keepdim=True)
+        target_weights = torch.exp(target_logits)
+        
+        # Compute weighted delay indices
+        pred_delay = torch.sum(indices * pred_weights, dim=-1)
+        target_delay = torch.sum(indices * target_weights, dim=-1)
+        
+        # Normalized delay difference
+        delay_diff = torch.abs(pred_delay - target_delay) / original_shape[-1]
+        
         return torch.mean(delay_diff)
+    
+    def compute_pdp_loss(self, predicted_csi: torch.Tensor, target_csi: torch.Tensor) -> torch.Tensor:
+        """
+        Public interface for computing PDP loss - convenient for external testing
+        
+        Args:
+            predicted_csi: Predicted CSI tensor (complex)
+                          Shape: Any shape with last dimension as subcarriers
+            target_csi: Target CSI tensor (complex)  
+                       Shape: Same as predicted_csi
+        
+        Returns:
+            loss: Computed PDP loss value (scalar tensor)
+        """
+        return self.forward(predicted_csi, target_csi)
+    
+    def compute_pdp_only(self, csi_data: torch.Tensor) -> torch.Tensor:
+        """
+        Public interface for computing PDP from CSI data only (without loss calculation)
+        Useful for analysis and visualization
+        
+        Args:
+            csi_data: CSI data tensor (complex)
+                     Shape: Any shape with last dimension as subcarriers
+        
+        Returns:
+            pdp: Power delay profile tensor
+                Shape: Same as input except last dimension becomes fft_size
+        """
+        # Ensure complex tensor
+        if not csi_data.is_complex():
+            csi_data = torch.view_as_complex(
+                torch.stack([csi_data, torch.zeros_like(csi_data)], dim=-1)
+            )
+        
+        # Compute PDP
+        pdp = self._compute_pdp(csi_data)
+        
+        # Normalize if required
+        if self.normalize_pdp:
+            pdp = self._normalize_pdp(pdp)
+            
+        return pdp

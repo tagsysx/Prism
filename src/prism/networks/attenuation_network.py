@@ -87,55 +87,44 @@ class AttenuationNetwork(nn.Module):
         self.layer_norms = nn.ModuleList([
             nn.LayerNorm(self.hidden_dim) for _ in range(self.num_layers - 1)
         ])
-        
+    
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Forward pass through the AttenuationNetwork.
+        Forward pass returning both attenuation coefficients and feature vectors.
         
         Args:
-            x: Input tensor of shape (batch_size, input_dim) containing PE-encoded positions
+            x: Input tensor of shape (batch_size, input_dim) - PE-encoded positions
             
         Returns:
-            Tuple of:
-            - attenuation_coeff: Complex attenuation coefficient ρ(P) of shape (batch_size, attenuation_dim)
-            - feature_vector: Feature vector F(P) of shape (batch_size, feature_dim)
+            Tuple of (attenuation_coefficients, feature_vectors)
+            - attenuation_coefficients: shape (batch_size, output_dim)
+            - feature_vectors: shape (batch_size, feature_dim)
         """
-        batch_size = x.shape[0]
-        
-        # Input layer
+        # Existing network processing
         h = self.input_layer(x)
-        h = self.layer_norms[0](h)
         h = self.activation(h)
         
-        # Hidden layers with shortcuts
-        shortcut_idx = 0
-        for i, layer in enumerate(self.hidden_layers):
-            if self.use_shortcuts and i > 0 and shortcut_idx < len(self.hidden_layers) // 2:
-                # Apply shortcut connection
-                shortcut = self.hidden_layers[shortcut_idx + len(self.hidden_layers) // 2]
-                h_shortcut = shortcut(h)
-                h = h + h_shortcut
-                shortcut_idx += 1
-            
+        for layer in self.hidden_layers:
             h = layer(h)
-            if i + 1 < len(self.layer_norms):
-                h = self.layer_norms[i + 1](h)
             h = self.activation(h)
         
-        # Output heads
-        # Attenuation coefficient ρ(P) = ln(ΔA) + j*Δφ
-        attenuation_raw = self.attenuation_head(h)  # (batch_size, 2*output_dim)
-        attenuation_raw = attenuation_raw.view(batch_size, self.output_dim, 2)
+        # Compute separate outputs
+        attenuation_raw = self.attenuation_head(h)  # Shape: [batch_size, 2 * output_dim]
+        features = self.feature_head(h)             # Shape: [batch_size, feature_dim]
         
-        # Convert to complex tensor: ρ(P) = ln(ΔA) + j*Δφ
-        ln_delta_a = attenuation_raw[..., 0].to(torch.float32)  # ln(ΔA) - amplitude loss
-        delta_phi = attenuation_raw[..., 1].to(torch.float32)   # Δφ - phase rotation
-        attenuation_coeff = torch.complex(ln_delta_a, delta_phi)
+        # Convert attenuation from real-valued [2*R] to complex [R]
+        batch_size = attenuation_raw.shape[0]
+        attenuation_reshaped = attenuation_raw.view(batch_size, self.output_dim, 2)
+        real_part = attenuation_reshaped[..., 0]  # Shape: [batch_size, output_dim]
+        imag_part = attenuation_reshaped[..., 1]  # Shape: [batch_size, output_dim]
+        # Use alternative complex tensor creation to avoid PyTorch compatibility issues
+        # Ensure float32 dtype for numerical stability
+        real_part = real_part.to(torch.float32)
+        imag_part = imag_part.to(torch.float32)
+        attenuation = real_part + 1j * imag_part  # Shape: [batch_size, output_dim] - Complex64
         
-        # Feature vector F(P)
-        feature_vector = self.feature_head(h)  # (batch_size, feature_dim)
         
-        return attenuation_coeff, feature_vector
+        return attenuation, features
     
     def get_feature_dim(self) -> int:
         """Get the feature vector dimension."""

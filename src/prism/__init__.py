@@ -9,22 +9,23 @@ __version__ = "2.0.0"
 __author__ = "Prism Project Team"
 __email__ = "contact@prism-project.org"
 
-from .ray_tracer import (
-    Ray,
-    RayTracer
+from .tracers import (
+    NaiveRayTracer,
+    NNRayTracer,
+    LowRankRayTracer
 )
 
-from .spatial_spectrum import (
-    csi_to_spatial_spectrum,
-    calculate_spatial_spectrum,
-    calculate_bartlett_spectrum,
-    calculate_capon_spectrum,
-    calculate_music_spectrum,
-    plot_spatial_spectrum,
-    find_peak_directions,
-    generate_steering_vector,
-    fuse_subcarrier_spectrums
-)
+# from .spatial_spectrum import (
+#     csi_to_spatial_spectrum,
+#     calculate_spatial_spectrum,
+#     calculate_bartlett_spectrum,
+#     calculate_capon_spectrum,
+#     calculate_music_spectrum,
+#     plot_spatial_spectrum,
+#     find_peak_directions,
+#     generate_steering_vector,
+#     fuse_subcarrier_spectrums
+# )
 
 from .loss import (
     LossFunction,
@@ -36,13 +37,11 @@ from .loss import (
 
 from .networks import (
     AttenuationNetwork,
-    FrequencyNetwork,
     AntennaEmbeddingCodebook,
     AntennaNetwork,
     RadianceNetwork,
     PrismNetwork,
     AttenuationNetworkConfig,
-    FrequencyNetworkConfig,
     AntennaEmbeddingCodebookConfig,
     AntennaNetworkConfig,
     RadianceNetworkConfig,
@@ -57,8 +56,8 @@ from .training_interface import (
 
 __all__ = [
     # Core ray tracing
-    'Ray',
     'RayTracer',
+    'LowRankRayTracer',
     
     # Spatial spectrum estimation
     'csi_to_spatial_spectrum',
@@ -80,13 +79,11 @@ __all__ = [
     
     # Neural networks
     'AttenuationNetwork',
-    'FrequencyNetwork',
     'AntennaEmbeddingCodebook',
     'AntennaNetwork',
     'RadianceNetwork',
     'PrismNetwork',
     'AttenuationNetworkConfig',
-    'FrequencyNetworkConfig',
     'AntennaEmbeddingCodebookConfig',
     'AntennaNetworkConfig',
     'RadianceNetworkConfig',

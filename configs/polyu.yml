@@ -1,0 +1,162 @@
+base_station:
+  antenna_embedding_dim: 32
+  antenna_type: mimo
+  num_antennas: 1  # PolyU has 1 BS antenna
+  antenna_array:
+    configuration: "1x1"  # 1x1 = 1 antenna total
+  ofdm:
+    bandwidth: 20.0e6  # PolyU WiFi bandwidth: 20 MHz
+    center_frequency: 2.4e9  # PolyU WiFi frequency: 2.4 GHz
+    fft_size: 64
+    guard_band_ratio: 0.0
+    num_guard_carriers: 0
+    num_subcarriers: 64  # PolyU has 64 subcarriers
+    subcarrier_spacing: 312.5e3  # PolyU WiFi subcarrier spacing: 312.5 kHz
+  polarization: single
+
+input:
+  dataset_path: data/polyu/data.h5  # PolyU dataset path
+  random_seed: 42
+  scenario: polyu_wifi
+  subcarrier_sampling:
+    antenna_consistent: true
+    sampling_method: uniform
+    sampling_ratio: 1
+  train_ratio: 0.8
+
+neural_networks:
+  antenna_codebook:
+    embedding_dim: 32
+    initialization: normal
+    normalize: false
+    num_bs_antennas: 1  # PolyU has 1 BS antenna
+    std: 0.1
+  attenuation_network:
+    activation: relu
+    feature_dim: 128
+    hidden_dim: 64
+    num_layers: 3
+    output_dim: 32
+    use_shortcuts: true
+  enabled: true
+  frequency_codebook:
+    basis_dim: 32
+    initialization: complex_normal
+    std: 0.1
+    normalize: false
+  prism_network:
+    antenna_embedding_dim: 32
+    azimuth_divisions: 18
+    elevation_divisions: 6
+    num_bs_antennas: 1  # PolyU has 1 BS antenna
+  feature_dim: 128
+  max_ray_length: 250.0
+  num_bs_antennas: 1  # PolyU has 1 BS antenna
+  num_sampling_points: 16
+  num_subcarriers: 64  # PolyU has 64 subcarriers
+  use_ipe_encoding: true
+  use_mixed_precision: false
+  radiance_network:
+    activation: relu
+    antenna_embedding_dim: 32
+    feature_dim: 128
+    hidden_dim: 64
+    num_layers: 2
+    output_dim: 32
+    ue_position_dim: 63
+    view_direction_dim: 63
+
+output:
+  base_dir: results/polyu
+  training:
+    checkpoint_dir: '{{base_dir}}/training/checkpoints'
+    log_dir: '{{base_dir}}/training/logs'
+    log_file: '{{base_dir}}/training/logs/training.log'
+    log_level: INFO
+    models_dir: '{{base_dir}}/training/models'
+    tensorboard_dir: '{{base_dir}}/training/tensorboard'
+
+system:
+  device: cuda
+  fallback_to_cpu: true
+
+transformer:
+  use_enhancement: false
+  d_model: 64
+  n_layers: 1
+  n_heads: 2
+  d_ff: 256
+  dropout_rate: 0.1
+  max_seq_len: 5000
+  local_window_size: 8
+  global_interval: 2
+
+csi_enhancement:
+  use_enhancement: true
+  d_model: 256
+  n_layers: 4
+  n_heads: 16
+  d_ff: 1024
+  dropout_rate: 0.05
+  # Add smoothing regularization
+  smoothing_weight: 0.1
+  # Add magnitude constraint
+  magnitude_constraint: true
+  max_magnitude: 5.0
+
+training:
+  num_epochs: 10
+  batch_size: 8
+  checkpoint_frequency: 5
+  enable_gradient_checkpointing: true
+  epoch_save_interval: 1
+  gradient_accumulation_steps: 1
+  learning_rate: 0.00015
+  loss:
+    csi_loss:
+      enabled: true
+      magnitude_weight: 1.0
+      phase_weight: 1.0
+      normalize_weights: true
+    csi_weight: 1.0
+    pdp_loss:
+      enabled: true
+      fft_size: 128  # Adjusted for 64 subcarriers
+      normalize_pdp: true
+      type: hybrid
+    pdp_weight: 0.3
+    regularization_loss:
+      enabled: false
+    regularization_weight: 0.0
+    spatial_spectrum_loss:
+      algorithm: bartlett
+      enabled: false
+      fusion_method: average
+      loss_type: ssim
+      phi_range:
+      - 0.0
+      - 10.0
+      - 350.0
+      ssim_k1: 0.01
+      ssim_k2: 0.03
+      ssim_window_size: 11
+      theta_range:
+      - 0
+      - 5.0
+      - 90.0
+      # Subcarrier sampling optimization
+      num_sampled_subcarriers: 1
+      use_covariance_bartlett: false
+      use_frequency_dependent_steering: true
+    spatial_spectrum_weight: 0.0
+  antenna_batch_size: 8
+  auto_checkpoint: true
+  micro_antenna_batching: true
+  progressive_cleanup: true
+  ray_chunk_size: 10
+  ue_chunk_size: 1
+  weight_decay: 1.0e-05
+
+user_equipment:
+  num_ue_antennas: 8  # PolyU has 8 UE antennas
+  target_antenna_index: 0

@@ -277,3 +277,6 @@ docker-compose*.yml
 .cache/
 .pytest_cache/
 .mypy_cache/
+
+# Temporary debug tools directory
+.temp/

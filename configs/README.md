@@ -417,10 +417,9 @@ training:
     
     # CSI Loss Configuration
     csi_loss:
-      type: 'hybrid'                 # Loss type: 'mse', 'mae', 'complex_mse', 'magnitude_phase', 'hybrid'
-      phase_weight: 2.0              # Weight for phase component (increased for RF/beamforming applications)
-      magnitude_weight: 1.0          # Weight for magnitude component (maintained)
-      cmse_weight: 0.5               # Weight for CMSE component (reduced to balance)
+      phase_weight: 1.0              # Weight for phase component
+      magnitude_weight: 1.0           # Weight for magnitude component
+      normalize_weights: true         # Whether to normalize weights to sum to 1.0
     
     # PDP Loss Configuration  
     pdp_loss:
@@ -438,9 +437,9 @@ training:
       phi_range: [0.0, 2.0, 360.0]      # Azimuth angle range [min, step, max] in degrees
 ```
 
-**Description**: Comprehensive loss function configuration supporting multiple loss types:
+**Description**: Comprehensive loss function configuration:
 
-- **CSI Loss**: Hybrid loss combining complex MSE, magnitude, and phase components for accurate channel prediction
+- **CSI Loss**: Subcarrier-precise loss addressing complex MSE vs per-subcarrier accuracy paradox for accurate channel prediction
 - **PDP Loss**: Power Delay Profile loss for time-domain validation using FFT-based analysis
 - **Spatial Spectrum Loss**: Optional spatial spectrum loss for direction-of-arrival and beamforming applications
 - **Multi-objective Training**: Configurable weights allow balancing different loss components based on application requirements

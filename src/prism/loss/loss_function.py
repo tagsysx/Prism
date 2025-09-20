@@ -24,11 +24,9 @@ DEFAULT_LOSS_CONFIG = {
     'pdp_weight': 0.3,
     'regularization_weight': 0.01,
     'csi_loss': {
-        'type': 'hybrid',  # 'mse', 'mae', 'complex_mse', 'magnitude_phase', 'hybrid' (correlation disabled)
         'phase_weight': 1.0,
         'magnitude_weight': 1.0,
-        'cmse_weight': 1.0
-        # correlation_weight removed - correlation loss disabled
+        'normalize_weights': True
     },
     'pdp_loss': {
         'type': 'hybrid',  # 'mse', 'delay', 'hybrid' (correlation disabled)
@@ -64,15 +62,13 @@ class LossFunction(nn.Module):
         self.spatial_spectrum_weight = config.get('spatial_spectrum_weight', 0.0)
         self.regularization_weight = config.get('regularization_weight', 0.01)
         
-        # Initialize component losses with reasonable defaults
+        # Initialize component losses with configuration
         csi_config = config.get('csi_loss', {})
         self.csi_enabled = csi_config.get('enabled', True)  # Default enabled for backward compatibility
         self.csi_loss = CSILoss(
-            loss_type=csi_config.get('type', 'hybrid'),
             phase_weight=csi_config.get('phase_weight', 1.0),
             magnitude_weight=csi_config.get('magnitude_weight', 1.0),
-            cmse_weight=csi_config.get('cmse_weight', 1.0)
-            # correlation_weight parameter removed
+            normalize_weights=csi_config.get('normalize_weights', True)
         )
         
         # Initialize PDP loss
@@ -121,30 +117,24 @@ class LossFunction(nn.Module):
         """
         # Initialize total_loss properly to maintain gradients
         # Use a tensor derived from predictions to ensure gradient flow, but ensure it's real
-        total_loss = torch.real(predictions['csi'].sum()) * 0.0  # This maintains gradient connection to predictions
+        total_loss = torch.real(predictions['csi_predictions'].sum()) * 0.0  # This maintains gradient connection to predictions
         loss_components = {}
         
         if masks is None:
             masks = {}
         
-        # CSI loss (hybrid: CMSE + Magnitude + Phase) - correlation component has been removed
-        if ('traced_csi' in predictions and 'traced_csi' in targets and self.csi_enabled):
-            # Convert traced CSI back to tensor format for CSI loss
-            traced_pred = predictions['traced_csi']
-            traced_target = targets['traced_csi']
+        # CSI loss (hybrid: CMSE + Magnitude + Phase) - use original 3D CSI tensors
+        if ('csi' in predictions and 'csi' in targets and self.csi_enabled):
+            # Use original 3D CSI tensors to preserve spatial structure
+            csi_pred = predictions['csi']
+            csi_target = targets['csi']
             
-            # CSI loss expects 1D tensors of traced subcarriers
-            # Handle complex tensors by manually computing MSE to avoid CUDA issues
-            if traced_pred.is_complex():
-                # Compute MSE manually for complex tensors
-                diff = traced_pred - traced_target
-                csi_loss_val = torch.mean(torch.abs(diff) ** 2)
-            else:
-                csi_loss_val = F.mse_loss(traced_pred, traced_target)
+            # Use CSILoss class for comprehensive CSI loss calculation
+            csi_loss_val = self.csi_loss(csi_pred, csi_target)
             total_loss = total_loss + self.csi_weight * csi_loss_val
             loss_components['csi_loss'] = csi_loss_val.item()
         
-        # PDP loss (hybrid: MSE + Delay) - use full CSI for frequency domain analysis, correlation component has been removed
+        # PDP loss (hybrid: MSE + Delay) - use original 3D CSI tensors for frequency domain analysis
         if ('csi' in predictions and 'csi' in targets and 
             self.pdp_enabled and self.pdp_weight > 0):
             pdp_loss_val = self.pdp_loss(

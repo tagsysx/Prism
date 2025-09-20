@@ -252,7 +252,7 @@ Consequently, evaluating $H_f(P_k)$ for any frequency reduces to a simple inner 
 
 The ray-tracing equation simplifies into a compact expression where the frequency dependence is fully separated:
 
-$$\footnotesize
+$$
 \boxed{S_f(P_{\mathrm{RX}}, \omega) \approx
 \left\langle \boldsymbol{\mathcal{U}}^{(1)}(\omega),\ \boldsymbol{\mathcal{V}}^{(1)}(f) \right\rangle
 \left\langle \boldsymbol{\mathcal{U}}^{(2)}(\omega),\ \boldsymbol{\mathcal{V}}^{(2)}(f) \right\rangle}

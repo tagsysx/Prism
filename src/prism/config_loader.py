@@ -1,837 +1,560 @@
 """
-Configuration Loader for Prism Training Interface
+Modern Configuration Loader for Prism Neural Ray Tracing System
 
-This module provides utilities to load and parse configuration files
-for the Prism ray tracing system with the new cleaned configuration structure.
+Completely redesigned configuration loader that matches the current simplified
+configuration structure without legacy compatibility concerns.
 """
 
 import yaml
 import os
 import re
-from typing import Dict, Any, Optional, Tuple
-import torch
 import logging
-import numpy as np
+from typing import Dict, Any, Optional, Union, List
+from pathlib import Path
+from dataclasses import dataclass, field
+import torch
+
+# Import network configuration classes
+from .networks.attenuation_network import AttenuationNetworkConfig
+from .networks.radiance_network import RadianceNetworkConfig
+from .networks.antenna_codebook import AntennaEmbeddingCodebookConfig
+from .networks.prism_network import PrismNetworkConfig
 
 logger = logging.getLogger(__name__)
 
 
-class ConfigLoader:
-    """Configuration loader for Prism training system with updated structure."""
+@dataclass
+class CSILossConfig:
+    """CSI Loss configuration."""
+    enabled: bool = True
+    phase_weight: float = 1.0
+    magnitude_weight: float = 1.0
+    normalize_weights: bool = True
+
+
+@dataclass
+class PDPLossConfig:
+    """PDP Loss configuration."""
+    enabled: bool = True
+    type: str = 'delay'
+    fft_size: int = 2046
+    normalize_pdp: bool = True
+    mse_weight: float = 0.7
+    delay_weight: float = 0.3
+
+
+@dataclass
+class SpatialSpectrumLossConfig:
+    """Spatial Spectrum Loss configuration."""
+    enabled: bool = True
+    algorithm: str = 'bartlett'
+    fusion_method: str = 'average'
+    loss_type: str = 'ssim'
+    theta_range: List[float] = field(default_factory=lambda: [0, 5.0, 90.0])
+    phi_range: List[float] = field(default_factory=lambda: [0.0, 10.0, 360.0])
+    ssim_window_size: int = 11
+    ssim_k1: float = 0.01
+    ssim_k2: float = 0.03
+
+
+@dataclass
+class LossConfig:
+    """Overall loss configuration."""
+    csi_weight: float = 0.7
+    pdp_weight: float = 300.0
+    spatial_spectrum_weight: float = 50.0
+    regularization_weight: float = 0.01
+    csi_loss: CSILossConfig = field(default_factory=CSILossConfig)
+    pdp_loss: PDPLossConfig = field(default_factory=PDPLossConfig)
+    spatial_spectrum_loss: SpatialSpectrumLossConfig = field(default_factory=SpatialSpectrumLossConfig)
+
+
+@dataclass
+class TrainingConfig:
+    """Training configuration."""
+    learning_rate: float = 1e-4
+    weight_decay: float = 1e-4
+    num_epochs: int = 6
+    batch_size: int = 4
+    gradient_accumulation_steps: int = 4
+    auto_checkpoint: bool = True
+    checkpoint_frequency: int = 5
+    epoch_save_interval: int = 1
+    loss: LossConfig = field(default_factory=LossConfig)
+
+
+@dataclass
+class DataConfig:
+    """Data configuration."""
+    enabled: bool = True
+    dataset_path: str = "data/sionna"
+    scenario: str = "P300"
+    ue_antenna_index: int = 0
+    random_seed: int = 42
+    train_ratio: float = 0.8
+    test_ratio: float = 0.2
+    sampling_ratio: float = 0.5
+    sampling_method: str = 'uniform'
+    antenna_consistent: bool = True
+
+
+@dataclass
+class OutputConfig:
+    """Output configuration."""
+    base_dir: str = "results/sionna"
+    format: str = 'hdf5'
+    compression_level: int = 6
+    save_results: bool = True
+    save_training_outputs: bool = True
+    save_ray_tracer_results: bool = True
+    save_csi_predictions: bool = True
+    checkpoint_format: str = 'pytorch'
+    save_optimizer_state: bool = True
+    save_training_history: bool = True
+
+
+class ModernConfigLoader:
+    """
+    Modern configuration loader for Prism system.
     
-    def __init__(self, config_path: str):
+    This loader is designed specifically for the current simplified configuration
+    structure and does not maintain backward compatibility with legacy configurations.
+    """
+    
+    def __init__(self, config_path: Union[str, Path]):
         """
-        Initialize configuration loader.
+        Initialize the configuration loader.
         
         Args:
-            config_path: Path to the configuration file
+            config_path: Path to the YAML configuration file
         """
-        self.config_path = config_path
-        self.config = self._load_config()
-    
-    def _load_config(self) -> Dict[str, Any]:
-        """Load configuration from YAML file and process template variables."""
-        if not os.path.exists(self.config_path):
+        self.config_path = Path(config_path)
+        if not self.config_path.exists():
             raise FileNotFoundError(f"Configuration file not found: {self.config_path}")
         
-        with open(self.config_path, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f)
+        # Load raw configuration
+        self._raw_config = self._load_yaml()
         
         # Process template variables
-        config = self._process_template_variables(config)
+        self._processed_config = self._process_templates(self._raw_config)
         
-        # Validate configuration consistency
-        self._validate_config_consistency(config)
+        # Parse into structured configurations
+        self._parse_configurations()
         
-        logger.info(f"Configuration loaded from: {self.config_path}")
-        return config
+        # Validate configuration
+        self._validate()
+        
+        logger.info(f"Configuration loaded successfully from: {self.config_path}")
     
-    def _process_template_variables(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Process template variables in configuration.
+    def _load_yaml(self) -> Dict[str, Any]:
+        """Load YAML configuration file."""
+        try:
+            with open(self.config_path, 'r', encoding='utf-8') as f:
+                return yaml.safe_load(f)
+        except yaml.YAMLError as e:
+            raise ValueError(f"Invalid YAML in configuration file: {e}")
+        except Exception as e:
+            raise IOError(f"Failed to read configuration file: {e}")
+    
+    def _process_templates(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Process template variables in configuration."""
+        # Get base directory for template processing
+        base_dir = config.get('output', {}).get('base_dir', 'results/sionna')
         
-        Supports variables like:
-        - {{base_dir}} - base results directory
-        - {{training_dir}} - training output directory
-        - {{testing_dir}} - testing output directory
-        - {{checkpoint_dir}} - checkpoint directory
-        - {{tensorboard_dir}} - tensorboard directory
-        - {{models_dir}} - models directory
-        - {{logs_dir}} - logs directory
-        
-        Args:
-            config: Raw configuration dictionary
-            
-        Returns:
-            Configuration with template variables resolved
-        """
         # Define template variables
-        template_vars = self._get_template_variables(config)
+        template_vars = {
+            'base_dir': base_dir,
+            'training_dir': f"{base_dir}/training",
+            'testing_dir': f"{base_dir}/testing"
+        }
         
-        # Recursively process all string values in config
-        processed_config = self._replace_variables_recursive(config, template_vars)
-        
-        # Add backward compatibility: add output_dir to training and testing sections
-        processed_config = self._add_backward_compatibility(processed_config, template_vars)
-        
-        logger.info(f"Template variables processed: {list(template_vars.keys())}")
-        return processed_config
+        # Recursively replace template variables
+        return self._replace_templates_recursive(config, template_vars)
     
-    def _add_backward_compatibility(self, config: Dict[str, Any], template_vars: Dict[str, str]) -> Dict[str, Any]:
-        """Add backward compatibility fields that may be expected by existing code."""
-        # Add output_dir to training section for backward compatibility
-        if 'output' in config and 'training' in config['output']:
-            if 'output_dir' not in config['output']['training']:
-                config['output']['training']['output_dir'] = template_vars['training_dir']
-        
-        # Add output_dir to testing section for backward compatibility
-        if 'output' in config and 'testing' in config['output']:
-            if 'output_dir' not in config['output']['testing']:
-                config['output']['testing']['output_dir'] = template_vars['testing_dir']
-        
-        return config
-    
-    def _get_template_variables(self, config: Dict[str, Any]) -> Dict[str, str]:
-        """Get template variables and their values."""
-        template_vars = {}
-        
-        # Get base directory (default to 'results')
-        base_dir = config.get('output', {}).get('base_dir', 'results')
-        template_vars['base_dir'] = base_dir
-        
-        # Define training and testing output directories
-        template_vars['training_dir'] = f"{base_dir}/training"
-        template_vars['testing_dir'] = f"{base_dir}/testing"
-        
-        # Define common subdirectories for training
-        template_vars['checkpoint_dir'] = f"{template_vars['training_dir']}/checkpoints"
-        template_vars['tensorboard_dir'] = f"{template_vars['training_dir']}/tensorboard"
-        template_vars['models_dir'] = f"{template_vars['training_dir']}/models"
-        template_vars['logs_dir'] = f"{template_vars['training_dir']}/logs"
-        
-        return template_vars
-    
-    def _replace_variables_recursive(self, obj: Any, template_vars: Dict[str, str]) -> Any:
-        """Recursively replace template variables in configuration object."""
+    def _replace_templates_recursive(self, obj: Any, template_vars: Dict[str, str]) -> Any:
+        """Recursively replace template variables in configuration."""
         if isinstance(obj, dict):
-            return {key: self._replace_variables_recursive(value, template_vars) 
+            return {key: self._replace_templates_recursive(value, template_vars) 
                    for key, value in obj.items()}
         elif isinstance(obj, list):
-            return [self._replace_variables_recursive(item, template_vars) 
+            return [self._replace_templates_recursive(item, template_vars) 
                    for item in obj]
         elif isinstance(obj, str):
-            return self._replace_variables_in_string(obj, template_vars)
+            # Replace {{variable}} patterns
+            pattern = r'\{\{(\w+)\}\}'
+            def replace_var(match):
+                var_name = match.group(1)
+                return template_vars.get(var_name, match.group(0))
+            return re.sub(pattern, replace_var, obj)
         else:
             return obj
     
-    def _replace_variables_in_string(self, text: str, template_vars: Dict[str, str]) -> str:
-        """Replace template variables in a string."""
-        # Pattern to match {{variable_name}}
-        pattern = r'\{\{(\w+)\}\}'
+    def _parse_configurations(self) -> None:
+        """Parse configuration into structured dataclasses."""
+        # Neural network configurations
+        nn_config = self._processed_config.get('neural_networks', {})
         
-        def replace_var(match):
-            var_name = match.group(1)
-            if var_name in template_vars:
-                return template_vars[var_name]
-            else:
-                logger.warning(f"Unknown template variable: {var_name}")
-                return match.group(0)  # Return original if not found
+        # Use network configuration classes directly
+        self.prism_network = PrismNetworkConfig(**nn_config.get('prism_network', {}))
+        self.attenuation_network = AttenuationNetworkConfig(**nn_config.get('attenuation_network', {}))
+        self.radiance_network = RadianceNetworkConfig(**nn_config.get('radiance_network', {}))
+        self.antenna_codebook = AntennaEmbeddingCodebookConfig(**nn_config.get('antenna_codebook', {}))
         
-        return re.sub(pattern, replace_var, text)
-    
-    # ==================== Main Configuration Sections ====================
-    
-    def get_neural_networks_config(self) -> Dict[str, Any]:
-        """Get neural networks configuration."""
-        return self.config.get('neural_networks', {})
-    
-    def get_base_station_config(self) -> Dict[str, Any]:
-        """Get base station configuration."""
-        return self.config.get('base_station', {})
-    
-    def get_user_equipment_config(self) -> Dict[str, Any]:
-        """Get user equipment configuration."""
-        return self.config.get('user_equipment', {})
-    
-    def get_ray_tracing_config(self) -> Dict[str, Any]:
-        """Get ray tracing configuration (unified section)."""
-        return self.config.get('ray_tracing', {})
-    
-    def get_system_config(self) -> Dict[str, Any]:
-        """Get system configuration (includes device, performance, etc.)."""
-        return self.config.get('system', {})
-    
-    def get_training_config(self) -> Dict[str, Any]:
-        """Get training configuration."""
-        return self.config.get('training', {})
-    
-    def get_testing_config(self) -> Dict[str, Any]:
-        """Get testing configuration."""
-        return self.config.get('testing', {})
-    
-    def get_output_config(self) -> Dict[str, Any]:
-        """Get output configuration."""
-        return self.config.get('output', {})
-    
-    # ==================== Specific Configuration Getters ====================
-    
-    def get_angular_sampling_config(self) -> Dict[str, Any]:
-        """Get angular sampling configuration."""
-        ray_tracing_config = self.get_ray_tracing_config()
-        return ray_tracing_config.get('angular_sampling', {})
-    
-    def get_radial_sampling_config(self) -> Dict[str, Any]:
-        """Get radial sampling configuration."""
-        ray_tracing_config = self.get_ray_tracing_config()
-        return ray_tracing_config.get('radial_sampling', {})
-    
-    def get_subcarrier_sampling_config(self) -> Dict[str, Any]:
-        """Get subcarrier sampling configuration."""
-        ray_tracing_config = self.get_ray_tracing_config()
-        return ray_tracing_config.get('subcarrier_sampling', {})
-    
-    def get_scene_bounds_config(self) -> Dict[str, Any]:
-        """Get scene bounds configuration."""
-        ray_tracing_config = self.get_ray_tracing_config()
-        return ray_tracing_config.get('scene_bounds', {})
-    
-    def get_mixed_precision_config(self) -> Dict[str, Any]:
-        """Get mixed precision configuration."""
-        system_config = self.get_system_config()
-        return system_config.get('mixed_precision', {})
-    
-    def get_cuda_config(self) -> Dict[str, Any]:
-        """Get CUDA-specific configuration."""
-        system_config = self.get_system_config()
-        return system_config.get('cuda', {})
-    
-    def get_cpu_config(self) -> Dict[str, Any]:
-        """Get CPU-specific configuration."""
-        system_config = self.get_system_config()
-        return system_config.get('cpu', {})
-    
-    # ==================== Device and Performance ====================
-    
-    def get_device(self) -> str:
-        """Get the primary device configuration."""
-        system_config = self.get_system_config()
-        device = system_config.get('device', 'cpu')
+        # Training configuration
+        training_config = self._processed_config.get('training', {})
+        loss_config = training_config.get('loss', {})
         
-        # Validate device availability
-        if device == 'cuda' and not torch.cuda.is_available():
-            logger.warning("CUDA requested but not available, falling back to CPU")
-            device = 'cpu'
+        # Parse loss configurations
+        csi_loss = self._parse_dataclass(
+            CSILossConfig, loss_config.get('csi_loss', {})
+        )
         
-        return device
+        pdp_loss = self._parse_dataclass(
+            PDPLossConfig, loss_config.get('pdp_loss', {})
+        )
+        
+        spatial_spectrum_loss = self._parse_dataclass(
+            SpatialSpectrumLossConfig, loss_config.get('spatial_spectrum_loss', {})
+        )
+        
+        loss = self._parse_dataclass(
+            LossConfig, loss_config, {
+                'csi_loss': csi_loss,
+                'pdp_loss': pdp_loss,
+                'spatial_spectrum_loss': spatial_spectrum_loss
+            }
+        )
+        
+        self.training = self._parse_dataclass(
+            TrainingConfig, training_config, {'loss': loss}
+        )
+        
+        # Data configuration
+        data_config = self._processed_config.get('data', {})
+        subcarrier_config = data_config.get('subcarrier_sampling', {})
+        self.data = self._parse_dataclass(
+            DataConfig, {**data_config, **subcarrier_config}
+        )
+        
+        # Output configuration
+        self.output = self._parse_dataclass(
+            OutputConfig, self._processed_config.get('output', {})
+        )
     
-    def get_ray_tracing_mode(self) -> str:
-        """Get ray tracing execution mode."""
-        system_config = self.get_system_config()
-        return system_config.get('ray_tracing_mode', 'hybrid')
-    
-    def is_mixed_precision_enabled(self) -> bool:
-        """Check if mixed precision is globally enabled."""
-        mixed_precision_config = self.get_mixed_precision_config()
-        return mixed_precision_config.get('enabled', False)
-    
-    def should_fallback_to_cpu(self) -> bool:
-        """Check if should fallback to CPU when CUDA fails."""
-        system_config = self.get_system_config()
-        return system_config.get('fallback_to_cpu', True)
-    
-    # ==================== Ray Tracer Configuration Creation ====================
-    
-    def create_ray_tracer_config(self) -> Dict[str, Any]:
-        """
-        Create ray tracing configuration dictionary for TrainingInterface.
+    def _parse_dataclass(self, dataclass_type, config_dict: Dict[str, Any], 
+                        overrides: Optional[Dict[str, Any]] = None) -> Any:
+        """Parse configuration dictionary into dataclass."""
+        # Get dataclass fields
+        field_names = {f.name for f in dataclass_type.__dataclass_fields__.values()}
         
-        Returns:
-            Dictionary containing ray tracing configuration
-        """
-        ray_tracing_config = self.get_ray_tracing_config()
+        # Filter config to only include valid fields
+        filtered_config = {k: v for k, v in config_dict.items() if k in field_names}
         
-        # Return the entire ray_tracing section as it's already well-structured
-        return ray_tracing_config
-    
-    def create_system_config(self) -> Dict[str, Any]:
-        """
-        Create system configuration dictionary for TrainingInterface.
+        # Apply overrides
+        if overrides:
+            filtered_config.update(overrides)
         
-        Returns:
-            Dictionary containing system configuration
-        """
-        system_config = self.get_system_config()
-        
-        # Return the entire system section
-        return system_config
-    
-    def create_cpu_ray_tracer_kwargs(self) -> Dict[str, Any]:
-        """
-        Create keyword arguments for CPURayTracer initialization.
-        
-        Returns:
-            Dictionary of keyword arguments for CPURayTracer
-        """
-        ray_tracing_config = self.get_ray_tracing_config()
-        angular_sampling = self.get_angular_sampling_config()
-        radial_sampling = self.get_radial_sampling_config()
-        cpu_config = self.get_cpu_config()
-        scene_bounds = self.get_scene_bounds_config()
-        
-        kwargs = {
-            # CPU-specific parameters
-            'max_workers': cpu_config.get('num_workers', 4),
-            
-            # Common parameters
-            'azimuth_divisions': angular_sampling.get('azimuth_divisions', 18),
-            'elevation_divisions': angular_sampling.get('elevation_divisions', 9),
-            'max_ray_length': ray_tracing_config.get('max_ray_length', 200.0),
-            'scene_bounds': scene_bounds,
-            'signal_threshold': ray_tracing_config.get('signal_threshold', 1e-6),
-            'enable_early_termination': ray_tracing_config.get('enable_early_termination', True),
-            'top_k_directions': angular_sampling.get('top_k_directions', 32),
-            'uniform_samples': radial_sampling.get('num_sampling_points', 64),
-            'resampled_points': radial_sampling.get('resampled_points', 32)
-        }
-        
-        return kwargs
-    
-    def create_cuda_ray_tracer_kwargs(self) -> Dict[str, Any]:
-        """
-        Create keyword arguments for CUDARayTracer initialization.
-        
-        Returns:
-            Dictionary of keyword arguments for CUDARayTracer
-        """
-        ray_tracing_config = self.get_ray_tracing_config()
-        angular_sampling = self.get_angular_sampling_config()
-        radial_sampling = self.get_radial_sampling_config()
-        mixed_precision = self.get_mixed_precision_config()
-        scene_bounds = self.get_scene_bounds_config()
-        
-        kwargs = {
-            # CUDA-specific parameters
-            'use_mixed_precision': mixed_precision.get('enabled', True),
-            
-            # Common parameters
-            'azimuth_divisions': angular_sampling.get('azimuth_divisions', 18),
-            'elevation_divisions': angular_sampling.get('elevation_divisions', 9),
-            'max_ray_length': ray_tracing_config.get('max_ray_length', 200.0),
-            'scene_bounds': scene_bounds,
-            'signal_threshold': ray_tracing_config.get('signal_threshold', 1e-6),
-            'enable_early_termination': ray_tracing_config.get('enable_early_termination', True),
-            'top_k_directions': angular_sampling.get('top_k_directions', 32),
-            'uniform_samples': radial_sampling.get('num_sampling_points', 64),
-            'resampled_points': radial_sampling.get('resampled_points', 32)
-        }
-        
-        return kwargs
-    
-    # ==================== Neural Network Configuration ====================
-    
-    def get_prism_network_config(self) -> Dict[str, Any]:
-        """Get PrismNetwork configuration."""
-        nn_config = self.get_neural_networks_config()
-        
-        # Combine all network configurations for PrismNetwork
-        prism_config = {
-            'attenuation_network': nn_config.get('attenuation_network', {}),
-            'attenuation_decoder': nn_config.get('attenuation_decoder', {}),
-            'antenna_codebook': nn_config.get('antenna_codebook', {}),
-            'antenna_network': nn_config.get('antenna_network', {}),
-            'radiance_network': nn_config.get('radiance_network', {})
-        }
-        
-        return prism_config
-    
-    def get_network_mixed_precision_config(self, network_name: str) -> bool:
-        """Get mixed precision configuration for a specific network."""
-        nn_config = self.get_neural_networks_config()
-        network_config = nn_config.get(network_name, {})
-        
-        # Check network-specific setting first, then fall back to global setting
-        network_specific = network_config.get('use_mixed_precision', None)
-        if network_specific is not None:
-            return network_specific
-        
-        # Fall back to global mixed precision setting
-        return self.is_mixed_precision_enabled()
-    
-    # ==================== Scene and Bounds Utilities ====================
-    
-    def get_scene_bounds_tensor(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Get scene bounds as PyTorch tensors.
-        
-        Returns:
-            Tuple of (scene_min, scene_max) tensors
-        """
-        scene_bounds = self.get_scene_bounds_config()
-        
-        if 'min' not in scene_bounds or 'max' not in scene_bounds:
-            # Default scene bounds
-            scene_min = torch.tensor([-100.0, -100.0, 0.0], dtype=torch.float32)
-            scene_max = torch.tensor([100.0, 100.0, 30.0], dtype=torch.float32)
-        else:
-            scene_min = torch.tensor(scene_bounds['min'], dtype=torch.float32)
-            scene_max = torch.tensor(scene_bounds['max'], dtype=torch.float32)
-        
-        return scene_min, scene_max
-    
-    def calculate_max_ray_length(self, margin: float = 1.2) -> float:
-        """
-        Calculate maximum ray length from scene bounds.
-        
-        Args:
-            margin: Safety margin multiplier
-            
-        Returns:
-            Maximum ray length in meters
-        """
-        scene_bounds = self.get_scene_bounds_config()
-        
-        if 'min' not in scene_bounds or 'max' not in scene_bounds:
-            # Use configured max_ray_length or default
-            ray_tracing_config = self.get_ray_tracing_config()
-            return ray_tracing_config.get('max_ray_length', 200.0)
-        
-        # Calculate diagonal distance of the scene
-        scene_min = np.array(scene_bounds['min'])
-        scene_max = np.array(scene_bounds['max'])
-        scene_size = scene_max - scene_min
-        diagonal_length = np.sqrt(np.sum(scene_size**2))
-        
-        return diagonal_length * margin
-    
-    # ==================== Training Configuration ====================
-    
-    def get_checkpoint_config(self) -> Dict[str, Any]:
-        """Get checkpoint configuration."""
-        training_config = self.get_training_config()
-        output_config = self.get_output_config()
-        
-        checkpoint_config = {}
-        
-        # From training config
-        if 'checkpoint_dir' in training_config:
-            checkpoint_config['checkpoint_dir'] = training_config['checkpoint_dir']
-        
-        if 'auto_checkpoint' in training_config:
-            checkpoint_config['auto_checkpoint'] = training_config['auto_checkpoint']
-        
-        if 'checkpoint_frequency' in training_config:
-            checkpoint_config['checkpoint_frequency'] = training_config['checkpoint_frequency']
-        
-        # From output config
-        if 'checkpoint_format' in output_config:
-            checkpoint_config['checkpoint_format'] = output_config['checkpoint_format']
-        
-        if 'save_optimizer_state' in output_config:
-            checkpoint_config['save_optimizer_state'] = output_config['save_optimizer_state']
-        
-        if 'save_training_history' in output_config:
-            checkpoint_config['save_training_history'] = output_config['save_training_history']
-        
-        return checkpoint_config
-    
-    # ==================== Validation ====================
-    
-    def validate_config(self) -> bool:
-        """
-        Validate configuration for consistency and completeness.
-        
-        Returns:
-            True if configuration is valid, False otherwise
-        """
         try:
-            # Check required sections
-            required_sections = ['neural_networks', 'ray_tracing', 'system']
-            for section in required_sections:
-                if section not in self.config:
-                    logger.error(f"Missing required configuration section: {section}")
-                    return False
-            
-            # Check neural networks config
-            nn_config = self.get_neural_networks_config()
-            if not nn_config.get('enabled', False):
-                logger.warning("Neural networks are disabled in configuration")
-            
-            # Validate scene bounds
-            scene_bounds = self.get_scene_bounds_config()
-            if scene_bounds:
-                if 'min' not in scene_bounds or 'max' not in scene_bounds:
-                    logger.error("Scene bounds must specify both 'min' and 'max'")
-                    return False
-                
-                scene_min = scene_bounds['min']
-                scene_max = scene_bounds['max']
-                if len(scene_min) != 3 or len(scene_max) != 3:
-                    logger.error("Scene bounds must be 3D coordinates")
-                    return False
-                
-                if any(scene_min[i] >= scene_max[i] for i in range(3)):
-                    logger.error("Scene minimum bounds must be less than maximum bounds")
-                    return False
-            
-            # Validate ray tracing mode
-            ray_tracing_mode = self.get_ray_tracing_mode()
-            valid_modes = ['cuda', 'cpu', 'hybrid']
-            if ray_tracing_mode not in valid_modes:
-                logger.error(f"Invalid ray_tracing_mode: {ray_tracing_mode}. Must be one of {valid_modes}")
-                return False
-            
-            # Validate device configuration
-            device = self.get_device()
-            if device not in ['cuda', 'cpu']:
-                logger.error(f"Invalid device: {device}. Must be 'cuda' or 'cpu'")
-                return False
-            
-            logger.info("Configuration validation passed")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Configuration validation failed: {e}")
-            return False
+            return dataclass_type(**filtered_config)
+        except TypeError as e:
+            logger.error(f"Failed to create {dataclass_type.__name__}: {e}")
+            logger.error(f"Available fields: {field_names}")
+            logger.error(f"Provided config: {filtered_config}")
+            raise
     
-    # ==================== Utility Methods ====================
+    def _validate(self) -> None:
+        """Validate configuration consistency."""
+        errors = []
+        
+        # Validate neural network dimensions
+        if self.prism_network.feature_dim != self.attenuation_network.feature_dim:
+            errors.append(
+                f"Feature dimension mismatch: prism_network.feature_dim({self.prism_network.feature_dim}) "
+                f"!= attenuation_network.feature_dim({self.attenuation_network.feature_dim})"
+            )
+        
+        if self.prism_network.antenna_embedding_dim != self.antenna_codebook.embedding_dim:
+            errors.append(
+                f"Antenna embedding dimension mismatch: "
+                f"prism_network.antenna_embedding_dim({self.prism_network.antenna_embedding_dim}) "
+                f"!= antenna_codebook.embedding_dim({self.antenna_codebook.embedding_dim})"
+            )
+        
+        if self.prism_network.num_bs_antennas != self.antenna_codebook.num_bs_antennas:
+            errors.append(
+                f"BS antenna count mismatch: "
+                f"prism_network.num_bs_antennas({self.prism_network.num_bs_antennas}) "
+                f"!= antenna_codebook.num_bs_antennas({self.antenna_codebook.num_bs_antennas})"
+            )
+        
+        # Validate ray tracing dimensions
+        total_directions = self.prism_network.azimuth_divisions * self.prism_network.elevation_divisions
+        if total_directions <= 0:
+            errors.append(
+                f"Invalid ray directions: azimuth_divisions({self.prism_network.azimuth_divisions}) "
+                f"* elevation_divisions({self.prism_network.elevation_divisions}) = {total_directions}"
+            )
+        
+        # Validate R-dimensional consistency across networks
+        # Note: frequency_network has been removed, validation simplified
+        
+        # RadianceNetwork output_dim is passed as num_subcarriers in PrismNetwork
+        radiance_output_dim = getattr(self.radiance_network, 'output_dim', None)
+        if radiance_output_dim and radiance_output_dim != self.attenuation_network.output_dim:
+            errors.append(
+                f"R-dimension mismatch: radiance_network.output_dim({radiance_output_dim}) "
+                f"!= attenuation_network.output_dim({self.attenuation_network.output_dim})"
+            )
+        
+        # Validate training configuration
+        if self.training.batch_size <= 0:
+            errors.append(f"Invalid batch size: {self.training.batch_size}")
+        
+        if self.training.learning_rate <= 0:
+            errors.append(f"Invalid learning rate: {self.training.learning_rate}")
+        
+        # Report errors
+        if errors:
+            error_msg = "Configuration validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        logger.info("Configuration validation passed")
     
-    def save_config(self, output_path: str):
-        """
-        Save current configuration to file.
+    # ==================== Configuration Access Methods ====================
+    
+    def get_device(self) -> torch.device:
+        """Get the computation device."""
+        if torch.cuda.is_available():
+            return torch.device('cuda')
+        else:
+            logger.warning("CUDA not available, using CPU")
+            return torch.device('cpu')
+    
+    def get_prism_network_kwargs(self) -> Dict[str, Any]:
+        """Get PrismNetwork initialization arguments."""
+        # Get transformer configuration from raw config
+        transformer_config = self._processed_config.get('transformer', {})
+        # Get CSI enhancement configuration from raw config
+        csi_enhancement_config = self._processed_config.get('csi_enhancement', {})
         
-        Args:
-            output_path: Path to save the configuration
-        """
-        with open(output_path, 'w', encoding='utf-8') as f:
-            yaml.dump(self.config, f, default_flow_style=False, indent=2)
+        return {
+            'num_subcarriers': self.prism_network.num_subcarriers,
+            'num_bs_antennas': self.prism_network.num_bs_antennas,
+            'feature_dim': self.prism_network.feature_dim,
+            'antenna_embedding_dim': self.prism_network.antenna_embedding_dim,
+            'azimuth_divisions': self.prism_network.azimuth_divisions,
+            'elevation_divisions': self.prism_network.elevation_divisions,
+            'max_ray_length': self.prism_network.max_ray_length,
+            'num_sampling_points': self.prism_network.num_sampling_points,
+            'use_ipe_encoding': self.prism_network.use_ipe_encoding,
+            'use_mixed_precision': self.prism_network.use_mixed_precision,
+            'attenuation_network_config': self.attenuation_network.__dict__,
+            'radiance_network_config': self.radiance_network.__dict__,
+            'antenna_codebook_config': self.antenna_codebook.__dict__,
+            # Add transformer configuration
+            'use_low_rank_transformer': transformer_config.get('use_enhancement', False),
+            'low_rank_transformer_config': transformer_config,
+            # Add CSI enhancement configuration
+            'use_csi_enhancement': csi_enhancement_config.get('use_enhancement', False),
+            'csi_enhancement_config': csi_enhancement_config,
+        }
+    
+    def get_training_kwargs(self) -> Dict[str, Any]:
+        """Get training configuration arguments."""
+        return {
+            'learning_rate': self.training.learning_rate,
+            'weight_decay': self.training.weight_decay,
+            'num_epochs': self.training.num_epochs,
+            'batch_size': self.training.batch_size,
+            'gradient_accumulation_steps': self.training.gradient_accumulation_steps,
+            'auto_checkpoint': self.training.auto_checkpoint,
+            'checkpoint_frequency': self.training.checkpoint_frequency,
+            'epoch_save_interval': self.training.epoch_save_interval,
+        }
+    
+    def get_loss_functions_config(self) -> Dict[str, Any]:
+        """Get loss functions configuration."""
+        return {
+            'csi_weight': self.training.loss.csi_weight,
+            'pdp_weight': self.training.loss.pdp_weight,
+            'spatial_spectrum_weight': self.training.loss.spatial_spectrum_weight,
+            'regularization_weight': self.training.loss.regularization_weight,
+            'csi_loss_config': self.training.loss.csi_loss,
+            'pdp_loss_config': self.training.loss.pdp_loss,
+            'spatial_spectrum_loss_config': self.training.loss.spatial_spectrum_loss,
+        }
+    
+    def get_data_loader_config(self) -> Dict[str, Any]:
+        """Get data loader configuration."""
+        return {
+            'dataset_path': self.data.dataset_path,
+            'scenario': self.data.scenario,
+            'ue_antenna_index': self.data.ue_antenna_index,
+            'random_seed': self.data.random_seed,
+            'train_ratio': self.data.train_ratio,
+            'test_ratio': self.data.test_ratio,
+            'sampling_ratio': self.data.sampling_ratio,
+            'sampling_method': self.data.sampling_method,
+            'antenna_consistent': self.data.antenna_consistent,
+        }
+    
+    def get_output_paths(self) -> Dict[str, str]:
+        """Get output directory paths."""
+        base_dir = self.output.base_dir
+        return {
+            'base_dir': base_dir,
+            'checkpoint_dir': f"{base_dir}/training/checkpoints",
+            'tensorboard_dir': f"{base_dir}/training/tensorboard",
+            'models_dir': f"{base_dir}/training/models",
+            'log_dir': f"{base_dir}/training/logs",
+            'log_file': f"{base_dir}/training/logs/training.log",
+            'results_dir': f"{base_dir}/testing/results",
+            'plots_dir': f"{base_dir}/testing/plots",
+            'predictions_dir': f"{base_dir}/testing/predictions",
+            'reports_dir': f"{base_dir}/testing/reports",
+        }
+    
+    def create_loss_functions(self) -> Dict[str, Any]:
+        """Create loss function instances."""
+        from .loss.csi_loss import CSILoss
+        from .loss.pdp_loss import PDPLoss
+        from .loss.ss_loss import SSLoss
         
-        logger.info(f"Configuration saved to: {output_path}")
+        loss_functions = {}
+        
+        # CSI Loss
+        if self.training.loss.csi_loss.enabled:
+            loss_functions['csi_loss'] = CSILoss(
+                phase_weight=self.training.loss.csi_loss.phase_weight,
+                magnitude_weight=self.training.loss.csi_loss.magnitude_weight,
+                normalize_weights=self.training.loss.csi_loss.normalize_weights,
+            )
+        
+        # PDP Loss
+        if self.training.loss.pdp_loss.enabled:
+            loss_functions['pdp_loss'] = PDPLoss(
+                loss_type=self.training.loss.pdp_loss.type,
+                fft_size=self.training.loss.pdp_loss.fft_size,
+                normalize_pdp=self.training.loss.pdp_loss.normalize_pdp,
+                mse_weight=self.training.loss.pdp_loss.mse_weight,
+                delay_weight=self.training.loss.pdp_loss.delay_weight,
+            )
+        
+        # Spatial Spectrum Loss (requires full config including base_station)
+        if self.training.loss.spatial_spectrum_loss.enabled:
+            # Check if required base_station config exists
+            if 'base_station' in self._processed_config:
+                try:
+                    loss_functions['spatial_spectrum_loss'] = SSLoss(self._processed_config)
+                except Exception as e:
+                    logger.warning(f"Failed to create SSLoss: {e}. Skipping spatial spectrum loss.")
+            else:
+                logger.warning("SSLoss requires base_station configuration. Skipping spatial spectrum loss.")
+        
+        return loss_functions
+    
+    def ensure_output_directories(self) -> None:
+        """Create output directories if they don't exist."""
+        paths = self.get_output_paths()
+        
+        for path_name, path in paths.items():
+            if path_name.endswith('_dir'):
+                Path(path).mkdir(parents=True, exist_ok=True)
+                logger.debug(f"Ensured directory exists: {path}")
     
     def get_config_summary(self) -> Dict[str, Any]:
-        """
-        Get a summary of the current configuration.
-        
-        Returns:
-            Dictionary containing configuration summary
-        """
-        summary = {
-            'config_file': self.config_path,
-            'neural_networks_enabled': self.get_neural_networks_config().get('enabled', False),
-            'device': self.get_device(),
-            'ray_tracing_mode': self.get_ray_tracing_mode(),
-            'mixed_precision_enabled': self.is_mixed_precision_enabled(),
-            'scene_bounds': self.get_scene_bounds_config(),
-            'angular_sampling': self.get_angular_sampling_config(),
-            'radial_sampling': self.get_radial_sampling_config(),
-            'subcarrier_sampling': self.get_subcarrier_sampling_config()
+        """Get a summary of the current configuration."""
+        return {
+            'config_file': str(self.config_path),
+            'prism_network': {
+                'num_subcarriers': self.prism_network.num_subcarriers,
+                'num_bs_antennas': self.prism_network.num_bs_antennas,
+                'feature_dim': self.prism_network.feature_dim,
+                'total_directions': self.prism_network.azimuth_divisions * self.prism_network.elevation_divisions,
+                'max_ray_length': self.prism_network.max_ray_length,
+                'num_sampling_points': self.prism_network.num_sampling_points,
+            },
+            'training': {
+                'batch_size': self.training.batch_size,
+                'learning_rate': self.training.learning_rate,
+                'num_epochs': self.training.num_epochs,
+                'gradient_accumulation_steps': self.training.gradient_accumulation_steps,
+            },
+            'loss_weights': {
+                'csi_weight': self.training.loss.csi_weight,
+                'pdp_weight': self.training.loss.pdp_weight,
+                'spatial_spectrum_weight': self.training.loss.spatial_spectrum_weight,
+            },
+            'data': {
+                'dataset_path': self.data.dataset_path,
+                'scenario': self.data.scenario,
+                'train_ratio': self.data.train_ratio,
+                'sampling_ratio': self.data.sampling_ratio,
+            },
+            'output': {
+                'base_dir': self.output.base_dir,
+                'format': self.output.format,
+            }
         }
-        
-        return summary
     
-    def _validate_config_consistency(self, config: Dict[str, Any]) -> None:
-        """
-        Validate configuration consistency and report any conflicts.
+    def save_processed_config(self, output_path: Union[str, Path]) -> None:
+        """Save the processed configuration to a file."""
+        output_path = Path(output_path)
         
-        Args:
-            config: Configuration dictionary to validate
-            
-        Raises:
-            SystemExit: If critical configuration conflicts are found
-        """
-        logger.info("🔍 Starting configuration consistency validation...")
+        with open(output_path, 'w', encoding='utf-8') as f:
+            yaml.dump(self._processed_config, f, default_flow_style=False, indent=2)
         
-        errors = []
-        warnings = []
-        
-        try:
-            # Extract configuration sections
-            neural_networks = config.get('neural_networks', {})
-            base_station = config.get('base_station', {})
-            user_equipment = config.get('user_equipment', {})
-            ray_tracing = config.get('ray_tracing', {})
-            training = config.get('training', {})
-            
-            # 1. Validate angular sampling consistency
-            self._validate_angular_sampling(ray_tracing, neural_networks, errors)
-            
-            # 2. Validate subcarrier consistency
-            self._validate_subcarrier_consistency(base_station, neural_networks, errors)
-            
-            # 3. Validate antenna consistency
-            self._validate_antenna_consistency(base_station, neural_networks, user_equipment, errors)
-            
-            # 4. Validate embedding dimension consistency
-            self._validate_embedding_consistency(base_station, neural_networks, errors)
-            
-            # 5. Validate feature dimension consistency
-            self._validate_feature_consistency(neural_networks, errors)
-            
-            # 6. Validate OFDM parameter consistency
-            self._validate_ofdm_consistency(base_station, warnings)
-            
-            # 7. Validate antenna array consistency
-            self._validate_antenna_array_consistency(base_station, warnings)
-            
-            # 8. Validate training parameter consistency
-            self._validate_training_consistency(training, warnings)
-            
-        except Exception as e:
-            errors.append(f"Configuration validation failed with exception: {e}")
-        
-        # Report results
-        if warnings:
-            logger.warning("⚠️  Configuration warnings found:")
-            for warning in warnings:
-                logger.warning(f"   - {warning}")
-        
-        if errors:
-            logger.error("❌ Critical configuration errors found:")
-            for error in errors:
-                logger.error(f"   - {error}")
-            logger.error("🛑 System will exit due to configuration errors")
-            raise SystemExit(1)
-        else:
-            logger.info("✅ Configuration consistency validation passed")
-    
-    def _validate_angular_sampling(self, ray_tracing: Dict, neural_networks: Dict, errors: list) -> None:
-        """Validate angular sampling consistency."""
-        try:
-            angular_sampling = ray_tracing.get('angular_sampling', {})
-            antenna_network = neural_networks.get('antenna_network', {})
-            
-            azimuth_divisions = int(angular_sampling.get('azimuth_divisions', 0))
-            elevation_divisions = int(angular_sampling.get('elevation_divisions', 0))
-            total_directions = int(angular_sampling.get('total_directions', 0))
-            antenna_output_dim = int(antenna_network.get('output_dim', 0))
-            
-            # Check azimuth × elevation = total_directions
-            expected_total = azimuth_divisions * elevation_divisions
-            if expected_total != total_directions:
-                errors.append(
-                    f"Angular sampling mismatch: azimuth_divisions({azimuth_divisions}) × "
-                    f"elevation_divisions({elevation_divisions}) = {expected_total}, "
-                    f"but total_directions = {total_directions}"
-                )
-            
-            # Check antenna network output dimension matches total directions
-            if antenna_output_dim != total_directions:
-                errors.append(
-                    f"Antenna network output dimension mismatch: "
-                    f"antenna_network.output_dim({antenna_output_dim}) ≠ "
-                    f"angular_sampling.total_directions({total_directions})"
-                )
-        except (ValueError, TypeError) as e:
-            errors.append(f"Invalid angular sampling parameter types: {e}")
-    
-    def _validate_subcarrier_consistency(self, base_station: Dict, neural_networks: Dict, errors: list) -> None:
-        """Validate subcarrier number consistency."""
-        try:
-            ofdm = base_station.get('ofdm', {})
-            attenuation_decoder = neural_networks.get('attenuation_decoder', {})
-            radiance_network = neural_networks.get('radiance_network', {})
-            
-            ofdm_subcarriers = int(ofdm.get('num_subcarriers', 0))
-            decoder_output = int(attenuation_decoder.get('output_dim', 0))
-            radiance_output = int(radiance_network.get('output_dim', 0))
-            
-            if not (ofdm_subcarriers == decoder_output == radiance_output):
-                errors.append(
-                    f"Subcarrier number mismatch: "
-                    f"ofdm.num_subcarriers({ofdm_subcarriers}) ≠ "
-                    f"attenuation_decoder.output_dim({decoder_output}) ≠ "
-                    f"radiance_network.output_dim({radiance_output})"
-                )
-        except (ValueError, TypeError) as e:
-            errors.append(f"Invalid subcarrier parameter types: {e}")
-    
-    def _validate_antenna_consistency(self, base_station: Dict, neural_networks: Dict, 
-                                    user_equipment: Dict, errors: list) -> None:
-        """Validate antenna number consistency."""
-        try:
-            # BS antenna consistency
-            bs_antennas = int(base_station.get('num_antennas', 0))
-            codebook_antennas = int(neural_networks.get('antenna_codebook', {}).get('num_antennas', 0))
-            
-            if bs_antennas != codebook_antennas:
-                errors.append(
-                    f"BS antenna number mismatch: "
-                    f"base_station.num_antennas({bs_antennas}) ≠ "
-                    f"antenna_codebook.num_antennas({codebook_antennas})"
-                )
-            
-            # UE antenna consistency (neural networks should both use 1 for single antenna processing)
-            decoder_ue = int(neural_networks.get('attenuation_decoder', {}).get('num_ue_antennas', 0))
-            radiance_ue = int(neural_networks.get('radiance_network', {}).get('num_ue_antennas', 0))
-            
-            if decoder_ue != 1 or radiance_ue != 1:
-                errors.append(
-                    f"UE antenna configuration error: "
-                    f"attenuation_decoder.num_ue_antennas({decoder_ue}) and "
-                    f"radiance_network.num_ue_antennas({radiance_ue}) must both be 1 for single antenna processing"
-                )
-        except (ValueError, TypeError) as e:
-            errors.append(f"Invalid antenna parameter types: {e}")
-    
-    def _validate_embedding_consistency(self, base_station: Dict, neural_networks: Dict, errors: list) -> None:
-        """Validate embedding dimension consistency."""
-        try:
-            bs_embedding = int(base_station.get('antenna_embedding_dim', 0))
-            codebook_embedding = int(neural_networks.get('antenna_codebook', {}).get('embedding_dim', 0))
-            antenna_input = int(neural_networks.get('antenna_network', {}).get('input_dim', 0))
-            radiance_embedding = int(neural_networks.get('radiance_network', {}).get('antenna_embedding_dim', 0))
-            
-            if not (bs_embedding == codebook_embedding == antenna_input == radiance_embedding):
-                errors.append(
-                    f"Antenna embedding dimension mismatch: "
-                    f"base_station.antenna_embedding_dim({bs_embedding}) ≠ "
-                    f"antenna_codebook.embedding_dim({codebook_embedding}) ≠ "
-                    f"antenna_network.input_dim({antenna_input}) ≠ "
-                    f"radiance_network.antenna_embedding_dim({radiance_embedding})"
-                )
-        except (ValueError, TypeError) as e:
-            errors.append(f"Invalid embedding parameter types: {e}")
-    
-    def _validate_feature_consistency(self, neural_networks: Dict, errors: list) -> None:
-        """Validate feature dimension consistency."""
-        try:
-            attenuation_feature = int(neural_networks.get('attenuation_network', {}).get('feature_dim', 0))
-            decoder_input = int(neural_networks.get('attenuation_decoder', {}).get('input_dim', 0))
-            radiance_feature = int(neural_networks.get('radiance_network', {}).get('spatial_feature_dim', 0))
-            
-            if not (attenuation_feature == decoder_input == radiance_feature):
-                errors.append(
-                    f"Feature dimension mismatch: "
-                    f"attenuation_network.feature_dim({attenuation_feature}) ≠ "
-                    f"attenuation_decoder.input_dim({decoder_input}) ≠ "
-                    f"radiance_network.spatial_feature_dim({radiance_feature})"
-                )
-        except (ValueError, TypeError) as e:
-            errors.append(f"Invalid feature parameter types: {e}")
-    
-    def _validate_ofdm_consistency(self, base_station: Dict, warnings: list) -> None:
-        """Validate OFDM parameter consistency."""
-        ofdm = base_station.get('ofdm', {})
-        
-        try:
-            bandwidth = float(ofdm.get('bandwidth', 0))
-            num_subcarriers = int(ofdm.get('num_subcarriers', 0))
-            subcarrier_spacing = float(ofdm.get('subcarrier_spacing', 0))
-            fft_size = int(ofdm.get('fft_size', 0))
-            num_guard_carriers = int(ofdm.get('num_guard_carriers', 0))
-        except (ValueError, TypeError):
-            warnings.append("Invalid OFDM parameter types")
-            return
-        
-        # Check subcarrier spacing
-        if bandwidth > 0 and num_subcarriers > 0 and subcarrier_spacing > 0:
-            expected_spacing = bandwidth / num_subcarriers
-            spacing_error = abs(subcarrier_spacing - expected_spacing) / expected_spacing
-            if spacing_error > 0.01:  # 1% tolerance
-                warnings.append(
-                    f"OFDM subcarrier spacing mismatch: "
-                    f"configured({subcarrier_spacing:.1f} Hz) vs "
-                    f"calculated({expected_spacing:.1f} Hz), "
-                    f"error: {spacing_error*100:.2f}%"
-                )
-        
-        # Check guard carriers
-        if fft_size > 0 and num_subcarriers > 0:
-            expected_guards = (fft_size - num_subcarriers) / 2
-            if abs(num_guard_carriers - expected_guards) > 0.5:
-                warnings.append(
-                    f"OFDM guard carriers mismatch: "
-                    f"configured({num_guard_carriers}) vs "
-                    f"calculated({expected_guards})"
-                )
-    
-    def _validate_antenna_array_consistency(self, base_station: Dict, warnings: list) -> None:
-        """Validate antenna array configuration consistency."""
-        num_antennas = base_station.get('num_antennas', 0)
-        antenna_array = base_station.get('antenna_array', {})
-        configuration = antenna_array.get('configuration', '')
-        
-        # Parse antenna array configuration (e.g., '8x8')
-        if 'x' in configuration:
-            try:
-                parts = configuration.split('x')
-                if len(parts) == 2:
-                    rows, cols = int(parts[0]), int(parts[1])
-                    expected_antennas = rows * cols
-                    if expected_antennas != num_antennas:
-                        warnings.append(
-                            f"Antenna array configuration mismatch: "
-                            f"configuration({configuration}) = {expected_antennas} antennas, "
-                            f"but num_antennas = {num_antennas}"
-                        )
-            except (ValueError, IndexError):
-                warnings.append(f"Invalid antenna array configuration format: {configuration}")
-    
-    def _validate_training_consistency(self, training: Dict, warnings: list) -> None:
-        """Validate training parameter consistency."""
-        try:
-            batches_per_epoch = int(training.get('batches_per_epoch', 0))
-            gradient_accumulation_steps = int(training.get('gradient_accumulation_steps', 1))
-            
-            effective_batch_size = batches_per_epoch * gradient_accumulation_steps
-            
-            # Check for reasonable effective batch size
-            if effective_batch_size > 1000:
-                warnings.append(
-                    f"Very large effective batch size: "
-                    f"batches_per_epoch({batches_per_epoch}) × "
-                    f"gradient_accumulation_steps({gradient_accumulation_steps}) = "
-                    f"{effective_batch_size}"
-                )
-            elif effective_batch_size < 4:
-                warnings.append(
-                    f"Very small effective batch size: "
-                    f"batches_per_epoch({batches_per_epoch}) × "
-                    f"gradient_accumulation_steps({gradient_accumulation_steps}) = "
-                    f"{effective_batch_size}"
-                )
-        except (ValueError, TypeError):
-            warnings.append("Invalid training parameter types")
+        logger.info(f"Processed configuration saved to: {output_path}")
 
 
-def load_config(config_path: str) -> ConfigLoader:
+# Convenience function for loading configuration
+def load_config(config_path: Union[str, Path]) -> ModernConfigLoader:
     """
-    Convenience function to load configuration.
+    Load configuration using the modern config loader.
     
     Args:
         config_path: Path to the configuration file
         
     Returns:
-        ConfigLoader instance
+        ModernConfigLoader instance
     """
-    return ConfigLoader(config_path)
+    return ModernConfigLoader(config_path)
+
+
+# Compatibility alias for existing code
+ConfigLoader = ModernConfigLoader
 
 
 # Example usage
 if __name__ == "__main__":
-    # Example of how to use the updated configuration loader
-    config_loader = load_config("configs/ofdm-5g-sionna-clean.yml")
+    import sys
     
-    # Validate configuration
-    if config_loader.validate_config():
-        print("Configuration is valid")
+    # Load configuration
+    config_file = "configs/sionna.yml" if len(sys.argv) < 2 else sys.argv[1]
+    
+    try:
+        config = load_config(config_file)
         
-        # Get configuration summary
-        summary = config_loader.get_config_summary()
-        print(f"Configuration summary: {summary}")
+        print("✅ Configuration loaded successfully!")
+        print("\n📊 Configuration Summary:")
+        summary = config.get_config_summary()
+        for section, details in summary.items():
+            print(f"  {section}:")
+            if isinstance(details, dict):
+                for key, value in details.items():
+                    print(f"    {key}: {value}")
+            else:
+                print(f"    {details}")
         
-        # Get ray tracer configurations
-        ray_tracing_config = config_loader.create_ray_tracer_config()
-        system_config = config_loader.create_system_config()
+        print(f"\n🎯 Total ray directions: {config.prism_network.azimuth_divisions * config.prism_network.elevation_divisions}")
+        print(f"📡 Output dimension (low-rank): {config.attenuation_network.output_dim}")
+        print(f"🔧 Device: {config.get_device()}")
         
-        print(f"Ray tracing config keys: {list(ray_tracing_config.keys())}")
-        print(f"System config keys: {list(system_config.keys())}")
+        # Ensure output directories exist
+        config.ensure_output_directories()
+        print("📁 Output directories created/verified")
         
-        # Get ray tracer kwargs
-        cpu_kwargs = config_loader.create_cpu_ray_tracer_kwargs()
-        cuda_kwargs = config_loader.create_cuda_ray_tracer_kwargs()
-        
-        print(f"CPU ray tracer kwargs: {list(cpu_kwargs.keys())}")
-        print(f"CUDA ray tracer kwargs: {list(cuda_kwargs.keys())}")
-        
-    else:
-        print("Configuration validation failed")
+    except Exception as e:
+        print(f"❌ Configuration loading failed: {e}")
+        sys.exit(1)

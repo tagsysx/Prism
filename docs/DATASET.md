@@ -13,24 +13,12 @@ Prism项目使用HDF5格式存储5G OFDM信道数据，包括信道状态信息(
 所有数据文件采用HDF5格式（`.h5`扩展名），具有以下标准化的层次结构：
 
 ```
-dataset.h5
-├── simulation_config/          # 仿真配置组
-│   ├── @center_frequency      # 中心频率 (Hz)
-│   ├── @num_bs_antennas       # 基站天线数量
-│   ├── @num_ue_antennas       # 用户设备天线数量
-│   ├── @num_subcarriers       # OFDM子载波数量
-│   └── @subcarrier_spacing    # 子载波间隔 (Hz)
-├── positions/                  # 位置信息组
-│   ├── bs_position            # 基站位置 [x, y, z] (米)
-│   └── ue_positions           # 用户设备位置 [N, 3] (米)
-├── channel_data/              # 信道数据组
-│   ├── channel_responses      # 信道响应矩阵 [N, S, U, B]
-│   ├── path_losses           # 路径损耗 [N, S] (dB)
-│   └── delays                # 传播延迟 [N, S] (秒)
-└── metadata/                  # 元数据组
-    ├── @simulation_date      # 仿真日期
-    ├── @generator_version    # 生成器版本
-    └── @fixed_spatial_phase  # 空间相位修正标志
+ray_tracing_5g_simulation_P300.h5
+├── antenna/                    # 天线配置组 (保留用于扩展)
+└── data/                      # 主数据组  
+    ├── bs_position           # 基站位置 [3] (米) - 单个固定位置
+    ├── ue_position           # 用户设备位置 [N, 3] (米)
+    └── channel_responses     # 信道响应矩阵 [N, S, U, B] (复数)
 ```
 
 ### 数据维度说明
@@ -57,60 +45,77 @@ dataset.h5
 
 ### 数据集详细结构
 
-#### 1. 仿真配置 (`simulation_config/`)
+#### 数据结构详细说明
+
+**📁 实际文件示例**: `ray_tracing_5g_simulation_P300.h5`
 
 ```python
-# 属性 (Attributes)
-center_frequency: 3500000000.0    # 3.5 GHz
-num_bs_antennas: 64              # 基站天线数
-num_ue_antennas: 4               # UE天线数  
-num_subcarriers: 408             # 子载波数
-subcarrier_spacing: 30000.0      # 30 kHz
-```
+# 1. 基站位置 (data/bs_position)
+bs_position: shape=(3,)          # [x, y, z] 米 - 单个固定位置
+dtype: float64
+# 示例: [8.5, 21.0, 27.0]
+# 说明: 所有样本共享同一个基站位置
 
-#### 2. 位置信息 (`positions/`)
+# 2. UE位置 (data/ue_position) 
+ue_position: shape=(300, 3)      # [N, 3] 米
+dtype: float64
+# 示例第一个位置: [43.71, 14.65, 1.34]
+# X范围: 变化范围取决于仿真场景
+# Y范围: 变化范围取决于仿真场景
+# Z范围: 通常在1-3米(地面高度)
 
-```python
-# 基站位置 (固定)
-bs_position: [0.0, 0.0, 25.0]   # [x, y, z] 米
-                                 # 位于原点，高度25米
-
-# UE位置 (随机分布)
-ue_positions: shape=(300, 3)     # [N, 3] 米
-# 示例位置: [-62.73, -224.16, 1.34]
-# X范围: [-247.47, 245.03] 米
-# Y范围: [-244.58, 249.86] 米  
-# Z范围: [1.01, 2.99] 米 (地面高度)
-```
-
-#### 3. 信道数据 (`channel_data/`)
-
-```python
-# 信道响应矩阵 (复数)
-channel_responses: shape=(300, 408, 4, 64)
+# 3. 信道响应矩阵 (data/channel_responses)
+channel_responses: shape=(300, 408, 4, 64)  # [N, S, U, B]
 dtype: complex128
-# [位置, 子载波, UE天线, BS天线]
-# 数值范围: 实部[-6.79e-4, 7.27e-4], 虚部[-7.16e-4, 6.92e-4]
+# 维度说明:
+# - N=300: UE位置数量
+# - S=408: OFDM子载波数量  
+# - U=4: UE天线数量
+# - B=64: BS天线数量 (8×8天线阵列)
+# 数据格式: 复数形式的信道系数
 
-# 路径损耗
-path_losses: shape=(300, 408)
-dtype: float64
-# [位置, 子载波] (dB)
-
-# 传播延迟  
-delays: shape=(300, 408)
-dtype: float64
-# [位置, 子载波] (秒)
+# 4. 天线配置 (antenna/) - 预留组
+# 当前为空，预留用于未来天线配置扩展
 ```
 
-#### 4. 元数据 (`metadata/`)
+#### 🔧 训练脚本数据处理
+
+训练脚本会自动处理数据结构变化：
 
 ```python
-# 属性 (Attributes)
-simulation_date: "2025-09-03T10:54:16"  # ISO格式时间戳
-generator_version: "1.0.0"              # 生成器版本
-fixed_spatial_phase: True               # 空间相位修正标志
+# 数据加载逻辑 (scripts/train_prism.py)
+with h5py.File(dataset_path, 'r') as f:
+    # 读取新格式数据
+    ue_positions = torch.from_numpy(f['data/ue_position'][:]).float()
+    bs_position_single = torch.from_numpy(f['data/bs_position'][:]).float()
+    channel_responses = torch.from_numpy(f['data/channel_responses'][:]).cfloat()
+    
+    # 维度转换: [N,S,U,B] → [N,B,S,U] (训练格式)
+    csi_data = channel_responses.permute(0, 3, 1, 2)
+    
+    # BS位置广播: [3] → [N,3] (每个样本复制相同位置)
+    num_samples = ue_positions.shape[0]
+    bs_positions = bs_position_single.unsqueeze(0).expand(num_samples, -1)
+    
+    # 生成天线索引: [N,B] (0到63的序列)
+    antenna_indices = torch.arange(64).unsqueeze(0).expand(num_samples, -1)
 ```
+
+#### 📊 数据统计信息
+
+基于`P300`数据集的实际统计：
+
+```python
+# 数据形状
+UE positions: (300, 3)           # 300个UE位置
+BS position: (3,)                # 单个BS位置 [8.5, 21.0, 27.0]
+CSI data: (300, 64, 408, 1)      # 经转换后的训练格式
+Antenna indices: (300, 64)       # 生成的天线索引
+
+# 文件大小
+Total size: ~479MB               # HDF5压缩后大小
+```
+
 
 ## 🔧 数据生成
 
@@ -157,28 +162,29 @@ DEFAULT_CONFIG = {
 ```python
 import h5py
 import numpy as np
+import torch
 
-# 加载数据集
-with h5py.File('data/sionna/P300/P300.h5', 'r') as f:
-    # 读取信道响应
-    csi_data = f['channel_data/channel_responses'][:]  # (300, 408, 4, 64)
-    
+# 加载当前格式数据集
+with h5py.File('data/sionna/results/P300/ray_tracing_5g_simulation_P300.h5', 'r') as f:
     # 读取位置信息
-    ue_positions = f['positions/ue_positions'][:]      # (300, 3)
-    bs_position = f['positions/bs_position'][:]        # (3,)
+    ue_positions = f['data/ue_position'][:]           # (300, 3)
+    bs_position = f['data/bs_position'][:]            # (3,)
     
-    # 读取配置参数
-    center_freq = f['simulation_config'].attrs['center_frequency']
-    num_antennas = f['simulation_config'].attrs['num_bs_antennas']
-    
-    # 读取元数据
-    sim_date = f['metadata'].attrs['simulation_date']
-    is_fixed = f['metadata'].attrs.get('fixed_spatial_phase', False)
+    # 读取信道响应矩阵
+    channel_responses = f['data/channel_responses'][:] # (300, 408, 4, 64)
 
-print(f"数据集形状: {csi_data.shape}")
-print(f"中心频率: {center_freq/1e9:.1f} GHz")
-print(f"基站天线数: {num_antennas}")
-print(f"空间相位已修正: {is_fixed}")
+# 数据预处理 (与训练脚本一致)
+ue_positions = torch.from_numpy(ue_positions).float()
+bs_position_single = torch.from_numpy(bs_position).float()
+channel_responses = torch.from_numpy(channel_responses).cfloat()
+
+# 维度转换: [N,S,U,B] → [N,B,S,U] (训练格式)
+csi_data = channel_responses.permute(0, 3, 1, 2)
+
+print(f"UE位置形状: {ue_positions.shape}")         # torch.Size([300, 3])
+print(f"BS位置: {bs_position_single}")            # tensor([8.5, 21.0, 27.0])
+print(f"CSI数据形状: {csi_data.shape}")           # torch.Size([300, 64, 408, 4])
+print(f"数据类型: {csi_data.dtype}")              # torch.complex64
 ```
 
 ### 数据预处理
