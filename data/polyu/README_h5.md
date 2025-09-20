@@ -1,93 +1,235 @@
-# simulation_data.h5 说明文档
+# PolyU Compacus WiFi Data Documentation
 
-## 概述
-`simulation_data.h5` 是一个 HDF5 格式文件，用于存储无线通信场景的仿真数据，包括信道响应(channel_responses)、用户设备位置(ue_position)、基站位置(bs_position)以及仿真配置参数。数据以层次结构组织，存储在 HDF5 的组和数据集中，适用于 5G 信道建模或射线追踪仿真等应用。
+## Overview
+`data.h5` is an optimized HDF5 format file containing PolyU Compacus WiFi simulation data. This file has been restructured and optimized for wireless communication research, featuring CSI (Channel State Information) data, UE positions, BS SSID information, and comprehensive metadata configuration.
 
-## 文件生成
-该文件由py脚本生成，依赖以下库：
-- Python 3.x
-- `h5py`（用于操作 HDF5 文件）
-- `numpy`（用于处理数组）
-- `logging`（用于记录日志）
+## File Information
+- **File Name**: `data.h5`
+- **File Type**: Polyu WiFi
+- **Version**: 2.0
+- **Description**: PolyU Compacus WiFi data
+- **Total Size**: ~7.53 MB
+- **Data Points**: 913 positions
 
-### 变量格式
-- `channel_responses`：包含信道响应数据，预期形状为 `(num_data_size, num_ue_antennas, num_bs_antennas, num_subcarriers)`，（例如300个数据,接收阵列天线数为8，基站天线数为1，子载波数为64，则shape应为300×8×1×64）。
-- `ue_position`：包含UE位置数据，预期形状为 `(num_positions, 4)`，num_positions表示数据数量，应和channel_responses的num_data_size相等且顺序对应，后一维度包含UE的x、y、z坐标以及基站ap的id号。
-- `bs_position`：包含基站的x，y，z坐标，预期形状为`(3,)`
+## File Structure
+The HDF5 file contains two main groups:
+- **`/metadata`**: Contains file metadata and configuration parameters
+- **`/data`**: Contains the actual simulation data
 
-## 文件结构
-HDF5 文件包含两个主要组：
-- **`/antenna`**：存储配置参数（以属性形式）。
-- **`/data`**：存储仿真数据（以数据集形式）。
+### Complete Structure
+```
+📁 data.h5/
+├── 📁 metadata/
+│   ├── 📋 description: "PolyU Compacus WiFi data"
+│   ├── 📋 file_type: "Polyu WiFi"
+│   ├── 📋 version: "2.0"
+│   └── 📁 config/ (16 attributes)
+│       ├── 📋 bandwidth: 20000000
+│       ├── 📋 bs_antenna_configuration: "1x1"
+│       ├── 📋 bs_positions_description: "BS SSID data for each position"
+│       ├── 📋 bs_positions_dimensions: "(position, bs_ssid)"
+│       ├── 📋 bs_positions_shape: "(913, 1)"
+│       ├── 📋 center_frequency: 2400000000
+│       ├── 📋 csi_description: "Channel State Information (CSI) data"
+│       ├── 📋 csi_dimensions: "(position, ue_antenna_index, bs_antenna_index, subcarrier_index)"
+│       ├── 📋 csi_shape: "(913, 8, 1, 64)"
+│       ├── 📋 num_samples: 913
+│       ├── 📋 num_subcarriers: 64
+│       ├── 📋 subcarrier_spacing: 312500
+│       ├── 📋 ue_antenna_configuration: "2x4"
+│       ├── 📋 ue_positions_description: "UE position coordinates (x, y, z)"
+│       ├── 📋 ue_positions_dimensions: "(position, coordinates)"
+│       └── 📋 ue_positions_shape: "(913, 3)"
+│
+└── 📁 data/
+    ├── 📊 bs_positions: (913, 1) float64
+    ├── 📊 csi: (913, 8, 1, 64) complex128
+    └── 📊 ue_positions: (913, 3) float64
+```
 
-### 详细结构
-- **组：`/antenna`**
-  - 属性：包含脚本中 `DEFAULT_CONFIG` 的所有配置参数：
-    - `num_positions`：UE 位置数量（例如 300）。
-    - `output_path`：仿真输出路径（例如 "../sionna/simulation"）。
-    - `area_size`：仿真区域大小（例如 500）。
-    - `bs_height`：基站高度（例如 25.0）。
-    - `ue_height_min`：UE 最小高度（例如 1.0）。
-    - `ue_height_max`：UE 最大高度（例如 3.0）。
-    - `center_frequency`：中心频率，单位 Hz（例如 2.4e9，即 2.4 GHz）。
-    - `subcarrier_spacing`：子载波间隔，单位 Hz（例如 312.5e3，即 312.5 kHz）。
-    - `num_subcarriers`：子载波数量（例如 64）。
-    - `num_ue_antennas`：UE 天线数量（例如 8）。
-    - `num_bs_antennas`：BS 天线数量（例如 1）。
-    - `bs_antenna_pattern`：基站天线配置（例如 "1_dual_pol"）。
-    - `bs_antenna_rows`：基站天线行数（例如 1）。
-    - `bs_antenna_cols`：基站天线列数（例如 1）。
-    - `max_depth`：射线追踪最大深度（例如 5）。
-    - `num_samples`：射线追踪采样数（例如 100000）。
-    - `random_seed`：随机种子，确保可重复性（例如 42）。
-    - `create_plots`：是否生成绘图（例如 true）。
-    - `plot_dpi`：绘图分辨率（例如 300）。
-    - `preview_scene`：是否生成场景预览图像（例如 true）。
+## Dataset Details
 
-- **组：`/data`**
-  - 数据集：
-    - `bs_position`：基站位置，1D NumPy 数组，形状 `(3,)`，包含 x、y、z 坐标（例如 [250.0, 250.0, 25.0]）。
-    - `ue_position`：UE位置，2D NumPy 数组，形状 `(num_positions, 4)`，包含每个UE的 x、y、z 坐标以及基站ap的id号。
-    - `channel_responses`：信道响应数据，4D NumPy 数组，形状 `(num_positions, num_ue_antennas, num_bs_antennas, num_subcarriers)`（例如 300×8×1×64），数据类型为 complex128。
+### 1. CSI Data (`/data/csi`)
+- **Shape**: (913, 8, 1, 64)
+- **Data Type**: complex128
+- **Size**: 467,456 elements (~7.13 MB)
+- **Dimensions**: 
+  - **Position**: 913 UE positions
+  - **UE Antenna Index**: 8 UE antennas
+  - **BS Antenna Index**: 1 BS antenna
+  - **Subcarrier Index**: 64 subcarriers
+- **Description**: Channel State Information (CSI) data containing complex channel responses
+- **Frequency**: 2.4 GHz center frequency
+- **Bandwidth**: 20 MHz
+- **Subcarrier Spacing**: 312.5 kHz
 
-## 访问数据
-使用 Python 的 `h5py` 库可以读取 `simulation_data.h5` 文件。以下是一个示例脚本，用于加载和检查数据：
+### 2. BS Positions (`/data/bs_positions`)
+- **Shape**: (913, 1)
+- **Data Type**: float64
+- **Size**: 913 elements (~0.01 MB)
+- **Dimensions**:
+  - **Position**: 913 UE positions
+  - **BS SSID**: BS SSID identifier for each position
+- **Description**: BS SSID data for each position
+- **Content**: AP ID values (0.0 - 2.0, 3 unique APs)
 
+### 3. UE Positions (`/data/ue_positions`)
+- **Shape**: (913, 3)
+- **Data Type**: float64
+- **Size**: 2,739 elements (~0.02 MB)
+- **Dimensions**:
+  - **Position**: 913 UE positions
+  - **Coordinates**: (x, y, z) coordinates
+- **Description**: UE position coordinates (x, y, z)
+- **Content**: 
+  - X coordinates: 679.44 - 894.97
+  - Y coordinates: -2601.71 - -2329.68
+  - Z coordinates: -24.88 - 61.37
+
+## Configuration Parameters
+
+### Frequency and Bandwidth
+- **Center Frequency**: 2,400,000,000 Hz (2.4 GHz)
+- **Bandwidth**: 20,000,000 Hz (20 MHz)
+- **Subcarrier Spacing**: 312,500 Hz (312.5 kHz)
+
+### Antenna Configuration
+- **BS Antenna Configuration**: 1x1 (1 BS antenna)
+- **UE Antenna Configuration**: 2x4 (8 UE antennas)
+
+### Data Parameters
+- **Number of Samples**: 913
+- **Number of Subcarriers**: 64
+
+## Data Access Examples
+
+### Python Access
 ```python
 import h5py
 import numpy as np
 
-# 打开 HDF5 文件
-with h5py.File('simulation_data.h5', 'r') as f:
-    # 访问配置
-    config = dict(f['antenna'].attrs)
-    print("配置参数：", config)
-
-    # 访问数据集
-    bs_position = f['data/bs_position'][:]
-    ue_position = f['data/ue_position'][:]
-    channel_responses = f['data/channel_responses'][:]
-
-    # 打印形状和样本数据
-    print("基站位置：", bs_position)
-    print("UE 位置形状：", ue_position.shape)
-    print("信道响应形状：", channel_responses.shape)
-    print("样本信道响应（第一个位置、第一个 UE 天线、第一个 BS 天线、第一个子载波）：", 
-          channel_responses[0, 0, 0, 0])
+# Open the HDF5 file
+with h5py.File('data.h5', 'r') as f:
+    # Access metadata
+    metadata = dict(f['/metadata'].attrs)
+    config = dict(f['/metadata/config'].attrs)
+    
+    print("File Description:", metadata['description'])
+    print("File Type:", metadata['file_type'])
+    print("Version:", metadata['version'])
+    
+    # Access datasets
+    csi = f['/data/csi'][:]
+    bs_positions = f['/data/bs_positions'][:]
+    ue_positions = f['/data/ue_positions'][:]
+    
+    # Print shapes and sample data
+    print("CSI Shape:", csi.shape)
+    print("BS Positions Shape:", bs_positions.shape)
+    print("UE Positions Shape:", ue_positions.shape)
+    
+    # Access CSI for specific position
+    position_idx = 0
+    csi_position = csi[position_idx, :, :, :]  # (8, 1, 64)
+    
+    # Access UE coordinates for specific position
+    ue_coords = ue_positions[position_idx, :]  # [x, y, z]
+    
+    # Access BS SSID for specific position
+    bs_ssid = bs_positions[position_idx, 0]  # scalar value
 ```
 
-### 预期输出
-假设 `num_positions=300`, `num_ue_antennas=8`, `num_bs_antennas=1`, `num_subcarriers=64`，输出可能如下：
-```
-配置参数：{'num_positions': 300, 'output_path': '../sionna/simulation', ...}
-基站位置：[250. 250.  25.]
-UE 位置形状：(300, 4)
-信道响应形状：(300, 8, 1, 64)
-样本信道响应（第一个位置、第一个 UE 天线、第一个 BS 天线、第一个子载波）：(1.23+4.56j)
+### CSI Data Usage
+```python
+# Get CSI for position i
+csi_i = csi[i, :, :, :]  # (8, 1, 64)
+
+# Get CSI for position i, UE antenna j
+csi_ij = csi[i, j, :, :]  # (1, 64)
+
+# Get CSI for position i, UE antenna j, subcarrier k
+csi_ijk = csi[i, j, 0, k]  # complex number
+
+# Get CSI magnitude for all positions
+csi_magnitude = np.abs(csi)  # (913, 8, 1, 64)
+
+# Get CSI phase for all positions
+csi_phase = np.angle(csi)  # (913, 8, 1, 64)
 ```
 
-## 注意事项
-- **依赖库**：确保安装 `h5py` 和 `numpy`（`pip install h5py numpy`）。
-- **未使用数据**：脚本包含 `path_losses` 和 `delays` 的占位符，但当前未保存（设为 `None`）。
-- **自定义配置**：如需修改配置参数，编辑脚本 `DEFAULT_CONFIG` 字典。
-- **错误日志**：脚本使用 `logging` 模块记录消息，运行时检查控制台输出的错误信息。
+### Position Data Usage
+```python
+# Get UE coordinates for position i
+ue_coords_i = ue_positions[i, :]  # [x, y, z]
+
+# Get BS SSID for position i
+bs_ssid_i = bs_positions[i, 0]  # scalar value
+
+# Get all unique BS SSIDs
+unique_bs_ssids = np.unique(bs_positions.flatten())
+
+# Get positions for specific BS SSID
+bs_ssid_mask = bs_positions.flatten() == target_ssid
+positions_for_bs = ue_positions[bs_ssid_mask]
+```
+
+## Data Statistics
+
+### CSI Statistics
+- **Magnitude Range**: 0.000000 - 47.539457
+- **Magnitude Mean**: 9.290332
+- **Magnitude Standard Deviation**: 6.781997
+- **Data Size**: 7.13 MB
+
+### BS Position Statistics
+- **AP ID Range**: 0.0 - 2.0
+- **Unique AP Count**: 3
+
+### UE Position Statistics
+- **X Coordinate Range**: 679.44 - 894.97
+- **Y Coordinate Range**: -2601.71 - -2329.68
+- **Z Coordinate Range**: -24.88 - 61.37
+
+## File Optimization Features
+
+### 1. Standardized Naming
+- Uses CSI (Channel State Information) standard terminology
+- Clear dimension descriptions for all datasets
+- Self-documenting configuration parameters
+
+### 2. Optimized Structure
+- Separated BS SSID data from UE coordinates
+- Eliminated redundant data dimensions
+- Clean metadata organization
+
+### 3. Comprehensive Documentation
+- Complete dimension descriptions
+- Data type specifications
+- Usage examples and statistics
+
+## Dependencies
+- **Python**: 3.x
+- **h5py**: For HDF5 file operations
+- **numpy**: For numerical operations
+
+## Installation
+```bash
+pip install h5py numpy
+```
+
+## Notes
+- **Data Consistency**: This file has been verified to be consistent with the original `simulation_data.h5`
+- **Optimization**: The file structure has been optimized for research use
+- **Documentation**: All parameters are self-documenting with clear descriptions
+- **Standards**: Uses industry-standard CSI terminology and HDF5 best practices
+
+## Verification
+A verification script is available at `.temp/verify_data_consistency.py` to ensure data integrity between `data.h5` and `simulation_data.h5`.
+
+## File History
+This file represents the final optimized version of PolyU Compacus WiFi data, incorporating:
+1. CSI standard terminology
+2. Optimized data structure
+3. Comprehensive metadata
+4. Complete dimension descriptions
+5. Self-documenting configuration
