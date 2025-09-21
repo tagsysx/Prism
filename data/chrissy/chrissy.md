@@ -8,7 +8,7 @@
   - 20个测量位置
   - 1个基站
   - 64个基站天线
-  - 4个UE天线（只使用第一个）
+  - 4个UE天线（使用所有4个）
   - 408个子载波
   - 1个UE设备
 - **pos.npy**: `(20, 3)`
@@ -19,7 +19,7 @@
 - **带宽**: 100MHz
 - **子载波间隔**: 240kHz
 - **基站天线配置**: 64x1
-- **UE天线配置**: 1x1
+- **UE天线配置**: 4x1
 
 ## H5文件结构
 
@@ -38,20 +38,20 @@ chrissy_data.h5/
 │       ├── center_frequency          # 3700000000 (3.7GHz)
 │       ├── csi_description           # "Channel State Information (CSI) data from chrissy dataset"
 │       ├── csi_dimensions            # "(position, bs_antenna_index, ue_antenna_index, subcarrier_index)"
-│       ├── csi_shape                 # "(20, 64, 1, 408)"
+│       ├── csi_shape                 # "(20, 64, 4, 408)"
 │       ├── num_samples               # 20
 │       ├── num_subcarriers           # 408
 │       ├── subcarrier_spacing        # 240000 (240kHz)
-│       ├── ue_antenna_configuration  # "1x1"
+│       ├── ue_antenna_configuration  # "4x1"
 │       ├── ue_positions_description  # "UE position coordinates (x, y, z)"
 │       ├── ue_positions_dimensions   # "(position, coordinates)"
 │       ├── ue_positions_shape        # "(20, 3)"
 │       ├── data_source               # "chrissy WiFi CSI dataset"
 │       ├── original_data_format      # "(20, 1, 64, 4, 408, 1)"
-│       └── processing_note           # "Only first UE antenna used, original dimensions preserved"
+│       └── processing_note           # "All 4 UE antennas used, dimensions reordered to (position, bs_antenna, ue_antenna, subcarrier)"
 └── data/                        # 数据组
     ├── bs_positions             # (20, 3) - 基站位置坐标
-    ├── csi                      # (20, 64, 1, 408) - 信道状态信息
+    ├── csi                      # (20, 64, 4, 408) - 信道状态信息
     └── ue_positions             # (20, 3) - UE位置坐标
 ```
 
@@ -64,13 +64,13 @@ chrissy_data.h5/
 - **内容**: 所有20个样本使用相同的基站坐标 `[x, y, z]`
 
 ### 2. csi (信道状态信息)
-- **形状**: `(20, 64, 1, 408)`
+- **形状**: `(20, 64, 4, 408)`
 - **数据类型**: `complex128`
-- **描述**: 信道状态信息数据
+- **描述**: 信道状态信息数据，维度顺序为(position, bs_antenna, ue_antenna, subcarrier)
 - **维度含义**:
   - 第1维 (20): 位置索引
   - 第2维 (64): 基站天线索引
-  - 第3维 (1): UE天线索引（只使用第一个）
+  - 第3维 (4): UE天线索引（使用所有4个）
   - 第4维 (408): 子载波索引
 
 ### 3. ue_positions (UE位置)
@@ -86,7 +86,7 @@ chrissy_data.h5/
 | bandwidth | 100000000 | 带宽100MHz |
 | center_frequency | 3700000000 | 中心频率3.7GHz |
 | subcarrier_spacing | 240000 | 子载波间隔240kHz |
-| bs_antenna_configuration | "64x1" | 64个基站天线，1个UE天线 |
-| ue_antenna_configuration | "1x1" | 只使用第一个UE天线 |
+| bs_antenna_configuration | "64x1" | 64个基站天线 |
+| ue_antenna_configuration | "4x1" | 使用所有4个UE天线 |
 | num_samples | 20 | 样本数量 |
 | num_subcarriers | 408 | 子载波数量 |
