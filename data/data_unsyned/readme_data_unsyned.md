@@ -31,8 +31,8 @@ The HDF5 file contains two main groups:
 │       ├── 📋 bs_positions_shape: "(76769, 1)"
 │       ├── 📋 center_frequency: 2400000000
 │       ├── 📋 csi_description: "Channel State Information (CSI) data"
-│       ├── 📋 csi_dimensions: "(position, ue_antenna_index, bs_antenna_index, subcarrier_index)"
-│       ├── 📋 csi_shape: "(76769, 8, 1, 64)"
+│       ├── 📋 csi_dimensions: "(position, bs_antenna_index, ue_antenna_index, subcarrier_index)"
+│       ├── 📋 csi_shape: "(76769, 1, 8, 64)"
 │       ├── 📋 num_samples: 76769
 │       ├── 📋 num_subcarriers: 64
 │       ├── 📋 subcarrier_spacing: 312500
@@ -43,7 +43,7 @@ The HDF5 file contains two main groups:
 │
 └── 📁 data/
     ├── 📊 bs_positions: (76769, 1) float64
-    ├── 📊 csi: (76769, 8, 1, 64) complex128
+    ├── 📊 csi: (76769, 1, 8, 64) complex128
     └── 📊 ue_positions: (76769, 3) float64
     └── 📊 timestamp: (76769, 1) float64
 ```
@@ -51,13 +51,13 @@ The HDF5 file contains two main groups:
 ## Dataset Details
 
 ### 1. CSI Data (`/data_unsyned/csi`)
-- **Shape**: (76769, 8, 1, 64)
+- **Shape**: (76769, 1, 8, 64)
 - **Data Type**: complex128
 - **Size**: 39,305,728 elements
 - **Dimensions**: 
   - **Position**: 76769 UE positions
-  - **UE Antenna Index**: 8 UE antennas
   - **BS Antenna Index**: 1 BS antenna
+  - **UE Antenna Index**: 8 UE antennas
   - **Subcarrier Index**: 64 subcarriers
 - **Description**: Channel State Information (CSI) data containing complex channel responses
 - **Frequency**: 2.4 GHz center frequency
@@ -133,7 +133,7 @@ with h5py.File('data_unsyned.h5', 'r') as f:
     
     # Access CSI for specific position
     position_idx = 0
-    csi_position = csi[position_idx, :, :, :]  # (8, 1, 64)
+    csi_position = csi[position_idx, :, :, :]  # (1, 8, 64)
     
     # Access UE coordinates for specific position
     ue_coords = ue_positions[position_idx, :]  # [x, y, z]
@@ -145,19 +145,18 @@ with h5py.File('data_unsyned.h5', 'r') as f:
 ### CSI Data_unsyned Usage
 ```python
 # Get CSI for position i
-csi_i = csi[i, :, :, :]  # (8, 1, 64)
+csi_i = csi[i, :, :, :]  # (1, 8, 64)
 
 # Get CSI for position i, UE antenna j
-csi_ij = csi[i, j, :, :]  # (1, 64)
+csi_ij = csi[i, :, j, :]  # (1, 64)
 
 # Get CSI for position i, UE antenna j, subcarrier k
-csi_ijk = csi[i, j, 0, k]  # complex number
 
 # Get CSI magnitude for all positions
-csi_magnitude = np.abs(csi)  # (913, 8, 1, 64)
+csi_magnitude = np.abs(csi)  # (913, 1, 8, 64)
 
 # Get CSI phase for all positions
-csi_phase = np.angle(csi)  # (913, 8, 1, 64)
+csi_phase = np.angle(csi)  # (913, 1, 8, 64)
 ```
 
 ### Position Data Usage
