@@ -2,13 +2,14 @@
 CSI Enhancement Network using Transformer
 
 This module implements a Transformer-based network that enhances CSI (Channel State Information)
-by learning spatial and frequency correlations across antennas and subcarriers.
+by learning frequency correlations within each antenna pair (BS-UE).
 
 Key Features:
-- Multi-head self-attention for spatial correlations
+- Multi-head self-attention within each antenna pair
 - Frequency-aware processing for subcarrier correlations
 - Complex number handling (real/imaginary parts)
 - Positional encoding for spatial relationships
+- Per-antenna-pair processing to avoid cross-antenna interference
 - Memory-efficient processing
 """
 
@@ -25,16 +26,16 @@ logger = logging.getLogger(__name__)
 class CSIEncoder(nn.Module):
     """Encoder for CSI data with spatial and frequency awareness."""
     
-    def __init__(self, d_model: int, num_antennas: int, num_subcarriers: int, dropout_rate: float = 0.1):
+    def __init__(self, d_model: int, dropout_rate: float = 0.1):
         super().__init__()
         self.d_model = d_model
         
         # Complex number processing: separate real and imaginary parts
         self.complex_projection = nn.Linear(2, d_model)  # [real, imag] -> d_model
         
-        # Spatial and frequency embeddings
-        self.spatial_embedding = nn.Embedding(num_antennas, d_model)  # For variable antennas
-        self.frequency_embedding = nn.Embedding(num_subcarriers, d_model)  # For variable subcarriers
+        # Use learnable parameters instead of embeddings for spatial and frequency encoding
+        self.spatial_projection = nn.Linear(1, d_model)  # Project antenna index to d_model
+        self.frequency_projection = nn.Linear(1, d_model)  # Project subcarrier index to d_model
         
         # Layer normalization
         self.layer_norm = nn.LayerNorm(d_model)
@@ -45,34 +46,40 @@ class CSIEncoder(nn.Module):
         Encode CSI data.
         
         Args:
-            csi: Complex CSI tensor [batch_size, num_antennas, num_subcarriers]
+            csi: Complex CSI tensor [batch_size, bs_antennas, ue_antennas, num_subcarriers] (4D only)
             
         Returns:
-            Encoded features [batch_size, num_antennas, num_subcarriers, d_model]
+            Encoded features [batch_size, bs_antennas, ue_antennas, num_subcarriers, d_model] (5D)
         """
-        batch_size, num_antennas, num_subcarriers = csi.shape
         device = csi.device
         
+        # Only accept 4D input format
+        if csi.dim() != 4:
+            raise ValueError(f"CSI tensor must be 4D. Got {csi.dim()}D tensor with shape {csi.shape}. Expected: [batch_size, bs_antennas, ue_antennas, num_subcarriers]")
+        
+        # 4D format: [batch_size, bs_antennas, ue_antennas, num_subcarriers]
+        batch_size, bs_antennas, ue_antennas, num_subcarriers = csi.shape
+        
         # Extract real and imaginary parts
-        real_part = csi.real  # [batch_size, num_antennas, num_subcarriers]
-        imag_part = csi.imag  # [batch_size, num_antennas, num_subcarriers]
+        real_part = csi.real  # [batch_size, bs_antennas, ue_antennas, num_subcarriers]
+        imag_part = csi.imag  # [batch_size, bs_antennas, ue_antennas, num_subcarriers]
         
         # Stack real and imaginary parts
-        complex_features = torch.stack([real_part, imag_part], dim=-1)  # [batch_size, num_antennas, num_subcarriers, 2]
+        complex_features = torch.stack([real_part, imag_part], dim=-1)  # [batch_size, bs_antennas, ue_antennas, num_subcarriers, 2]
         
         # Project to model dimension
-        x = self.complex_projection(complex_features)  # [batch_size, num_antennas, num_subcarriers, d_model]
+        x = self.complex_projection(complex_features)  # [batch_size, bs_antennas, ue_antennas, num_subcarriers, d_model]
         
-        # Add spatial embeddings
-        spatial_indices = torch.arange(num_antennas, device=device).unsqueeze(0).unsqueeze(-1).expand(batch_size, num_antennas, num_subcarriers)
-        spatial_emb = self.spatial_embedding(spatial_indices)  # [batch_size, num_antennas, num_subcarriers, d_model]
+        # Add spatial encodings for BS antennas (using learnable projection)
+        bs_spatial_indices = torch.arange(bs_antennas, device=device, dtype=torch.float32).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).expand(batch_size, bs_antennas, ue_antennas, num_subcarriers).unsqueeze(-1)
+        bs_spatial_emb = self.spatial_projection(bs_spatial_indices)  # [batch_size, bs_antennas, ue_antennas, num_subcarriers, d_model]
         
-        # Add frequency embeddings
-        freq_indices = torch.arange(num_subcarriers, device=device).unsqueeze(0).unsqueeze(0).expand(batch_size, num_antennas, num_subcarriers)
-        freq_emb = self.frequency_embedding(freq_indices)  # [batch_size, num_antennas, num_subcarriers, d_model]
+        # Add frequency encodings (using learnable projection)
+        freq_indices = torch.arange(num_subcarriers, device=device, dtype=torch.float32).unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(batch_size, bs_antennas, ue_antennas, num_subcarriers).unsqueeze(-1)
+        freq_emb = self.frequency_projection(freq_indices)  # [batch_size, bs_antennas, ue_antennas, num_subcarriers, d_model]
         
         # Combine features
-        x = x + spatial_emb + freq_emb
+        x = x + bs_spatial_emb + freq_emb
         x = self.layer_norm(x)
         x = self.dropout(x)
         
@@ -98,23 +105,27 @@ class CSIDecoder(nn.Module):
         Decode enhanced features back to CSI.
         
         Args:
-            x: Enhanced features [batch_size, num_antennas, num_subcarriers, d_model]
+            x: Enhanced features [batch_size, bs_antennas, ue_antennas, num_subcarriers, d_model] (5D only)
             
         Returns:
-            Enhanced CSI [batch_size, num_antennas, num_subcarriers]
+            Enhanced CSI [batch_size, bs_antennas, ue_antennas, num_subcarriers] (4D)
         """
+        # Only accept 5D input format
+        if x.dim() != 5:
+            raise ValueError(f"Enhanced features tensor must be 5D. Got {x.dim()}D tensor with shape {x.shape}. Expected: [batch_size, bs_antennas, ue_antennas, num_subcarriers, d_model]")
+        
         # Apply layer normalization
         x = self.layer_norm(x)
         x = self.dropout(x)
         
         # Project to complex numbers
-        complex_features = self.output_projection(x)  # [batch_size, num_antennas, num_subcarriers, 2]
+        complex_features = self.output_projection(x)  # [batch_size, bs_antennas, ue_antennas, num_subcarriers, 2]
         
         # Convert back to complex tensor
-        real_part = complex_features[..., 0]  # [batch_size, num_antennas, num_subcarriers]
-        imag_part = complex_features[..., 1]   # [batch_size, num_antennas, num_subcarriers]
+        real_part = complex_features[..., 0]  # [batch_size, bs_antennas, ue_antennas, num_subcarriers]
+        imag_part = complex_features[..., 1]   # [batch_size, bs_antennas, ue_antennas, num_subcarriers]
         
-        enhanced_csi = torch.complex(real_part, imag_part)  # [batch_size, num_antennas, num_subcarriers]
+        enhanced_csi = torch.complex(real_part, imag_part)
         
         return enhanced_csi
 
@@ -154,26 +165,42 @@ class CSITransformerLayer(nn.Module):
         Forward pass through transformer layer.
         
         Args:
-            x: Input features [batch_size, num_antennas, num_subcarriers, d_model]
+            x: Input features [batch_size, bs_antennas, ue_antennas, num_subcarriers, d_model] (5D only)
             
         Returns:
-            Enhanced features [batch_size, num_antennas, num_subcarriers, d_model]
+            Enhanced features [batch_size, bs_antennas, ue_antennas, num_subcarriers, d_model] (5D)
         """
-        batch_size, num_antennas, num_subcarriers, d_model = x.shape
+        # Only accept 5D input format
+        if x.dim() != 5:
+            raise ValueError(f"Input features tensor must be 5D. Got {x.dim()}D tensor with shape {x.shape}. Expected: [batch_size, bs_antennas, ue_antennas, num_subcarriers, d_model]")
         
-        # Reshape for attention: [batch_size, num_antennas * num_subcarriers, d_model]
-        x_flat = x.view(batch_size, num_antennas * num_subcarriers, d_model)
+        # 5D format: [batch_size, bs_antennas, ue_antennas, num_subcarriers, d_model]
+        batch_size, bs_antennas, ue_antennas, num_subcarriers, d_model = x.shape
         
-        # Self-attention with residual connection
-        attn_output, _ = self.self_attention(x_flat, x_flat, x_flat)
-        x_flat = self.norm1(x_flat + self.dropout(attn_output))
+        # Process each antenna pair separately to avoid cross-antenna interference
+        enhanced_outputs = []
         
-        # Feed-forward with residual connection
-        ffn_output = self.ffn(x_flat)
-        x_flat = self.norm2(x_flat + ffn_output)
+        for bs_idx in range(bs_antennas):
+            for ue_idx in range(ue_antennas):
+                # Extract CSI for this specific antenna pair: [batch_size, num_subcarriers, d_model]
+                antenna_csi = x[:, bs_idx, ue_idx, :, :]  # [batch_size, num_subcarriers, d_model]
+                
+                # Self-attention within this antenna pair only
+                attn_output, _ = self.self_attention(antenna_csi, antenna_csi, antenna_csi)
+                antenna_csi = self.norm1(antenna_csi + self.dropout(attn_output))
+                
+                # Feed-forward with residual connection
+                ffn_output = self.ffn(antenna_csi)
+                antenna_csi = self.norm2(antenna_csi + ffn_output)
+                
+                enhanced_outputs.append(antenna_csi)
         
-        # Reshape back to original shape
-        x = x_flat.view(batch_size, num_antennas, num_subcarriers, d_model)
+        # Reshape back to original format
+        # Stack all antenna pairs: [batch_size, bs_antennas * ue_antennas, num_subcarriers, d_model]
+        stacked_output = torch.stack(enhanced_outputs, dim=1)  # [batch_size, bs_antennas * ue_antennas, num_subcarriers, d_model]
+        
+        # Reshape to original 5D format: [batch_size, bs_antennas, ue_antennas, num_subcarriers, d_model]
+        x = stacked_output.view(batch_size, bs_antennas, ue_antennas, num_subcarriers, d_model)
         
         return x
 
@@ -182,14 +209,17 @@ class CSINetwork(nn.Module):
     """
     CSI Enhancement Network using Transformer.
     
-    This network enhances CSI by learning spatial and frequency correlations
-    across antennas and subcarriers using multi-head self-attention.
+    This network enhances CSI by learning frequency correlations within each antenna pair
+    using multi-head self-attention. Each antenna pair (BS-UE) is processed independently
+    to avoid cross-antenna interference.
     
     Architecture:
-    1. Input: Complex CSI [batch_size, num_antennas, num_subcarriers]
+    1. Input: Complex CSI [batch_size, bs_antennas, ue_antennas, num_subcarriers]
     2. Encoding: Convert to real features + spatial/frequency embeddings
-    3. Transformer: Multi-head self-attention layers
+    3. Transformer: Multi-head self-attention within each antenna pair
     4. Decoding: Convert back to enhanced complex CSI
+    
+    Key Feature: Per-antenna-pair processing - each BS-UE antenna pair is enhanced independently
     """
     
     def __init__(
@@ -199,8 +229,6 @@ class CSINetwork(nn.Module):
         n_heads: int = 8,
         d_ff: int = 512,
         dropout_rate: float = 0.1,
-        num_antennas: int = 64,
-        num_subcarriers: int = 408,
         smoothing_weight: float = 0.1,
         magnitude_constraint: bool = True,
         max_magnitude: float = 5.0
@@ -212,14 +240,12 @@ class CSINetwork(nn.Module):
         self.n_heads = n_heads
         self.d_ff = d_ff
         self.dropout_rate = dropout_rate
-        self.num_antennas = num_antennas
-        self.num_subcarriers = num_subcarriers
         self.smoothing_weight = smoothing_weight
         self.magnitude_constraint = magnitude_constraint
         self.max_magnitude = max_magnitude
         
-        # Encoder
-        self.encoder = CSIEncoder(d_model, num_antennas, num_subcarriers, dropout_rate)
+        # Encoder (no max dimension constraints)
+        self.encoder = CSIEncoder(d_model, dropout_rate)
         
         # Transformer layers
         self.transformer_layers = nn.ModuleList([
@@ -236,34 +262,36 @@ class CSINetwork(nn.Module):
         logger.info(f"  - n_heads: {n_heads}")
         logger.info(f"  - d_ff: {d_ff}")
         logger.info(f"  - dropout_rate: {dropout_rate}")
-        logger.info(f"  - num_antennas: {num_antennas}")
-        logger.info(f"  - num_subcarriers: {num_subcarriers}")
+        logger.info(f"  - smoothing_weight: {smoothing_weight}")
+        logger.info(f"  - magnitude_constraint: {magnitude_constraint}")
     
     def forward(self, csi: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of CSI enhancement network.
         
         Args:
-            csi: Input CSI tensor [batch_size, num_antennas, num_subcarriers]
+            csi: Input CSI tensor [batch_size, bs_antennas, ue_antennas, num_subcarriers] (4D only)
             
         Returns:
-            enhanced_csi: Enhanced CSI tensor [batch_size, num_antennas, num_subcarriers]
+            enhanced_csi: Enhanced CSI tensor [batch_size, bs_antennas, ue_antennas, num_subcarriers] (4D)
         """
         # Validate input
         if not torch.is_complex(csi):
             raise ValueError("Input CSI must be complex tensor")
         
-        batch_size, num_antennas, num_subcarriers = csi.shape
+        # Only accept 4D input format
+        if csi.dim() != 4:
+            raise ValueError(f"CSI tensor must be 4D. Got {csi.dim()}D tensor with shape {csi.shape}. Expected: [batch_size, bs_antennas, ue_antennas, num_subcarriers]")
         
-        if num_antennas != self.num_antennas:
-            raise ValueError(f"Expected {self.num_antennas} antennas, got {num_antennas}")
-        if num_subcarriers != self.num_subcarriers:
-            raise ValueError(f"Expected {self.num_subcarriers} subcarriers, got {num_subcarriers}")
+        # 4D format: [batch_size, bs_antennas, ue_antennas, num_subcarriers]
+        batch_size, bs_antennas, ue_antennas, num_subcarriers = csi.shape
+        
+        # No dimension validation - accept any size
         
         logger.debug(f"🔧 CSINetwork processing: {csi.shape}")
         
         # Encode CSI
-        x = self.encoder(csi)  # [batch_size, num_antennas, num_subcarriers, d_model]
+        x = self.encoder(csi)  # [batch_size, bs_antennas, ue_antennas, num_subcarriers, d_model]
         
         # Apply transformer layers
         for i, layer in enumerate(self.transformer_layers):
@@ -271,7 +299,7 @@ class CSINetwork(nn.Module):
             logger.debug(f"   Transformer layer {i+1}: {x.shape}")
         
         # Decode to enhanced CSI
-        enhanced_csi = self.decoder(x)  # [batch_size, num_antennas, num_subcarriers]
+        enhanced_csi = self.decoder(x)  # [batch_size, bs_antennas, ue_antennas, num_subcarriers]
         
         # Apply magnitude constraint to reduce vibrations
         if self.magnitude_constraint:

@@ -17,18 +17,17 @@ tracing:
   max_ray_length: 250.0
   num_sampling_points: 16
   use_ipe_encoding: true
-  num_bs_antennas: 1  # PolyU has 1 BS antenna
-  num_subcarriers: 64  # PolyU has 64 subcarriers
   use_mixed_precision: false
 
 input:
-  dataset_path: data/polyu/data.h5  # PolyU dataset path
+  dataset_path: data/polyu/polyu-sync.h5  # PolyU dataset path (reorganized CSI structure)
   random_seed: 42
   subcarrier_sampling:
     antenna_consistent: true
     sampling_method: uniform
     sampling_ratio: 1
   train_ratio: 0.8
+  ue_antenna_index: 0  # Use first UE antenna (index 0) for PolyU
   # Phase calibration configuration
   phase_calibration:
     enabled: true
@@ -39,7 +38,7 @@ neural_networks:
     embedding_dim: 32
     initialization: normal
     normalize: false
-    num_bs_antennas: 1  # PolyU has 1 BS antenna
+    # (Removed) num_bs_antennas should be obtained from base_station, not duplicated here.
     std: 0.1
   attenuation_network:
     activation: relu
@@ -55,7 +54,7 @@ neural_networks:
     d_ff: 512
     dropout_rate: 0.1
     # Add smoothing regularization
-    smoothing_weight: 0.1
+    smoothing_weight: 0.05  # 降低平滑权重，减少过度平滑
     # Add magnitude constraint
     magnitude_constraint: true
     max_magnitude: 50
@@ -68,8 +67,6 @@ neural_networks:
     antenna_embedding_dim: 32
     azimuth_divisions: 18
     elevation_divisions: 6
-    num_bs_antennas: 1  # PolyU has 1 BS antenna
-    num_subcarriers: 64  # PolyU has 64 subcarriers
   radiance_network:
     activation: relu
     antenna_embedding_dim: 32
@@ -96,7 +93,7 @@ system:
 
 
 training:
-  num_epochs: 5
+  num_epochs: 50  # 减少到1个epoch进行快速测试
   batch_size: 8
   checkpoint_frequency: 5
   enable_gradient_checkpointing: true
@@ -107,7 +104,7 @@ training:
     csi_loss:
       enabled: true
       magnitude_weight: 1.0
-      phase_weight: 1.0
+      phase_weight: 2.0
       normalize_weights: true
     csi_weight: 1.0
     pdp_loss:
@@ -124,7 +121,7 @@ training:
       enabled: false
       fusion_method: average
       loss_type: ssim
-      array_type: ue  # Use UE antenna array (8 antennas) for retraining
+      orientation: ue  # Use UE antenna array (8 antennas) for retraining
       phi_range:
       - 0.0
       - 10.0
@@ -150,4 +147,4 @@ user_equipment:
   num_ue_antennas: 8  # PolyU has 8 UE antennas
   antenna_array:
     configuration: "2x4"  # PolyU UE antenna array: 2 rows x 4 columns
-  target_antenna_index: 0
+  ue_antenna_count: 8  # Number of UE antennas to use (1=antenna 0, 2=antennas 0,1, 3=antennas 0,1,2, etc.)

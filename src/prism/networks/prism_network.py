@@ -39,7 +39,7 @@ class PrismNetwork(nn.Module):
     
     def __init__(
         self,
-        num_subcarriers: int = 408,
+        num_subcarriers: int = 408,  # Base subcarriers (will be dynamically updated)
         num_bs_antennas: int = 64,
         feature_dim: int = 128,
         antenna_embedding_dim: int = 64,
@@ -70,6 +70,10 @@ class PrismNetwork(nn.Module):
         self.elevation_divisions = elevation_divisions
         self.use_ipe_encoding = use_ipe_encoding
         self.use_mixed_precision = use_mixed_precision
+        
+        # Virtual subcarriers for multi-UE antenna scenarios
+        # This allows flexible usage of subcarriers based on UE antenna configuration
+        self.num_virtual_subcarriers = self.num_subcarriers
         
         # Ray tracing configuration
         self.max_ray_length = max_ray_length
@@ -168,8 +172,6 @@ class PrismNetwork(nn.Module):
                 n_heads=self.csi_network_config.get('n_heads', 8),
                 d_ff=self.csi_network_config.get('d_ff', 512),
                 dropout_rate=self.csi_network_config.get('dropout_rate', 0.1),
-                num_antennas=1,  # Chrissy dataset uses 1 antenna
-                num_subcarriers=self.num_subcarriers,
                 smoothing_weight=self.csi_network_config.get('smoothing_weight', 0.1),
                 magnitude_constraint=self.csi_network_config.get('magnitude_constraint', True),
                 max_magnitude=self.csi_network_config.get('max_magnitude', 5.0)
@@ -201,6 +203,29 @@ class PrismNetwork(nn.Module):
             nn.init.xavier_uniform_(self.antenna_codebook.embedding.weight)
         
         logger.info("✅ PrismNetwork weight initialization completed")
+    
+    def set_virtual_subcarriers(self, num_ue_antennas: int):
+        """
+        Set virtual subcarriers based on UE antenna configuration.
+        
+        Args:
+            num_ue_antennas: Number of UE antennas
+        """
+        self.num_virtual_subcarriers = self.num_subcarriers * num_ue_antennas
+        logger.info(f"🔧 Set virtual subcarriers: {self.num_subcarriers} * {num_ue_antennas} = {self.num_virtual_subcarriers}")
+        
+        # Update FrequencyCodebook to use virtual subcarriers
+        if hasattr(self, 'frequency_codebook'):
+            # Create new FrequencyCodebook with virtual subcarriers
+            from .frequency_codebook import FrequencyCodebook
+            self.frequency_codebook = FrequencyCodebook(
+                num_subcarriers=self.num_virtual_subcarriers,
+                basis_dim=self.frequency_codebook_config.get('basis_dim', 32),
+                initialization=self.frequency_codebook_config.get('initialization', 'complex_normal'),
+                std=self.frequency_codebook_config.get('std', 0.1),
+                normalize=self.frequency_codebook_config.get('normalize', False)
+            ).to(next(self.parameters()).device)
+            logger.info(f"🔧 Updated FrequencyCodebook to use {self.num_virtual_subcarriers} virtual subcarriers")
     
     def _generate_uniform_directions(self) -> torch.Tensor:
         """
@@ -522,18 +547,18 @@ class PrismNetwork(nn.Module):
             
             # 6. LowRankTransformer has been removed
             
-            # 7. FrequencyCodebook: Retrieve frequency basis vectors
-            if selected_subcarriers is not None:
-                # Convert to tensor for indexing
-                subcarrier_indices = torch.tensor(selected_subcarriers, dtype=torch.long, device=device)
-                frequency_basis_vectors = self.frequency_codebook(subcarrier_indices)
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug(f"🔍 Retrieved frequency basis vectors for {len(selected_subcarriers)} selected subcarriers")
-            else:
-                # Get all frequency basis vectors
-                frequency_basis_vectors = self.frequency_codebook()
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug(f"🔍 Retrieved frequency basis vectors for all {self.num_subcarriers} subcarriers")
+        # 7. FrequencyCodebook: Retrieve frequency basis vectors
+        if selected_subcarriers is not None:
+            # Convert to tensor for indexing
+            subcarrier_indices = torch.tensor(selected_subcarriers, dtype=torch.long, device=device)
+            frequency_basis_vectors = self.frequency_codebook(subcarrier_indices)
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"🔍 Retrieved frequency basis vectors for {len(selected_subcarriers)} selected subcarriers")
+        else:
+            # Get all frequency basis vectors - use virtual subcarriers for multi-UE antenna scenarios
+            frequency_basis_vectors = self.frequency_codebook()
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"🔍 Retrieved frequency basis vectors for all {self.num_virtual_subcarriers} virtual subcarriers")
             
             # 8. Prepare outputs
             outputs = {
@@ -559,10 +584,10 @@ class PrismNetwork(nn.Module):
         Enhance CSI using CSINetwork if enabled.
         
         Args:
-            csi: Input CSI tensor [batch_size, num_antennas, num_subcarriers]
+            csi: Input CSI tensor [batch_size, bs_antennas, ue_antennas, num_subcarriers] (4D)
             
         Returns:
-            enhanced_csi: Enhanced CSI tensor [batch_size, num_antennas, num_subcarriers]
+            enhanced_csi: Enhanced CSI tensor [batch_size, bs_antennas, ue_antennas, num_subcarriers] (4D)
         """
         if self.use_csi_network and self.csi_network is not None:
             logger.debug(f"🔧 Applying CSI enhancement: {csi.shape}")
@@ -577,6 +602,7 @@ class PrismNetwork(nn.Module):
         """Get information about the network architecture."""
         return {
             'num_subcarriers': self.num_subcarriers,
+            'num_virtual_subcarriers': self.num_virtual_subcarriers,
             'num_bs_antennas': self.num_bs_antennas,
             'feature_dim': self.feature_dim,
             'antenna_embedding_dim': self.antenna_embedding_dim,
@@ -594,6 +620,7 @@ class PrismNetwork(nn.Module):
         """Get the essential network configuration."""
         return {
             'num_subcarriers': self.num_subcarriers,
+            'num_virtual_subcarriers': self.num_virtual_subcarriers,
             'num_bs_antennas': self.num_bs_antennas,
             'feature_dim': self.feature_dim,
             'antenna_embedding_dim': self.antenna_embedding_dim,

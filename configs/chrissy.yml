@@ -1,8 +1,9 @@
 base_station:
   antenna_embedding_dim: 32
+  antenna_type: mimo
   num_antennas: 64  # Chrissy has 64 BS antennas (8x8 array)
   antenna_array:
-    configuration: "8x8"  # 8x8 = 64 antennas total
+    configuration: "8x8"  # Chrissy has 8x8 BS antenna array
   ofdm:
     bandwidth: 100.0e6  # Chrissy bandwidth: 100 MHz
     center_frequency: 3.7e9  # Chrissy frequency: 3.7 GHz
@@ -16,41 +17,29 @@ tracing:
   max_ray_length: 250.0
   num_sampling_points: 16
   use_ipe_encoding: true
-  num_bs_antennas: 64  # Chrissy has 64 BS antennas
-  num_subcarriers: 408  # Chrissy has 408 subcarriers
   use_mixed_precision: false
 
 input:
-  dataset_path: data/chrissy/chrissy.h5  # Chrissy dataset path
+  dataset_path: data/chrissy/chrissy.h5  # Chrissy dataset path with 4 UE antennas
   random_seed: 42
   subcarrier_sampling:
     antenna_consistent: true
     sampling_method: uniform
     sampling_ratio: 1
   train_ratio: 0.8
+  ue_antenna_index: 0  # Use first UE antenna (index 0) for Chrissy
   # Phase calibration configuration
   phase_calibration:
     enabled: true
-    reference_subcarrier_index: 0  # Use first subcarrier (index 0) as reference
+    reference_subcarrier_index: 0  # Use first subcarrier (index 0) as reference for Chrissy
 
 neural_networks:
   antenna_codebook:
     embedding_dim: 32
     initialization: normal
     normalize: false
-    num_bs_antennas: 64  # Chrissy has 64 BS antennas
+    # (Removed) num_bs_antennas should be obtained from base_station, not duplicated here.
     std: 0.1
-  csi_network:
-    d_model: 256
-    n_layers: 4
-    n_heads: 16
-    d_ff: 1024
-    dropout_rate: 0.05
-    # Add smoothing regularization
-    smoothing_weight: 0.1
-    # Add magnitude constraint
-    magnitude_constraint: true
-    max_magnitude: 100.0
   attenuation_network:
     activation: relu
     feature_dim: 128
@@ -58,7 +47,18 @@ neural_networks:
     num_layers: 3
     output_dim: 32
     use_shortcuts: true
-  enabled: true
+  csi_network:
+    enabled: false  # Disable CSI network to reduce memory usage
+    d_model: 64  # Reduced from 256
+    n_layers: 2  # Reduced from 4
+    n_heads: 4   # Reduced from 16
+    d_ff: 256    # Reduced from 1024
+    dropout_rate: 0.05
+    # Add smoothing regularization
+    smoothing_weight: 0.001
+    # Add magnitude constraint
+    magnitude_constraint: true
+    max_magnitude: 100.0
   frequency_codebook:
     basis_dim: 32
     initialization: complex_normal
@@ -68,8 +68,6 @@ neural_networks:
     antenna_embedding_dim: 32
     azimuth_divisions: 18
     elevation_divisions: 6
-    num_bs_antennas: 64  # Chrissy has 64 BS antennas
-    num_subcarriers: 408  # Chrissy has 408 subcarriers
   radiance_network:
     activation: relu
     antenna_embedding_dim: 32
@@ -94,9 +92,10 @@ system:
   device: cuda
   fallback_to_cpu: true
 
+
 training:
   num_epochs: 100
-  batch_size: 5  # Reduced batch size due to larger antenna array
+  batch_size: 5  # Minimal batch size to reduce memory usage
   checkpoint_frequency: 5
   enable_gradient_checkpointing: true
   epoch_save_interval: 1
@@ -123,8 +122,7 @@ training:
       enabled: false
       fusion_method: average
       loss_type: ssim
-      # Antenna array type: 'bs' for BS array, 'ue' for UE array
-      array_type: bs  # Use BS antenna array (64 antennas) for Chrissy
+      orientation: bs  # Use BS antenna array (64 antennas) for Chrissy
       phi_range:
       - 0.0
       - 10.0
@@ -147,5 +145,7 @@ training:
   weight_decay: 1.0e-05
 
 user_equipment:
-  num_ue_antennas: 1  # Chrissy has 1 UE antenna
-  target_antenna_index: 0
+  num_ue_antennas: 4  # Chrissy-u4 has 4 UE antennas
+  antenna_array:
+    configuration: "1x4"  # Chrissy-u4 UE antenna array: 1x4 antennas
+  ue_antenna_count: 4  # Number of UE antennas to use (4=antennas 0, 1, 2, and 3)

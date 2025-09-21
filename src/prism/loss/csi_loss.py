@@ -60,10 +60,10 @@ class CSILoss(nn.Module):
         Compute subcarrier-precise CSI loss between predicted and target CSI
         
         Args:
-            predicted_csi: Predicted CSI tensor (complex) from selected subcarriers
-                          Shape: (N,) - selected subcarriers, or any shape with selected data
-            target_csi: Target CSI tensor (complex) from selected subcarriers
-                       Shape: same as predicted_csi
+            predicted_csi: Predicted CSI tensor (complex)
+                          Shape: [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
+            target_csi: Target CSI tensor (complex)
+                       Shape: [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
         
         Returns:
             loss: Computed loss value (scalar tensor)
@@ -116,31 +116,65 @@ class CSILoss(nn.Module):
             logger.error(f"   Inf count: {torch.isinf(target_mag).sum()}")
             logger.error(f"   Min: {target_mag.min()}, Max: {target_mag.max()}")
         
-        # 1. Per-subcarrier magnitude MSE (not averaged across subcarriers)
-        subcarrier_mag_mse = torch.mean((pred_mag - target_mag)**2, dim=1)  # [num_subcarriers]
-        subcarrier_mag_loss = torch.mean(subcarrier_mag_mse)  # Average across subcarriers
+        # 1. True per-subcarrier magnitude MSE
+        # Handle 4D format: [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
+        if pred_mag.dim() != 4:
+            raise ValueError(f"Expected 4D tensor [batch, bs_antennas, ue_antennas, subcarriers], got {pred_mag.shape}")
+        
+        # True per-subcarrier calculation: compute MSE for each subcarrier separately
+        batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers = pred_mag.shape
+        subcarrier_mse_list = []
+        
+        for subcarrier_idx in range(num_subcarriers):
+            # Extract data for this specific subcarrier: [batch_size, num_bs_antennas, num_ue_antennas]
+            pred_subcarrier = pred_mag[:, :, :, subcarrier_idx]
+            target_subcarrier = target_mag[:, :, :, subcarrier_idx]
+            
+            # Compute MSE for this subcarrier across all samples and antennas
+            subcarrier_mse = torch.mean((pred_subcarrier - target_subcarrier)**2)
+            subcarrier_mse_list.append(subcarrier_mse)
+        
+        # Average MSE across all subcarriers
+        subcarrier_mag_loss = torch.mean(torch.stack(subcarrier_mse_list))
         
         # Debug: Check magnitude loss
         if torch.isnan(subcarrier_mag_loss) or torch.isinf(subcarrier_mag_loss):
             logger.error(f"❌ NaN/Inf in magnitude loss: {subcarrier_mag_loss}")
             logger.error(f"   pred_mag range: [{pred_mag.min():.6f}, {pred_mag.max():.6f}]")
             logger.error(f"   target_mag range: [{target_mag.min():.6f}, {target_mag.max():.6f}]")
-            logger.error(f"   subcarrier_mag_mse range: [{subcarrier_mag_mse.min():.6f}, {subcarrier_mag_mse.max():.6f}]")
-            logger.error(f"   subcarrier_mag_mse has NaN: {torch.isnan(subcarrier_mag_mse).any()}")
-            logger.error(f"   subcarrier_mag_mse has Inf: {torch.isinf(subcarrier_mag_mse).any()}")
+            logger.error(f"   subcarrier_mse_list: {[mse.item() for mse in subcarrier_mse_list]}")
+            logger.error(f"   subcarrier_mse_list has NaN: {[torch.isnan(mse).item() for mse in subcarrier_mse_list]}")
+            logger.error(f"   subcarrier_mse_list has Inf: {[torch.isinf(mse).item() for mse in subcarrier_mse_list]}")
         
-        # 2. Magnitude distribution preservation
-        pred_mag_mean = torch.mean(pred_mag, dim=1)  # Mean per subcarrier
-        target_mag_mean = torch.mean(target_mag, dim=1)
+        # 2. True per-subcarrier magnitude distribution preservation
+        pred_mag_mean_list = []
+        target_mag_mean_list = []
+        pred_mag_var_list = []
+        target_mag_var_list = []
+        
+        for subcarrier_idx in range(num_subcarriers):
+            # Extract data for this specific subcarrier: [batch_size, num_bs_antennas, num_ue_antennas]
+            pred_subcarrier = pred_mag[:, :, :, subcarrier_idx]
+            target_subcarrier = target_mag[:, :, :, subcarrier_idx]
+            
+            # Compute mean and variance for this subcarrier across all samples and antennas
+            pred_mean = torch.mean(pred_subcarrier)
+            target_mean = torch.mean(target_subcarrier)
+            pred_var = torch.var(pred_subcarrier, unbiased=False)
+            target_var = torch.var(target_subcarrier, unbiased=False)
+            
+            pred_mag_mean_list.append(pred_mean)
+            target_mag_mean_list.append(target_mean)
+            pred_mag_var_list.append(pred_var)
+            target_mag_var_list.append(target_var)
         
         # Calculate std with numerical stability
-        pred_mag_var = torch.var(pred_mag, dim=1, unbiased=False)  # Use var to avoid std issues
-        target_mag_var = torch.var(target_mag, dim=1, unbiased=False)
-        pred_mag_std = torch.sqrt(torch.clamp(pred_mag_var, min=1e-12))  # Clamp to prevent NaN
-        target_mag_std = torch.sqrt(torch.clamp(target_mag_var, min=1e-12))
+        pred_mag_std_list = [torch.sqrt(torch.clamp(var, min=1e-12)) for var in pred_mag_var_list]
+        target_mag_std_list = [torch.sqrt(torch.clamp(var, min=1e-12)) for var in target_mag_var_list]
         
-        mean_distribution_loss = F.mse_loss(pred_mag_mean, target_mag_mean)
-        std_distribution_loss = F.mse_loss(pred_mag_std, target_mag_std)
+        # Compute distribution losses per subcarrier
+        mean_distribution_loss = F.mse_loss(torch.stack(pred_mag_mean_list), torch.stack(target_mag_mean_list))
+        std_distribution_loss = F.mse_loss(torch.stack(pred_mag_std_list), torch.stack(target_mag_std_list))
         
         # Debug: Check distribution losses
         if torch.isnan(mean_distribution_loss) or torch.isinf(mean_distribution_loss):
@@ -159,8 +193,20 @@ class CSILoss(nn.Module):
         target_phase = torch.atan2(target_imag, target_real + 1e-8)
         
         phase_diff = torch.remainder(pred_phase - target_phase + np.pi, 2*np.pi) - np.pi
-        subcarrier_phase_mse = torch.mean(phase_diff**2, dim=1)  # [num_subcarriers]
-        subcarrier_phase_loss = torch.mean(subcarrier_phase_mse)
+        
+        # True per-subcarrier phase loss calculation
+        subcarrier_phase_mse_list = []
+        
+        for subcarrier_idx in range(num_subcarriers):
+            # Extract phase difference for this specific subcarrier: [batch_size, num_bs_antennas, num_ue_antennas]
+            phase_diff_subcarrier = phase_diff[:, :, :, subcarrier_idx]
+            
+            # Compute MSE for this subcarrier across all samples and antennas
+            subcarrier_phase_mse = torch.mean(phase_diff_subcarrier**2)
+            subcarrier_phase_mse_list.append(subcarrier_phase_mse)
+        
+        # Average MSE across all subcarriers
+        subcarrier_phase_loss = torch.mean(torch.stack(subcarrier_phase_mse_list))
         
         # 4. Complex correlation preservation (maintains complex relationship)
         # Use clipped magnitudes for normalization
@@ -175,9 +221,18 @@ class CSILoss(nn.Module):
                self.phase_weight * subcarrier_phase_loss +
                0.2 * correlation_loss)
         
+        # Log CSI loss components
+        # logger.info(f"📊 CSI Loss Components:")
+        # logger.info(f"   Magnitude Loss: {subcarrier_mag_loss.item():.6f} (weight: {self.magnitude_weight})")
+        # logger.info(f"   Mean Distribution Loss: {mean_distribution_loss.item():.6f} (weight: {0.5 * self.magnitude_weight:.3f})")
+        # logger.info(f"   Std Distribution Loss: {std_distribution_loss.item():.6f} (weight: {0.3 * self.magnitude_weight:.3f})")
+        # logger.info(f"   Phase Loss: {subcarrier_phase_loss.item():.6f} (weight: {self.phase_weight})")
+        # logger.info(f"   Correlation Loss: {correlation_loss.item():.6f} (weight: 0.2)")
+        # logger.info(f"   Total CSI Loss: {loss.item():.6f}")
+        
         # Final NaN/Inf check and replacement
         if torch.isnan(loss) or torch.isinf(loss):
-            logger.error(f"❌ Final loss is NaN/Inf: {loss}")
+            logger.error(f"❌ Final CSI loss is NaN/Inf: {loss}")
             logger.error(f"   Component losses:")
             logger.error(f"     magnitude: {subcarrier_mag_loss}")
             logger.error(f"     mean_dist: {mean_distribution_loss}")

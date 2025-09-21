@@ -95,12 +95,13 @@ class RadianceNetwork(nn.Module):
             self.hidden_layers.append(layer)
             self.hidden_norms.append(norm)
         
-        # Output layer: hidden_dim → num_ue_antennas * num_subcarriers
+        # Output layer: hidden_dim → output_dim (fixed dimension for ray tracing)
+        # The output_dim should match AttenuationNetwork's output_dim for ray tracing
         if self.complex_output:
-            # For complex output, we need 2 * num_ue_antennas * num_subcarriers
-            output_dim = 2 * self.num_ue_antennas * self.num_subcarriers
+            # For complex output, we need 2 * output_dim
+            output_dim = 2 * 32  # Fixed dimension of 32 for ray tracing
         else:
-            output_dim = self.num_ue_antennas * self.num_subcarriers
+            output_dim = 32  # Fixed dimension of 32 for ray tracing
             
         self.output_layer = nn.Linear(self.hidden_dim, output_dim)
         
@@ -211,19 +212,19 @@ class RadianceNetwork(nn.Module):
         # Now perform reshape and complex conversion on the full raw output
         # Raw output shape: (batch_size * num_antennas, output_dim)
         if self.complex_output:
-            # For complex output, output_dim = 2 * num_ue_antennas * num_subcarriers
-            # Reshape to (batch_size * num_antennas, num_ue_antennas, num_subcarriers, 2)
-            raw_output = raw_output.view(batch_size * num_antennas, self.num_ue_antennas, self.num_subcarriers, 2)
+            # For complex output, output_dim = 2 * 32 (fixed dimension for ray tracing)
+            # Reshape to (batch_size * num_antennas, 32, 2)
+            raw_output = raw_output.view(batch_size * num_antennas, 32, 2)
             # Convert to complex tensor with float32 for numerical stability
             real_part = raw_output[..., 0].to(torch.float32)
             imag_part = raw_output[..., 1].to(torch.float32)
             # Use float32 complex tensors for numerical stability
             output = real_part + 1j * imag_part  # Complex64
-            # Reshape back to (batch_size, num_antennas, num_ue_antennas, num_subcarriers)
-            output = output.view(batch_size, num_antennas, self.num_ue_antennas, self.num_subcarriers)
+            # Reshape back to (batch_size, num_antennas, 32)
+            output = output.view(batch_size, num_antennas, 32)
         else:
-            # Reshape to (batch_size, num_antennas, num_ue_antennas, num_subcarriers)
-            output = raw_output.view(batch_size, num_antennas, self.num_ue_antennas, self.num_subcarriers)
+            # Reshape to (batch_size, num_antennas, 32)
+            output = raw_output.view(batch_size, num_antennas, 32)
         
         return output
     

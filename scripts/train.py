@@ -44,6 +44,7 @@ from prism.networks.prism_network import PrismNetwork
 from prism.training_interface import PrismTrainingInterface
 from prism.config_loader import ModernConfigLoader
 from prism.loss.loss_function import LossFunction
+from base_runner import BaseRunner
 
 
 class TrainingProgressMonitor:
@@ -85,7 +86,7 @@ class TrainingProgressMonitor:
         print(f"{'='*60}")
 
 
-class PrismTrainer:
+class PrismTrainer(BaseRunner):
     """
     General training pipeline for Prism neural network system.
     
@@ -102,33 +103,18 @@ class PrismTrainer:
             resume_from: Optional path to checkpoint for resuming training
             new_training: If True, clear previous training results
         """
-        self.config_path = config_path
         self.resume_from = resume_from
         self.new_training = new_training
         
-        # Load configuration using modern loader
-        print("🔧 Loading configuration...")
-        try:
-            self.config_loader = ModernConfigLoader(config_path)
-            print(f"✅ Configuration loaded from: {config_path}")
-        except Exception as e:
-            print(f"❌ FATAL ERROR: Failed to load configuration from {config_path}")
-            print(f"   Error: {e}")
-            print(f"   Please check your configuration file and ensure it exists and is valid.")
-            raise
+        # Initialize base runner
+        super().__init__(config_path)
         
-        # Extract key configurations first
-        self.device = self.config_loader.get_device()
+        # Extract additional configurations
         self.training_config = self.config_loader.get_training_kwargs()
         self.output_paths = self.config_loader.get_output_paths()
-        self.data_config = self.config_loader.get_data_loader_config()
         
         # Setup logging (requires output_paths)
         self._setup_logging()
-        
-        # Clear previous results if new training
-        if self.new_training:
-            self._clear_previous_results()
         
         # Create output directories
         self.config_loader.ensure_output_directories()
@@ -210,7 +196,7 @@ class PrismTrainer:
         # Get network configuration
         network_kwargs = self.config_loader.get_prism_network_kwargs()
         
-        # Always use BS antenna count for training (regardless of array_type)
+        # Always use BS antenna count for training (regardless of orientation)
         num_antennas = network_kwargs['num_bs_antennas']
         self.logger.info(f"🔧 Using BS antenna array for training: {num_antennas} antennas")
         
@@ -225,7 +211,8 @@ class PrismTrainer:
             'system': {'device': str(self.device)},
             'training': self.config_loader.training.__dict__,
             'user_equipment': {
-                'target_antenna_index': self.data_config['ue_antenna_index']
+                'num_ue_antennas': self.config_loader.user_equipment.num_ue_antennas,
+                'ue_antenna_count': self.config_loader.user_equipment.ue_antenna_count
             },
             'input': {
                 'subcarrier_sampling': {
@@ -346,178 +333,16 @@ class PrismTrainer:
         
         # Note: Amplitude scaling handled by CSI enhancement network
         
+    
     def _load_data(self):
         """Load and prepare training data based on configuration."""
         self.logger.info("🔧 Loading training data...")
         
-        # Get dataset configuration
-        dataset_path = self.data_config['dataset_path']
+        # Use base class data loading method
+        ue_positions, bs_positions, antenna_indices, csi_data = super()._load_data()
         
-        self.logger.info(f"📊 Dataset configuration:")
-        self.logger.info(f"   Path: {dataset_path}")
-        
-        # Check if the dataset path exists
-        if not os.path.exists(dataset_path):
-            self.logger.error(f"❌ Dataset not found: {dataset_path}")
-            self.logger.error(f"   Please check the dataset path in your configuration file.")
-            raise FileNotFoundError(f"Dataset not found: {dataset_path}")
-        
-        # Auto-detect format and load data
-        with h5py.File(dataset_path, 'r') as f:
-            keys = list(f.keys())
-            self.logger.info(f"📊 Dataset keys: {keys}")
-            
-            if 'data' not in keys:
-                raise ValueError(f"Invalid dataset structure. Available keys: {keys}")
-            
-            data_keys = list(f['data'].keys())
-            self.logger.info(f"📊 Data keys: {data_keys}")
-            
-            # Auto-detect data format based on available keys
-            if 'ue_positions' in data_keys and 'bs_positions' in data_keys and 'csi' in data_keys:
-                # All datasets now use the same key names - detect format by data dimensions
-                self.logger.info("🔍 Detected unified format - analyzing data dimensions")
-                ue_positions = torch.from_numpy(f['data/ue_positions'][:]).float()
-                bs_positions_raw = torch.from_numpy(f['data/bs_positions'][:]).float()
-                channel_responses = torch.from_numpy(f['data/csi'][:]).cfloat()
-                
-                # Auto-detect format based on CSI data dimensions
-                if channel_responses.shape[1] > channel_responses.shape[2]:
-                    # PolyU format: [samples, ue_antennas, bs_antennas, subcarriers] -> [samples, bs_antennas, subcarriers, ue_antennas]
-                    csi_data = channel_responses.permute(0, 2, 3, 1)
-                    self.logger.info("   Detected PolyU format: [samples, ue_antennas, bs_antennas, subcarriers]")
-                else:
-                    # Chrissy/Sionna format: [samples, bs_antennas, ue_antennas, subcarriers] -> [samples, bs_antennas, subcarriers, ue_antennas]
-                    csi_data = channel_responses.permute(0, 1, 3, 2)
-                    self.logger.info("   Detected Chrissy/Sionna format: [samples, bs_antennas, ue_antennas, subcarriers]")
-                
-            else:
-                raise ValueError(f"Unknown dataset format. Available keys: {data_keys}")
-            
-            self.logger.info(f"📊 Raw data shapes:")
-            self.logger.info(f"   UE positions: {ue_positions.shape}")
-            self.logger.info(f"   BS positions (raw): {bs_positions_raw.shape}")
-            self.logger.info(f"   CSI data: {csi_data.shape}")
-            
-            # Handle BS positions using the generic expansion method
-            num_samples = ue_positions.shape[0]
-            bs_positions = self._expand_bs_positions_to_3d(bs_positions_raw, num_samples)
-            
-            # Always use BS antenna array for training (regardless of array_type)
-            self.logger.info("🔧 Using BS antenna array for training")
-            num_bs_antennas = csi_data.shape[1]
-            antenna_indices = torch.arange(num_bs_antennas).unsqueeze(0).expand(num_samples, -1).long()
-            
-            # Extract specific UE antenna
-            ue_antenna_idx = self.data_config['ue_antenna_index']
-            if csi_data.dim() == 4:
-                csi_data = csi_data[:, :, :, ue_antenna_idx]  # Remove UE dimension
-            
-            # Apply phase differential calibration
-            self._apply_phase_calibration(csi_data)
-            
+        # Prepare data split for training
         self._prepare_data_split(ue_positions, bs_positions, antenna_indices, csi_data)
-    
-    def _expand_bs_positions_to_3d(self, bs_positions_raw: torch.Tensor, num_samples: int) -> torch.Tensor:
-        """Expand BS positions from 1D to 3D coordinates"""
-        self.logger.info(f"🔧 Processing BS positions...")
-        self.logger.info(f"   Original shape: {bs_positions_raw.shape}")
-        
-        # Handle different BS position formats
-        if bs_positions_raw.dim() == 1:
-            # Single BS position for all samples
-            if bs_positions_raw.shape[0] == 1:
-                # Single value: expand to all samples
-                bs_positions = bs_positions_raw.unsqueeze(0).expand(num_samples, -1)
-                if bs_positions.shape[1] == 1:
-                    # 1D case: convert to 3D coordinates (e.g., SSID values)
-                    bs_positions_3d = torch.zeros(num_samples, 3)
-                    bs_positions_3d[:, 0] = bs_positions[:, 0]  # X = original value
-                    bs_positions_3d[:, 1] = 0.0  # Y = 0 (padded)
-                    bs_positions_3d[:, 2] = 0.0  # Z = 0 (padded)
-                    bs_positions = bs_positions_3d
-            else:
-                # Multiple values: one per sample
-                if bs_positions_raw.shape[0] == num_samples:
-                    if bs_positions_raw.shape[0] == num_samples and bs_positions_raw.shape[0] > 1:
-                        # 1D case: convert to 3D coordinates
-                        bs_positions = torch.zeros(num_samples, 3)
-                        bs_positions[:, 0] = bs_positions_raw  # X = original values
-                        bs_positions[:, 1] = 0.0  # Y = 0 (padded)
-                        bs_positions[:, 2] = 0.0  # Z = 0 (padded)
-                    else:
-                        bs_positions = bs_positions_raw
-                else:
-                    raise ValueError(f"BS position count mismatch: {bs_positions_raw.shape[0]} vs {num_samples}")
-        elif bs_positions_raw.dim() == 2:
-            # 2D tensor: [samples, features]
-            if bs_positions_raw.shape[0] == num_samples:
-                if bs_positions_raw.shape[1] == 1:
-                    # 1D case: convert to 3D coordinates (e.g., SSID values)
-                    bs_positions = torch.zeros(num_samples, 3)
-                    bs_positions[:, 0] = bs_positions_raw[:, 0]  # X = original values
-                    bs_positions[:, 1] = 0.0  # Y = 0 (padded)
-                    bs_positions[:, 2] = 0.0  # Z = 0 (padded)
-                elif bs_positions_raw.shape[1] == 3:
-                    # Already 3D coordinates
-                    bs_positions = bs_positions_raw
-                else:
-                    raise ValueError(f"Unsupported BS position dimensions: {bs_positions_raw.shape[1]}")
-            else:
-                raise ValueError(f"BS position sample count mismatch: {bs_positions_raw.shape[0]} vs {num_samples}")
-        else:
-            raise ValueError(f"Unsupported BS position tensor dimensions: {bs_positions_raw.dim()}")
-        
-        self.logger.info(f"✅ BS position expansion completed:")
-        self.logger.info(f"   Original shape: {bs_positions_raw.shape}")
-        self.logger.info(f"   Expanded shape: {bs_positions.shape}")
-        if bs_positions_raw.numel() > 0:
-            self.logger.info(f"   Original range: [{bs_positions_raw.min():.1f}, {bs_positions_raw.max():.1f}]")
-        self.logger.info(f"   X range: [{bs_positions[:, 0].min():.1f}, {bs_positions[:, 0].max():.1f}]")
-        self.logger.info(f"   Y values: all {bs_positions[:, 1].unique().item():.1f}")
-        self.logger.info(f"   Z values: all {bs_positions[:, 2].unique().item():.1f}")
-        
-        return bs_positions
-    
-    def _apply_phase_calibration(self, csi_data: torch.Tensor, reference_index: int = 0):
-        """Apply phase differential calibration using configured reference subcarrier"""
-        # Get phase calibration configuration
-        phase_calibration_config = self.data_config.get('phase_calibration', {})
-        enabled = phase_calibration_config.get('enabled', True)
-        
-        if not enabled:
-            self.logger.info("🔧 Phase calibration disabled by configuration")
-            return
-        
-        # Use configured reference subcarrier index
-        if 'reference_subcarrier_index' in phase_calibration_config:
-            reference_index = phase_calibration_config['reference_subcarrier_index']
-        
-        self.logger.info(f"🔧 Applying phase differential calibration using subcarrier {reference_index}...")
-        
-        original_shape = csi_data.shape
-        original_subcarriers = original_shape[2]
-        
-        # Validate reference index
-        if reference_index >= original_subcarriers:
-            self.logger.warning(f"⚠️ Reference subcarrier index {reference_index} >= total subcarriers {original_subcarriers}, using index 0")
-            reference_index = 0
-        
-        # Extract reference subcarrier
-        reference_subcarrier = csi_data[:, :, reference_index:reference_index+1]  # Keep dimension for broadcasting
-        
-        # Avoid division by zero
-        epsilon = 1e-12
-        reference_subcarrier_safe = reference_subcarrier + epsilon * torch.exp(1j * torch.angle(reference_subcarrier))
-        
-        # Normalize all subcarriers by the reference
-        csi_data = csi_data * torch.conj(reference_subcarrier_safe) / (torch.abs(reference_subcarrier_safe) ** 2)
-        
-        self.logger.info(f"✅ Phase differential calibration applied:")
-        self.logger.info(f"   Reference subcarrier: {reference_index}")
-        self.logger.info(f"   Original subcarriers: {original_subcarriers}")
-        self.logger.info(f"   Final format: [samples, antennas, subcarriers] = {csi_data.shape}")
-        
     def _prepare_data_split(self, ue_positions: torch.Tensor, bs_positions: torch.Tensor, 
                            antenna_indices: torch.Tensor, csi_data: torch.Tensor):
         """Prepare train/validation data split"""
@@ -573,12 +398,15 @@ class PrismTrainer:
         self.logger.info(f"   Training samples: {len(train_dataset)} ({len(self.train_loader)} batches)")
         self.logger.info(f"   Validation samples: {len(val_dataset)} ({len(self.val_loader)} batches)")
         
-        # Update training interface with actual subcarrier count after phase differential processing
-        actual_subcarriers = csi_data.shape[2]  # Get actual subcarrier count from processed data
+        # Validate that training interface subcarrier count matches data
+        # All CSI data is now 4D format: [batch, bs_antennas, ue_antennas, subcarriers]
+        actual_subcarriers = csi_data.shape[3]
         if hasattr(self.training_interface, 'num_subcarriers') and self.training_interface.num_subcarriers != actual_subcarriers:
-            self.logger.info(f"🔧 Updating training interface subcarrier count: {self.training_interface.num_subcarriers} → {actual_subcarriers}")
-            self.training_interface.num_subcarriers = actual_subcarriers
-            self.logger.info(f"   Now using all {actual_subcarriers} subcarriers (no selection needed)")
+            self.logger.warning(f"⚠️ Subcarrier count mismatch: training_interface has {self.training_interface.num_subcarriers}, data has {actual_subcarriers}")
+            self.logger.info(f"   Training interface expects {self.training_interface.num_subcarriers} subcarriers per UE antenna")
+            self.logger.info(f"   Data provides {actual_subcarriers} subcarriers per UE antenna")
+        else:
+            self.logger.info(f"✅ Subcarrier count validation passed: {self.training_interface.num_subcarriers} subcarriers per UE antenna")
         
     def _setup_tensorboard(self):
         """Setup TensorBoard logging."""
@@ -607,6 +435,12 @@ class PrismTrainer:
 
     def _load_checkpoint(self):
         """Load checkpoint if resuming training."""
+        # Clear previous results if new training (before loading checkpoint)
+        if self.new_training:
+            self._clear_previous_results()
+            # Recreate directories after clearing
+            self.config_loader.ensure_output_directories()
+        
         checkpoint_path = None
         
         # Priority 1: Explicitly specified checkpoint
@@ -690,19 +524,12 @@ class PrismTrainer:
             try:
                 # Forward pass with mixed precision autocast
                 with torch.amp.autocast('cuda', enabled=self.scaler is not None):
-                    # Forward pass through training interface (use optimized version if available)
-                    if hasattr(self.training_interface, 'forward_memory_optimized'):
-                        outputs = self.training_interface.forward_memory_optimized(
-                            ue_positions=ue_pos,
-                            bs_positions=bs_pos,
-                            antenna_indices=antenna_idx
-                        )
-                    else:
-                        outputs = self.training_interface(
-                            ue_positions=ue_pos,
-                            bs_positions=bs_pos,  # BS positions for each sample
-                            antenna_indices=antenna_idx
-                        )
+                    # Forward pass through training interface
+                    outputs = self.training_interface(
+                        ue_positions=ue_pos,
+                        bs_positions=bs_pos,  # BS positions for each sample
+                        bs_antenna_indices=antenna_idx
+                    )
                     
                     predictions = outputs['csi']
                     
@@ -822,19 +649,12 @@ class PrismTrainer:
                 antenna_idx = antenna_idx.to(self.device)
                 
                 try:
-                    # Forward pass (use optimized version if available)
-                    if hasattr(self.training_interface, 'forward_memory_optimized'):
-                        outputs = self.training_interface.forward_memory_optimized(
-                            ue_positions=ue_pos,
-                            bs_positions=bs_pos,
-                            antenna_indices=antenna_idx
-                        )
-                    else:
-                        outputs = self.training_interface(
-                            ue_positions=ue_pos,
-                            bs_positions=bs_pos,  # BS positions for each sample
-                            antenna_indices=antenna_idx
-                        )
+                    # Forward pass
+                    outputs = self.training_interface(
+                        ue_positions=ue_pos,
+                        bs_positions=bs_pos,  # BS positions for each sample
+                        bs_antenna_indices=antenna_idx
+                    )
                     
                     predictions = outputs['csi']
                     

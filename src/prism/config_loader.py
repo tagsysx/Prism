@@ -50,7 +50,7 @@ class SpatialSpectrumLossConfig:
     algorithm: str = 'bartlett'
     fusion_method: str = 'average'
     loss_type: str = 'ssim'
-    array_type: str = 'bs'  # 'bs' for BS antenna array, 'ue' for UE antenna array
+    orientation: str = 'bs'  # 'bs' for BS antenna array, 'ue' for UE antenna array, 'orientation' for orientation-based array
     theta_range: List[float] = field(default_factory=lambda: [0, 5.0, 90.0])
     phi_range: List[float] = field(default_factory=lambda: [0.0, 10.0, 360.0])
     ssim_window_size: int = 11
@@ -97,7 +97,6 @@ class DataConfig:
     """Data configuration."""
     enabled: bool = True
     dataset_path: str = "data/sionna"
-    ue_antenna_index: int = 0
     random_seed: int = 42
     train_ratio: float = 0.8
     test_ratio: float = 0.2
@@ -105,6 +104,13 @@ class DataConfig:
     sampling_method: str = 'uniform'
     antenna_consistent: bool = True
     phase_calibration: PhaseCalibrationConfig = field(default_factory=PhaseCalibrationConfig)
+
+
+@dataclass
+class UserEquipmentConfig:
+    """User Equipment configuration."""
+    num_ue_antennas: int = 1
+    ue_antenna_count: int = 1  # Number of UE antennas to use (1=use antenna 0, 2=use antennas 0,1, 3=use antennas 0,1,2, etc.)
 
 
 @dataclass
@@ -211,11 +217,44 @@ class ModernConfigLoader:
             if section not in nn_config:
                 raise ValueError(f"❌ Missing required neural network section: '{section}'")
         
-        # Use network configuration classes directly
-        self.prism_network = PrismNetworkConfig(**nn_config['prism_network'])
+        # Calculate derived parameters from base configuration
+        base_station = self._processed_config.get('base_station', {})
+        user_equipment = self._processed_config.get('user_equipment', {})
+        
+        self.num_bs_antennas = base_station.get('num_antennas', 64)
+        self.base_subcarriers = base_station.get('ofdm', {}).get('num_subcarriers', 64)
+        self.ue_antenna_count = user_equipment.get('ue_antenna_count', 1)
+        self.total_subcarriers = self.base_subcarriers * self.ue_antenna_count
+        
+        # Parse network configurations with derived parameters
+        # 1. PrismNetwork - remove derived parameters that should come from base config
+        prism_config = nn_config['prism_network'].copy()
+        # Remove parameters that should be derived from base_station
+        prism_config.pop('num_bs_antennas', None)
+        prism_config.pop('num_subcarriers', None)
+        self.prism_network = PrismNetworkConfig(**prism_config)
+        
+        # 2. AttenuationNetwork - no derived parameters needed
         self.attenuation_network = AttenuationNetworkConfig(**nn_config['attenuation_network'])
+        
+        # 3. RadianceNetwork - no derived parameters needed (output_dim is fixed)
         self.radiance_network = RadianceNetworkConfig(**nn_config['radiance_network'])
-        self.antenna_codebook = AntennaEmbeddingCodebookConfig(**nn_config['antenna_codebook'])
+        
+        # 4. AntennaCodebook - needs num_bs_antennas
+        antenna_config = nn_config['antenna_codebook'].copy()
+        antenna_config['num_bs_antennas'] = self.num_bs_antennas
+        self.antenna_codebook = AntennaEmbeddingCodebookConfig(**antenna_config)
+        
+        # 5. FrequencyCodebook - store config with derived num_subcarriers
+        freq_config = nn_config.get('frequency_codebook', {}).copy()
+        freq_config['num_subcarriers'] = self.total_subcarriers
+        self.frequency_codebook_config = freq_config
+        
+        # 6. CSINetwork - store config with derived max_antennas and max_subcarriers
+        csi_config = nn_config.get('csi_network', {}).copy()
+        csi_config['max_antennas'] = self.num_bs_antennas
+        csi_config['max_subcarriers'] = self.total_subcarriers
+        self.csi_network_config = csi_config
         
         # Training configuration
         training_config = self._processed_config.get('training', {})
@@ -270,10 +309,18 @@ class ModernConfigLoader:
             PhaseCalibrationConfig, phase_calibration_config
         )
         
+        # Get user_equipment configuration
+        user_equipment_config = self._processed_config.get('user_equipment', {})
+        
         # Parse data config with phase calibration
         self.data = self._parse_dataclass(
             DataConfig, {**data_config, **subcarrier_config}, 
             {'phase_calibration': phase_calibration}
+        )
+        
+        # User Equipment configuration
+        self.user_equipment = self._parse_dataclass(
+            UserEquipmentConfig, user_equipment_config
         )
         
         # Output configuration
@@ -320,10 +367,11 @@ class ModernConfigLoader:
                 f"!= antenna_codebook.embedding_dim({self.antenna_codebook.embedding_dim})"
             )
         
-        if self.prism_network.num_bs_antennas != self.antenna_codebook.num_bs_antennas:
+        # Validate BS antenna count consistency (using derived parameters)
+        if self.num_bs_antennas != self.antenna_codebook.num_bs_antennas:
             errors.append(
                 f"BS antenna count mismatch: "
-                f"prism_network.num_bs_antennas({self.prism_network.num_bs_antennas}) "
+                f"base_station.num_antennas({self.num_bs_antennas}) "
                 f"!= antenna_codebook.num_bs_antennas({self.antenna_codebook.num_bs_antennas})"
             )
         
@@ -389,8 +437,8 @@ class ModernConfigLoader:
                 raise ValueError(f"❌ Missing required CSI network parameter: '{param}'")
         
         return {
-            'num_subcarriers': self.prism_network.num_subcarriers,
-            'num_bs_antennas': self.prism_network.num_bs_antennas,
+            'num_subcarriers': self.base_subcarriers,  # 每个UE天线的子载波数
+            'num_bs_antennas': self.num_bs_antennas,     # 从基础配置获取
             'feature_dim': self.prism_network.feature_dim,
             'antenna_embedding_dim': self.prism_network.antenna_embedding_dim,
             'azimuth_divisions': self.prism_network.azimuth_divisions,
@@ -402,6 +450,7 @@ class ModernConfigLoader:
             'attenuation_network_config': self.attenuation_network.__dict__,
             'radiance_network_config': self.radiance_network.__dict__,
             'antenna_codebook_config': self.antenna_codebook.__dict__,
+            'frequency_codebook_config': self.frequency_codebook_config,
             # Add CSI network configuration
             'use_csi_network': True,  # Always enable CSI network when config exists
             'csi_network_config': csi_network_config,
@@ -436,7 +485,7 @@ class ModernConfigLoader:
         """Get data loader configuration."""
         return {
             'dataset_path': self.data.dataset_path,
-            'ue_antenna_index': self.data.ue_antenna_index,
+            'ue_antenna_count': self.user_equipment.ue_antenna_count,  # Get from user_equipment config
             'random_seed': self.data.random_seed,
             'train_ratio': self.data.train_ratio,
             'test_ratio': self.data.test_ratio,

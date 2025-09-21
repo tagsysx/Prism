@@ -91,11 +91,15 @@ class PrismTrainingInterface(nn.Module):
         # Move ray_tracer to device
         self.ray_tracer = self.ray_tracer.to(self.device)
         
-        # Subcarrier configuration - we use all subcarriers
-        self.num_subcarriers = self.prism_network.num_subcarriers
+        # Subcarrier configuration - we use base subcarriers from PrismNetwork
+        # Set virtual subcarriers based on UE antenna count
+        self.prism_network.set_virtual_subcarriers(self.ue_config.get('ue_antenna_count', 1))
+        # Set subcarrier configuration
+        self.num_subcarriers = self.prism_network.num_subcarriers  # Base subcarriers per UE antenna (64)
+        self.num_virtual_subcarriers = self.prism_network.num_virtual_subcarriers  # Total subcarriers (512)
         
-        # Target UE antenna index (for single antenna processing)
-        self.target_antenna_index = self.ue_config.get('target_antenna_index', 0)
+        # UE antenna configuration
+        self.ue_antenna_count = self.ue_config.get('ue_antenna_count', 1)
         
         # Checkpoint management
         self.checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else Path('./checkpoints')
@@ -112,14 +116,14 @@ class PrismTrainingInterface(nn.Module):
         logger.info(f"🚀 PrismTrainingInterface initialized")
         logger.info(f"   - Device: {self.device}")
         logger.info(f"   - Subcarriers: {self.num_subcarriers} total (all used)")
-        logger.info(f"   - Target UE antenna: {self.target_antenna_index}")
+        logger.info(f"   - UE antenna count: {self.ue_antenna_count}")
         logger.info(f"   - Checkpoint dir: {self.checkpoint_dir}")
     
     def _validate_config(self):
         """Validate required configuration parameters."""
         required_paths = [
             ('system', 'device'),
-            ('user_equipment', 'target_antenna_index')
+            ('user_equipment', 'ue_antenna_count')
         ]
         
         for path in required_paths:
@@ -130,10 +134,10 @@ class PrismTrainingInterface(nn.Module):
             except KeyError:
                 raise ConfigurationError(f"Missing required configuration: {'.'.join(path)}")
         
-        # Validate target antenna index
-        target_antenna_idx = self.config.get('user_equipment', {}).get('target_antenna_index', 0)
-        if target_antenna_idx < 0:
-            raise ConfigurationError(f"Invalid target_antenna_index: {target_antenna_idx}. Must be >= 0")
+        # Validate UE antenna count
+        ue_antenna_count = self.config.get('user_equipment', {}).get('ue_antenna_count', 1)
+        if ue_antenna_count < 1:
+            raise ConfigurationError(f"Invalid ue_antenna_count: {ue_antenna_count}. Must be >= 1")
         
         logger.debug("Configuration validation completed successfully")
     
@@ -208,22 +212,31 @@ class PrismTrainingInterface(nn.Module):
         self, 
         ue_positions: torch.Tensor,     # [batch_size, 3]
         bs_positions: torch.Tensor,     # [batch_size, 3]
-        antenna_indices: torch.Tensor,  # [batch_size, num_bs_antennas]
+        bs_antenna_indices: torch.Tensor,  # [batch_size, num_bs_antennas]
         return_intermediates: bool = False
     ) -> Dict[str, Union[torch.Tensor, Dict[str, Any]]]:
         """
         Forward pass with sample-by-sample processing for memory optimization.
         
+        This method processes each sample individually to minimize memory usage, then applies
+        batch CSI enhancement to all antenna pairs at once for efficiency.
+        
+        Processing Pipeline:
+        1. Sample-by-sample processing: PrismNetwork + RayTracing
+        2. Collect raw CSI from all BS antennas
+        3. Batch CSI enhancement: Apply CSINetwork to all antenna pairs simultaneously
+        4. Combine results and return final CSI predictions
+        
         Args:
             ue_positions: UE positions tensor [batch_size, 3]
             bs_positions: BS positions tensor [batch_size, 3]
-            antenna_indices: BS antenna indices [batch_size, num_bs_antennas]
+            bs_antenna_indices: BS antenna indices [batch_size, num_bs_antennas]
             return_intermediates: Whether to return intermediate results
             
         Returns:
             Dictionary containing:
-                - csi: [batch_size, num_bs_antennas, num_subcarriers, 1]
-                - subcarrier_selection: Selection information
+                - csi: [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers_per_ue] (4D)
+                - subcarrier_selection: None (all subcarriers used, no selection)
                 - intermediates: Ray tracing intermediates (if requested)
         """
         # Quick input validation
@@ -231,7 +244,7 @@ class PrismTrainingInterface(nn.Module):
             raise ValueError("Input data contains NaN values")
         
         batch_size = ue_positions.shape[0]
-        num_bs_antennas = antenna_indices.shape[1]
+        num_bs_antennas = bs_antenna_indices.shape[1]
         device = ue_positions.device
         
         # Performance timing
@@ -249,14 +262,14 @@ class PrismTrainingInterface(nn.Module):
             # Extract single sample data
             single_ue_position = ue_positions[sample_idx]  # [3]
             single_bs_position = bs_positions[sample_idx]  # [3]
-            single_antenna_indices = antenna_indices[sample_idx].unsqueeze(0)  # [1, num_bs_antennas]
+            single_bs_antenna_indices = bs_antenna_indices[sample_idx].unsqueeze(0)  # [1, num_bs_antennas]
             
             # Process single sample with configurable mixed precision
             with torch.amp.autocast('cuda', enabled=self.use_mixed_precision):
                 sample_result = self._process_single_sample(
                     ue_position=single_ue_position,
                     bs_position=single_bs_position,
-                    antenna_indices=single_antenna_indices,
+                    bs_antenna_indices=single_bs_antenna_indices,
                     return_intermediates=return_intermediates
                 )
             
@@ -277,7 +290,8 @@ class PrismTrainingInterface(nn.Module):
         
         # Combine results from all samples
         combined_csi = torch.cat([result['csi'] for result in batch_results], dim=0)
-        combined_selection = batch_results[0]['subcarrier_selection']  # Same for all samples
+        # All samples use all subcarriers (no selection), so subcarrier_selection is None
+        combined_selection = None
         
         # Prepare final outputs
         outputs = {
@@ -309,11 +323,101 @@ class PrismTrainingInterface(nn.Module):
         
         return outputs
     
+    def _apply_phase_differential_per_ue_antenna(self, csi: torch.Tensor) -> torch.Tensor:
+        """
+        Apply phase differential processing per UE antenna.
+        
+        This method applies phase differential calibration to CSI data for a single UE antenna,
+        ensuring that each UE antenna's CSI is processed independently.
+        
+        Args:
+            csi: CSI tensor for a single UE antenna [subcarriers_per_ue]
+            
+        Returns:
+            calibrated_csi: Phase-differential calibrated CSI [subcarriers_per_ue]
+        """
+        # Get phase calibration configuration
+        phase_calibration_config = self.data_config.get('phase_calibration', {})
+        if not phase_calibration_config.get('enabled', True):
+            return csi
+        
+        # Get reference subcarrier index (default: first subcarrier)
+        reference_subcarrier_index = phase_calibration_config.get('reference_subcarrier_index', 0)
+        
+        # Ensure reference index is within bounds
+        if reference_subcarrier_index >= csi.shape[0]:
+            reference_subcarrier_index = 0
+        
+        # Get reference phase from the reference subcarrier
+        reference_phase = torch.angle(csi[reference_subcarrier_index])
+        
+        # Apply phase differential calibration
+        # Remove the reference phase from all subcarriers
+        calibrated_csi = csi * torch.exp(-1j * reference_phase)
+        
+        logger.debug(f"🔧 Applied phase differential calibration for UE antenna")
+        logger.debug(f"   Reference subcarrier: {reference_subcarrier_index}")
+        logger.debug(f"   Reference phase: {reference_phase:.6f}")
+        logger.debug(f"   CSI shape: {csi.shape}")
+        
+        return calibrated_csi
+    
+    def _apply_phase_calibration_to_batch(self, csi_batch: torch.Tensor) -> torch.Tensor:
+        """
+        Apply phase differential calibration to a batch of CSI data.
+        
+        This method applies phase differential calibration to both predictions and targets
+        before loss computation, ensuring consistent phase reference.
+        
+        Args:
+            csi_batch: CSI batch tensor [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
+            
+        Returns:
+            calibrated_csi_batch: Phase-differential calibrated CSI batch
+        """
+        # Get phase calibration configuration
+        phase_calibration_config = self.data_config.get('phase_calibration', {})
+        if not phase_calibration_config.get('enabled', True):
+            return csi_batch
+        
+        # Get reference subcarrier index (default: first subcarrier)
+        reference_subcarrier_index = phase_calibration_config.get('reference_subcarrier_index', 0)
+        
+        # Ensure reference index is within bounds
+        if reference_subcarrier_index >= csi_batch.shape[-1]:
+            reference_subcarrier_index = 0
+        
+        # Apply phase calibration per UE antenna
+        calibrated_csi_batch = csi_batch.clone()
+        
+        batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers = csi_batch.shape
+        
+        for batch_idx in range(batch_size):
+            for bs_idx in range(num_bs_antennas):
+                for ue_idx in range(num_ue_antennas):
+                    # Get CSI for this specific UE antenna
+                    ue_csi = csi_batch[batch_idx, bs_idx, ue_idx, :]  # [num_subcarriers]
+                    
+                    # Get reference phase from the reference subcarrier
+                    reference_phase = torch.angle(ue_csi[reference_subcarrier_index])
+                    
+                    # Apply phase differential calibration
+                    calibrated_ue_csi = ue_csi * torch.exp(-1j * reference_phase)
+                    
+                    # Store calibrated CSI
+                    calibrated_csi_batch[batch_idx, bs_idx, ue_idx, :] = calibrated_ue_csi
+        
+        logger.debug(f"🔧 Applied phase differential calibration to batch")
+        logger.debug(f"   Batch shape: {csi_batch.shape}")
+        logger.debug(f"   Reference subcarrier: {reference_subcarrier_index}")
+        
+        return calibrated_csi_batch
+    
     def _process_single_sample(
         self, 
         ue_position: torch.Tensor,
         bs_position: torch.Tensor,
-        antenna_indices: torch.Tensor,
+        bs_antenna_indices: torch.Tensor,
         return_intermediates: bool = False
     ) -> Dict[str, Any]:
         """
@@ -322,23 +426,29 @@ class PrismTrainingInterface(nn.Module):
         This method implements the complete CSI prediction pipeline for a single sample:
         1. Input validation and preprocessing
         2. Frequency basis vector pre-computation (shared across antennas)
-        3. Antenna batch processing to reduce memory pressure
-        4. For each antenna:
+        3. BS antenna batch processing to reduce memory pressure
+        4. For each BS antenna:
            a. PrismNetwork forward pass (spatial factors)
            b. Ray tracing with LowRankRayTracer
-           c. CSI enhancement via transformer network
+           c. CSI enhancement for all UE antennas of this BS antenna
            d. Memory cleanup
-        5. Combine all antenna predictions
+        5. Combine all BS antenna predictions
         6. Shape normalization and final formatting
+        
+        Key Optimization: CSI enhancement is applied per-BS-antenna to minimize memory usage,
+        processing all UE antennas for each BS antenna together to avoid OOM errors.
         
         Args:
             ue_position: UE position tensor of shape [3]
             bs_position: BS position tensor of shape [3]
-            antenna_indices: Antenna indices tensor of shape [1, num_bs_antennas]
+            bs_antenna_indices: BS antenna indices tensor of shape [1, num_bs_antennas]
             return_intermediates: Whether to return intermediate results
         
         Returns:
-            Dictionary containing CSI predictions and subcarrier selection for the single sample
+            Dictionary containing:
+                - csi: [1, num_bs_antennas, num_ue_antennas, num_subcarriers_per_ue] (4D)
+                - subcarrier_selection: None (all subcarriers used)
+                - intermediates: Ray tracing intermediates (if requested)
         """
         device = next(self.prism_network.parameters()).device
         
@@ -348,8 +458,8 @@ class PrismTrainingInterface(nn.Module):
         # Basic validation - only check for invalid inputs (keep lightweight)
         if torch.isnan(ue_position).any() or torch.isnan(bs_position).any():
             raise ValueError("Input positions contain NaN values")
-        if (ue_position.abs() > 5000).any() or (bs_position.abs() > 5000).any():
-            logger.warning("Input positions have very large values - potential issue")
+        # Note: Position values can be large (e.g., Chrissy dataset has values up to 3M+)
+        # This is normal for real-world coordinate systems, so we don't warn about large values
         
         # No subcarrier selection needed - we predict all subcarriers
         
@@ -360,11 +470,15 @@ class PrismTrainingInterface(nn.Module):
         # ========================================
         # STEP 2: Memory optimization setup
         # ========================================
-        # MEMORY OPTIMIZATION: Process antennas in smaller batches
-        num_antennas = antenna_indices.shape[1]  # num_bs_antennas
-        antenna_batch_size = self.training_config.get('antenna_batch_size', 8)  # Default to 8 antennas per batch
+        # MEMORY OPTIMIZATION: Process BS antennas in smaller batches
+        # Note: Even though CSI enhancement is now batched, we still need BS antenna batching
+        # because PrismNetwork forward pass and Ray tracing are memory-intensive operations
+        # that need to be processed individually for each BS antenna
+        num_bs_antennas = bs_antenna_indices.shape[1]  # Number of BS antennas
+        antenna_batch_size = self.training_config.get('antenna_batch_size', 8)  # Default to 8 BS antennas per batch
         
-        logger.debug(f"📡 Processing {num_antennas} antennas in batches of {antenna_batch_size}")
+        logger.debug(f"📡 Processing {num_bs_antennas} BS antennas in batches of {antenna_batch_size}")
+        logger.debug(f"📡 UE antenna configuration: {self.ue_antenna_count} UE antennas per BS antenna")
         
         # ========================================
         # STEP 3: Frequency basis vector pre-computation
@@ -375,37 +489,50 @@ class PrismTrainingInterface(nn.Module):
         frequency_basis_vectors = self.prism_network.frequency_codebook()
         freq_compute_time = time.time() - start_time
         logger.debug(f"🔧 Pre-computed frequency basis vectors: {frequency_basis_vectors.shape} in {freq_compute_time:.4f}s")
+        logger.debug(f"🔧 FrequencyCodebook num_subcarriers: {self.prism_network.frequency_codebook.num_subcarriers}")
+        logger.debug(f"🔧 PrismNetwork num_virtual_subcarriers: {self.prism_network.num_virtual_subcarriers}")
         
         # ========================================
-        # STEP 4: Antenna batch processing loop
+        # STEP 4: BS Antenna batch processing loop
         # ========================================
-        # Process antennas in batches to reduce memory pressure
-        for batch_start in range(0, num_antennas, antenna_batch_size):
-            batch_end = min(batch_start + antenna_batch_size, num_antennas)
+        # Process BS antennas in batches to reduce memory pressure
+        for batch_start in range(0, num_bs_antennas, antenna_batch_size):
+            batch_end = min(batch_start + antenna_batch_size, num_bs_antennas)
             batch_size_actual = batch_end - batch_start
             
-            logger.debug(f"  📦 Processing antenna batch {batch_start//antenna_batch_size + 1}: antennas {batch_start}-{batch_end-1}")
+            logger.debug(f"  📦 Processing BS antenna batch {batch_start//antenna_batch_size + 1}: BS antennas {batch_start}-{batch_end-1}")
+            logger.debug(f"🔍 Memory at start of BS antenna batch {batch_start//antenna_batch_size + 1}")
+            if torch.cuda.is_available():
+                logger.debug(f"   GPU memory: {torch.cuda.memory_allocated()/1024**3:.2f}GB allocated, {torch.cuda.memory_reserved()/1024**3:.2f}GB reserved")
             
             # ========================================
-            # STEP 4a: Individual antenna processing
+            # STEP 4a: Individual BS antenna processing
             # ========================================
-            # Process each antenna in current batch
-            for antenna_idx in range(batch_start, batch_end):
-                # Get current antenna index
-                current_antenna_indices = antenna_indices[:, antenna_idx:antenna_idx+1]  # [1, 1]
-                antenna_idx_int = current_antenna_indices.squeeze().item()  # Convert to int
+            # Process each BS antenna in current batch
+            for bs_antenna_idx in range(batch_start, batch_end):
+                # Get current BS antenna index
+                current_bs_antenna_indices = bs_antenna_indices[:, bs_antenna_idx:bs_antenna_idx+1]  # [1, 1]
+                bs_antenna_index_int = current_bs_antenna_indices.squeeze().item()  # Convert to int
                 
                 # ========================================
                 # STEP 4a.1: PrismNetwork forward pass
                 # ========================================
                 # Call PrismNetwork.forward() for spatial factors only (frequency basis pre-computed)
+                logger.debug(f"🔍 Memory before PrismNetwork forward - BS antenna {bs_antenna_idx}")
+                if torch.cuda.is_available():
+                    logger.debug(f"   GPU memory: {torch.cuda.memory_allocated()/1024**3:.2f}GB allocated, {torch.cuda.memory_reserved()/1024**3:.2f}GB reserved")
+                
                 prism_outputs = self.prism_network.forward(
                     bs_position=bs_position,
                     ue_position=ue_position,
-                    antenna_index=antenna_idx_int,
+                    antenna_index=bs_antenna_index_int,  # BS antenna index
                     selected_subcarriers=None,
                     return_intermediates=return_intermediates
                 )
+                
+                logger.debug(f"✅ PrismNetwork forward completed - BS antenna {bs_antenna_idx}")
+                if torch.cuda.is_available():
+                    logger.debug(f"   GPU memory: {torch.cuda.memory_allocated()/1024**3:.2f}GB allocated, {torch.cuda.memory_reserved()/1024**3:.2f}GB reserved")
                 
                 # Extract spatial parameters from PrismNetwork output
                 attenuation_vectors = prism_outputs['attenuation_vectors']    # (num_directions, num_points, R)
@@ -418,115 +545,184 @@ class PrismTrainingInterface(nn.Module):
                 # STEP 4a.2: Ray tracing with LowRankRayTracer
                 # ========================================
                 # Ray tracing with LowRankRayTracer using pre-computed frequency basis
+                logger.debug(f"🔍 Memory before ray tracing - BS antenna {bs_antenna_idx}")
+                if torch.cuda.is_available():
+                    logger.debug(f"   GPU memory: {torch.cuda.memory_allocated()/1024**3:.2f}GB allocated, {torch.cuda.memory_reserved()/1024**3:.2f}GB reserved")
+                
+                logger.debug(f"🔧 Ray tracing inputs: frequency_basis_vectors.shape={frequency_basis_vectors.shape}")
                 ray_trace_results = self.ray_tracer.trace_rays(
                     attenuation_vectors=attenuation_vectors,      # (num_directions, num_points, R)
                     radiation_vectors=radiation_vectors,          # (num_directions, num_points, R)
                     frequency_basis_vectors=frequency_basis_vectors  # (num_subcarriers, R) - pre-computed
                 )
                 
+                logger.debug(f"✅ Ray tracing completed - BS antenna {bs_antenna_idx}")
+                if torch.cuda.is_available():
+                    logger.debug(f"   GPU memory: {torch.cuda.memory_allocated()/1024**3:.2f}GB allocated, {torch.cuda.memory_reserved()/1024**3:.2f}GB reserved")
+                
                 # Quick validation for ray tracing results
                 if 'csi' in ray_trace_results:
                     csi_pred = ray_trace_results['csi']
                     if torch.isnan(csi_pred).any():
-                        raise ValueError(f"NaN detected in ray trace output for antenna {antenna_idx}")
+                        raise ValueError(f"NaN detected in ray trace output for BS antenna {bs_antenna_idx}")
                     if torch.isinf(csi_pred).any():
-                        raise ValueError(f"Inf detected in ray trace output for antenna {antenna_idx}")
+                        raise ValueError(f"Inf detected in ray trace output for BS antenna {bs_antenna_idx}")
                 
                 # Collect intermediate results if requested (lightweight)
                 if return_intermediates:
                     intermediates.append({
-                        'antenna_idx': antenna_idx,
+                        'bs_antenna_idx': bs_antenna_idx,
+                        'bs_antenna_index_int': bs_antenna_index_int,
                         'prism_outputs_keys': list(prism_outputs.keys()),  # Only keys, not full data
                         'ray_trace_results_keys': list(ray_trace_results.keys())  # Only keys, not full data
                     })
                 
-                # Extract predictions for this antenna
-                antenna_predictions = ray_trace_results['csi']  # [1, num_subcarriers]
+                # Extract predictions for this BS antenna
+                bs_antenna_predictions = ray_trace_results['csi']  # [num_virtual_subcarriers] from ray tracing
+                
+                # Debug: Check bs_antenna_predictions shape
+                logger.debug(f"🔍 bs_antenna_predictions shape: {bs_antenna_predictions.shape}")
+                logger.debug(f"🔍 ray_trace_results keys: {list(ray_trace_results.keys())}")
                 
                 # ========================================
-                # STEP 4a.3: CSI enhancement via transformer
+                # STEP 4a.3: Store raw CSI for batch enhancement
                 # ========================================
-                # Apply CSI enhancement (required)
-                # Handle different input shapes
-                if antenna_predictions.dim() == 1:
-                    # [num_subcarriers] -> [1, 1, num_subcarriers]
-                    reshaped_predictions = antenna_predictions.unsqueeze(0).unsqueeze(0)
-                elif antenna_predictions.dim() == 2:
-                    # [1, num_subcarriers] -> [1, 1, num_subcarriers]
-                    reshaped_predictions = antenna_predictions.unsqueeze(1)
-                else:
-                    # Already 3D: [batch_size, num_antennas, num_subcarriers]
-                    reshaped_predictions = antenna_predictions
+                # Ray tracing returns [num_virtual_subcarriers], we need to convert to [num_ue_antennas, subcarriers_per_ue]
+                # where num_virtual_subcarriers = num_subcarriers × num_ue_antennas
                 
-                enhanced_predictions = self.prism_network.enhance_csi(reshaped_predictions)
-                # Remove the extra dimension: [1, 1, num_subcarriers] -> [1, num_subcarriers]
-                enhanced_predictions = enhanced_predictions.squeeze(1)
-                sample_csi.append(enhanced_predictions.clone())  # Clone to avoid reference issues
+                # Ensure bs_antenna_predictions is 1D: [num_virtual_subcarriers]
+                if bs_antenna_predictions.dim() > 1:
+                    bs_antenna_predictions = bs_antenna_predictions.squeeze()  # Remove extra dimensions
+                    logger.debug(f"🔧 Squeezed bs_antenna_predictions to 1D: {bs_antenna_predictions.shape}")
+                
+                # Calculate subcarriers per UE antenna
+                total_subcarriers = bs_antenna_predictions.shape[0]  # num_virtual_subcarriers
+                subcarriers_per_ue = total_subcarriers // self.ue_antenna_count
+                
+                if total_subcarriers % self.ue_antenna_count != 0:
+                    raise ValueError(f"Cannot evenly divide {total_subcarriers} subcarriers among {self.ue_antenna_count} UE antennas")
+                
+                logger.debug(f"🔧 Total subcarriers: {total_subcarriers}, UE antennas: {self.ue_antenna_count}, Subcarriers per UE: {subcarriers_per_ue}")
+                
+                # Reshape to [num_ue_antennas, subcarriers_per_ue]
+                bs_antenna_predictions_reshaped = bs_antenna_predictions.view(self.ue_antenna_count, subcarriers_per_ue)
+                logger.debug(f"🔧 Reshaped to [num_ue_antennas, subcarriers_per_ue]: {bs_antenna_predictions_reshaped.shape}")
                 
                 # ========================================
-                # STEP 4a.4: Memory cleanup for this antenna
+                # STEP 4a.3: Apply CSI enhancement to all UE antennas for this BS antenna
                 # ========================================
-                # Immediate memory cleanup for this antenna
+                logger.debug(f"🔍 Memory before CSI enhancement - BS antenna {bs_antenna_idx}")
+                if torch.cuda.is_available():
+                    logger.debug(f"   GPU memory: {torch.cuda.memory_allocated()/1024**3:.2f}GB allocated, {torch.cuda.memory_reserved()/1024**3:.2f}GB reserved")
+                
+                # Convert to 4D format: [1, 1, num_ue_antennas, subcarriers_per_ue]
+                bs_antenna_csi_4d = bs_antenna_predictions_reshaped.unsqueeze(0).unsqueeze(0)
+                logger.debug(f"🔧 CSI enhancement input shape: {bs_antenna_csi_4d.shape}")
+                
+                # Apply CSI enhancement to all UE antennas for this BS antenna at once
+                enhanced_bs_antenna_csi = self.prism_network.enhance_csi(bs_antenna_csi_4d)
+                logger.debug(f"🔧 CSI enhancement output shape: {enhanced_bs_antenna_csi.shape}")
+                
+                logger.debug(f"✅ CSI enhancement completed - BS antenna {bs_antenna_idx}")
+                if torch.cuda.is_available():
+                    logger.debug(f"   GPU memory: {torch.cuda.memory_allocated()/1024**3:.2f}GB allocated, {torch.cuda.memory_reserved()/1024**3:.2f}GB reserved")
+                
+                # Store enhanced CSI for this BS antenna (4D format)
+                sample_csi.append(enhanced_bs_antenna_csi.clone())  # Clone to avoid reference issues
+                
+                # Clear intermediate variables to free memory
+                del bs_antenna_csi_4d, enhanced_bs_antenna_csi
+                
+                # ========================================
+                # STEP 4a.4: Memory cleanup for this BS antenna
+                # ========================================
+                # Immediate memory cleanup for this BS antenna
                 del prism_outputs, attenuation_vectors, radiation_vectors, sampled_positions, directions
-                del ray_trace_results, antenna_predictions
+                del ray_trace_results, bs_antenna_predictions
             
-            # Memory cleanup after each antenna batch
+            # Memory cleanup after each BS antenna batch
+            logger.debug(f"🔍 Memory at end of BS antenna batch {batch_start//antenna_batch_size + 1}")
+            if torch.cuda.is_available():
+                logger.debug(f"   GPU memory: {torch.cuda.memory_allocated()/1024**3:.2f}GB allocated, {torch.cuda.memory_reserved()/1024**3:.2f}GB reserved")
+            
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            
+            logger.debug(f"✅ BS antenna batch {batch_start//antenna_batch_size + 1} completed and memory cleaned")
+            if torch.cuda.is_available():
+                logger.debug(f"   GPU memory after cleanup: {torch.cuda.memory_allocated()/1024**3:.2f}GB allocated, {torch.cuda.memory_reserved()/1024**3:.2f}GB reserved")
         
         # ========================================
-        # STEP 5: Combine all antenna predictions
+        # STEP 5: Combine all BS antenna predictions and apply batch CSI enhancement
         # ========================================
-        # Combine predictions from all antennas for this sample
-        # Stack along antenna dimension: [1, num_bs_antennas, num_subcarriers]
-        # Each antenna prediction is [1, num_subcarriers], we need to stack them
+        logger.debug(f"🔍 Memory before combining all BS antenna predictions")
+        if torch.cuda.is_available():
+            logger.debug(f"   GPU memory: {torch.cuda.memory_allocated()/1024**3:.2f}GB allocated, {torch.cuda.memory_reserved()/1024**3:.2f}GB reserved")
+        
+        # Combine predictions from all BS antennas for this sample
+        # Concatenate along BS antenna dimension: [1, num_bs_antennas, num_ue_antennas, subcarriers_per_ue]
+        # Each BS antenna prediction is [1, 1, num_ue_antennas, subcarriers_per_ue], we need to concatenate them
         
         # Debug: Check sample_csi
-        logger.debug(f"📊 sample_csi length: {len(sample_csi)}")
+        logger.debug(f"📊 sample_csi length: {len(sample_csi)} (should equal {num_bs_antennas})")
         if len(sample_csi) > 0:
-            logger.debug(f"📊 First prediction shape: {sample_csi[0].shape}")
-            logger.debug(f"📊 All prediction shapes: {[pred.shape for pred in sample_csi[:3]]}")
+            logger.debug(f"📊 First BS antenna prediction shape: {sample_csi[0].shape}")
+            logger.debug(f"📊 All BS antenna prediction shapes: {[pred.shape for pred in sample_csi[:3]]}")
         
         if len(sample_csi) == 0:
             logger.error("❌ No CSI predictions generated!")
-            # Create dummy prediction
-            dummy_prediction = torch.zeros(1, self.num_subcarriers, device=device, dtype=torch.complex64)
+            # Create dummy prediction: [1, 1, num_ue_antennas, subcarriers_per_ue] (4D format)
+            subcarriers_per_ue = self.num_subcarriers // self.ue_antenna_count
+            dummy_prediction = torch.zeros(1, 1, self.ue_antenna_count, subcarriers_per_ue, device=device, dtype=torch.complex64)
             sample_csi = [dummy_prediction]
         
-        # Each prediction is [1, 408] or [408], we need to stack them to get [1, num_antennas, num_subcarriers]
-        # Handle different prediction shapes
-        reshaped_predictions = []
-        for pred in sample_csi:
-            if pred.dim() == 1:  # [408]
-                reshaped_pred = pred.unsqueeze(0).unsqueeze(0)  # [1, 1, 408]
-            elif pred.dim() == 2:  # [1, 408]
-                reshaped_pred = pred.unsqueeze(1)  # [1, 1, 408]
-            else:  # Already 3D
-                reshaped_pred = pred
-            reshaped_predictions.append(reshaped_pred)
+        # Each BS antenna prediction is [1, 1, num_ue_antennas, subcarriers_per_ue] (4D)
+        # We need to stack them to get [1, num_bs_antennas, num_ue_antennas, subcarriers_per_ue]
         
-        combined_csi_raw = torch.cat(reshaped_predictions, dim=1)  # [1, num_antennas, num_subcarriers]
+        # Stack BS antenna predictions: [1, num_bs_antennas, num_ue_antennas, subcarriers_per_ue]
+        stacked_csi = torch.cat(sample_csi, dim=1)  # Concatenate along BS antenna dimension
+        logger.debug(f"📊 Stacked CSI shape: {stacked_csi.shape}")
+        
+        # Already in correct 4D format: [1, num_bs_antennas, num_ue_antennas, subcarriers_per_ue]
+        combined_csi = stacked_csi
+        logger.debug(f"📊 Combined CSI shape: {combined_csi.shape}")
+        
+        logger.debug(f"✅ All BS antenna predictions combined successfully")
+        if torch.cuda.is_available():
+            logger.debug(f"   GPU memory: {torch.cuda.memory_allocated()/1024**3:.2f}GB allocated, {torch.cuda.memory_reserved()/1024**3:.2f}GB reserved")
         
         # ========================================
-        # STEP 6: Shape normalization and final formatting
+        # STEP 5.1: CSI enhancement already applied per-antenna-pair in BS antenna loop
         # ========================================
-        # Handle subcarrier count mismatch dynamically
-        logger.debug(f"📊 combined_csi_raw shape: {combined_csi_raw.shape}")
-        predicted_subcarriers = combined_csi_raw.shape[2]
-        if predicted_subcarriers > self.num_subcarriers:
-            # Truncate predictions to match target subcarrier count
-            combined_csi_raw = combined_csi_raw[:, :, :self.num_subcarriers]
-            logger.debug(f"📐 Truncated predictions from {predicted_subcarriers} to {self.num_subcarriers} subcarriers")
-        elif predicted_subcarriers < self.num_subcarriers:
-            # Pad with zeros if needed
-            padding_size = self.num_subcarriers - predicted_subcarriers
-            padding = torch.zeros(combined_csi_raw.shape[0], combined_csi_raw.shape[1], padding_size, 
-                                dtype=combined_csi_raw.dtype, device=combined_csi_raw.device)
-            combined_csi_raw = torch.cat([combined_csi_raw, padding], dim=2)
-            logger.debug(f"📐 Padded predictions from {predicted_subcarriers} to {self.num_subcarriers} subcarriers")
+        # CSI enhancement has already been applied to each antenna pair individually
+        # in the BS antenna processing loop above, so no additional enhancement needed here
+        logger.debug(f"✅ CSI enhancement already completed per-antenna-pair in BS antenna loop")
         
-        # Final 3D format: [batch_size, num_bs_antennas, num_subcarriers]
-        combined_csi = combined_csi_raw  # Already in correct format
-        logger.debug(f"📐 Final CSI shape: {combined_csi.shape} (format: [batch, antennas, subcarriers])")
+        # ========================================
+        # STEP 6: Final CSI formatting and validation
+        # ========================================
+        # CSI enhancement has already been applied per-antenna-pair in the BS antenna loop above
+        # Now we just need to validate and format the final result
+        
+        logger.debug(f"📊 combined_csi shape: {combined_csi.shape}")
+        predicted_subcarriers_per_ue = combined_csi.shape[3]
+        expected_subcarriers_per_ue = self.num_subcarriers  # Base subcarriers per UE antenna (already calculated)
+        
+        # Validate subcarrier count matches expected
+        if predicted_subcarriers_per_ue != expected_subcarriers_per_ue:
+            logger.warning(f"⚠️ Subcarrier count mismatch: predicted {predicted_subcarriers_per_ue} vs expected {expected_subcarriers_per_ue}")
+            if predicted_subcarriers_per_ue > expected_subcarriers_per_ue:
+                # Truncate predictions to match target subcarrier count
+                combined_csi = combined_csi[:, :, :, :expected_subcarriers_per_ue]
+                logger.debug(f"📐 Truncated predictions from {predicted_subcarriers_per_ue} to {expected_subcarriers_per_ue} subcarriers")
+            else:
+                # Pad with zeros if needed
+                padding_size = expected_subcarriers_per_ue - predicted_subcarriers_per_ue
+                padding = torch.zeros(combined_csi.shape[0], combined_csi.shape[1], combined_csi.shape[2], padding_size, 
+                                    dtype=combined_csi.dtype, device=combined_csi.device)
+                combined_csi = torch.cat([combined_csi, padding], dim=3)
+                logger.debug(f"📐 Padded predictions from {predicted_subcarriers_per_ue} to {expected_subcarriers_per_ue} subcarriers")
+        
+        logger.debug(f"📐 Final CSI shape: {combined_csi.shape} (format: [batch, bs_antennas, ue_antennas, subcarriers_per_ue])")
         
         # ========================================
         # STEP 7: Prepare final result and cleanup
@@ -549,10 +745,11 @@ class PrismTrainingInterface(nn.Module):
     
     
     
+
     def compute_loss(
         self, 
-        predictions: torch.Tensor,  # [batch_size, num_bs_antennas, num_subcarriers]
-        targets: torch.Tensor,      # [batch_size, num_bs_antennas, num_subcarriers]
+        predictions: torch.Tensor,  # [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
+        targets: torch.Tensor,      # [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
         loss_function: nn.Module,
         validation_mode: bool = False
     ) -> torch.Tensor:
@@ -563,8 +760,8 @@ class PrismTrainingInterface(nn.Module):
         for maximum accuracy and simplified processing.
         
         Args:
-            predictions: Model predictions [batch_size, num_bs_antennas, num_subcarriers]
-            targets: Ground truth targets [batch_size, num_bs_antennas, num_subcarriers]
+            predictions: Model predictions [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
+            targets: Ground truth targets [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
             loss_function: Loss function module (should accept dict input with 'predictions' and 'targets' keys)
             validation_mode: If True, additional gradient checks are skipped
             
@@ -592,17 +789,15 @@ class PrismTrainingInterface(nn.Module):
         if predictions.shape != targets.shape:
             raise ValueError(f"Shape mismatch: predictions {predictions.shape} vs targets {targets.shape}")
         
+        # Validate tensor shape: [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
+        if predictions.dim() != 4:
+            raise ValueError(f"Expected 4D tensor [batch, bs_antennas, ue_antennas, subcarriers], got {predictions.shape}")
+        
         batch_size = predictions.shape[0]
         num_bs_antennas = predictions.shape[1]
-        num_subcarriers = predictions.shape[2] if predictions.dim() >= 3 else predictions.shape[1]
+        num_ue_antennas = predictions.shape[2]
+        num_subcarriers = predictions.shape[3]
         device = predictions.device
-        
-        # Validate 3D tensor shape: [batch_size, num_bs_antennas, num_subcarriers]
-        if predictions.dim() != 3:
-            raise ValueError(f"Expected 3D tensor [batch, antennas, subcarriers], got {predictions.shape}")
-        
-        if predictions.shape != targets.shape:
-            raise ValueError(f"Shape mismatch: predictions {predictions.shape} vs targets {targets.shape}")
         
         # Check for invalid values and raise detailed exception for debugging
         if torch.isnan(predictions).any() or torch.isinf(predictions).any():
@@ -648,24 +843,24 @@ class PrismTrainingInterface(nn.Module):
         # Compute loss
         try:
             # Use original 3D predictions directly - preserve amplitude and spatial structure
-            logger.info(f"📊 Preserving original prediction amplitude and spatial structure (3D format)")
+            logger.info(f"📊 Using 4D CSI format [batch, bs_antennas, ue_antennas, subcarriers] for loss calculation")
                 
+            # Apply phase calibration to both predictions and targets before loss computation
+            predictions_calibrated = self._apply_phase_calibration_to_batch(predictions)
+            targets_calibrated = self._apply_phase_calibration_to_batch(targets)
+            
             # Prepare dictionary format for LossFunction
-            # All losses now use original 3D tensors to preserve spatial structure
+            # All losses now use phase-calibrated tensors to preserve spatial structure
             predictions_dict = {
-                'csi': predictions  # Original 3D for all losses
+                'csi': predictions_calibrated  # Phase-calibrated predictions
             }
             targets_dict = {
-                'csi': targets  # Original 3D for all losses
+                'csi': targets_calibrated  # Phase-calibrated targets
             }
             
             # Call loss function and get detailed components
             loss, loss_components = loss_function(predictions_dict, targets_dict)
             
-            # Log detailed loss components
-            logger.info(f"📊 Loss Components:")
-            for component_name, component_value in loss_components.items():
-                logger.info(f"   {component_name}: {component_value:.6f}")
                 
         except Exception as e:
             logger.error(f"Loss computation failed: {e}")
@@ -787,8 +982,8 @@ class PrismTrainingInterface(nn.Module):
             logger.info("🔒 Checkpoint loaded with weights_only=True (secure mode)")
         except Exception as e:
             # Fallback to weights_only=False for compatibility with complex checkpoint formats
-            logger.warning(f"⚠️  Failed to load with weights_only=True: {e}")
-            logger.warning("🔓 Falling back to weights_only=False (compatibility mode)")
+            logger.warning(f"⚠️  Secure loading failed (expected for complex checkpoints): {str(e)[:100]}...")
+            logger.info("🔓 Using compatibility mode (weights_only=False) - this is normal for Prism checkpoints")
             checkpoint_data = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         
         # Load model states
@@ -864,7 +1059,7 @@ class PrismTrainingInterface(nn.Module):
             },
             'model_config': {
                 'num_subcarriers': self.num_subcarriers,
-                'target_antenna_index': self.target_antenna_index,
+                'ue_antenna_count': self.ue_antenna_count,
                 'subcarrier_usage': 'all_subcarriers'
             },
             'system_info': {

@@ -43,6 +43,47 @@ pip install -e .
 
 ## 🚀 Quick Start
 
+### Complete Workflow: Train → Test → Analyze
+
+**1. Training a Model:**
+```bash
+# Basic training with default config
+python scripts/train_prism.py --config configs/sionna.yml
+
+# Training with custom parameters
+python scripts/train_prism.py \
+    --config configs/sionna.yml \
+    --epochs 100 \
+    --batch_size 32 \
+    --learning_rate 0.001 \
+    --output_dir results/my_experiment
+```
+
+**2. Testing the Trained Model:**
+```bash
+# Test with latest checkpoint
+python scripts/test_prism.py --config configs/sionna.yml
+
+# Test with specific checkpoint
+python scripts/test_prism.py \
+    --config configs/sionna.yml \
+    --checkpoint results/sionna/training/models/best_model.pt \
+    --output_dir results/sionna/testing
+```
+
+**3. Analyzing Results:**
+```bash
+# Basic analysis
+python scripts/analyze.py --results results/sionna/testing/results.npz
+
+# Advanced analysis with parallel processing
+python scripts/analyze.py \
+    --results results/sionna/testing/results.npz \
+    --output_dir results/sionna/analysis \
+    --use_parallel \
+    --num_workers 8
+```
+
 ### Generating Synthesized Dataset
 
 Generate synthetic channel data using the Sionna-compatible data generator:
@@ -107,6 +148,32 @@ python scripts/test_prism.py \
     --config configs/sionna.yml \
     --checkpoint results/sionna/training/models/best_model.pt \
     --output_dir results/sionna/testing
+```
+
+### Analyzing Results
+
+**Most concise analysis command:**
+```bash
+python scripts/analyze.py --results results/sionna/testing/results.npz
+```
+
+**Analyze with custom parameters:**
+```bash
+python scripts/analyze.py \
+    --results results/sionna/testing/results.npz \
+    --output_dir results/sionna/analysis \
+    --num_samples 100 \
+    --use_parallel
+```
+
+**Analyze with specific configuration:**
+```bash
+python scripts/analyze.py \
+    --results results/sionna/testing/results.npz \
+    --config configs/sionna.yml \
+    --output_dir results/sionna/analysis \
+    --no-parallel \
+    --num_workers 4
 ```
 
 ### Python API Usage
@@ -181,6 +248,52 @@ Prism/
     └── sionna/                 # Synthetic data generator
 ```
 
+## 📋 Command Line Reference
+
+### Training Script (`scripts/train_prism.py`)
+
+```bash
+python scripts/train_prism.py [OPTIONS]
+
+Options:
+  --config CONFIG_FILE     Path to configuration file (required)
+  --epochs N               Number of training epochs
+  --batch_size N           Training batch size
+  --learning_rate LR       Learning rate
+  --output_dir DIR         Output directory for results
+  --checkpoint_dir DIR     Directory to save checkpoints
+  --resume CHECKPOINT      Resume training from checkpoint
+  --device DEVICE          Device to use (cuda/cpu)
+```
+
+### Testing Script (`scripts/test_prism.py`)
+
+```bash
+python scripts/test_prism.py [OPTIONS]
+
+Options:
+  --config CONFIG_FILE     Path to configuration file (required)
+  --checkpoint CHECKPOINT  Path to model checkpoint
+  --output_dir DIR         Output directory for results
+  --num_samples N         Number of samples to test
+  --device DEVICE          Device to use (cuda/cpu)
+```
+
+### Analysis Script (`scripts/analyze.py`)
+
+```bash
+python scripts/analyze.py [OPTIONS]
+
+Options:
+  --results RESULTS_FILE   Path to results.npz file (required)
+  --config CONFIG_FILE     Path to configuration file
+  --output_dir DIR         Output directory for analysis
+  --num_samples N         Number of samples to analyze
+  --use_parallel          Enable parallel processing
+  --no-parallel           Disable parallel processing
+  --num_workers N         Number of parallel workers
+```
+
 ## ⚙️ Configuration
 
 The system uses YAML configuration files with template variables and dynamic path resolution:
@@ -214,6 +327,66 @@ training:
 ```
 
 See the [Configuration Guide](configs/README.md) for detailed parameter explanations.
+
+## 💡 Usage Examples
+
+### Example 1: Complete Training Pipeline
+
+```bash
+# 1. Generate synthetic data
+python data/sionna/generator.py --n 1000
+
+# 2. Train the model
+python scripts/train_prism.py \
+    --config configs/sionna.yml \
+    --epochs 50 \
+    --batch_size 16 \
+    --output_dir results/experiment_1
+
+# 3. Test the model
+python scripts/test_prism.py \
+    --config configs/sionna.yml \
+    --checkpoint results/experiment_1/training/models/best_model.pt \
+    --output_dir results/experiment_1/testing
+
+# 4. Analyze results
+python scripts/analyze.py \
+    --results results/experiment_1/testing/results.npz \
+    --output_dir results/experiment_1/analysis \
+    --use_parallel
+```
+
+### Example 2: Using Different Datasets
+
+```bash
+# Train on Chrissy dataset
+python scripts/train_prism.py --config configs/chrissy.yml
+
+# Train on PolyU dataset  
+python scripts/train_prism.py --config configs/polyu.yml
+
+# Test with specific dataset
+python scripts/test_prism.py \
+    --config configs/chrissy.yml \
+    --checkpoint results/chrissy/training/models/best_model.pt
+```
+
+### Example 3: Performance Analysis
+
+```bash
+# Analyze with parallel processing for large datasets
+python scripts/analyze.py \
+    --results results/sionna/testing/results.npz \
+    --use_parallel \
+    --num_workers 16 \
+    --num_samples 10000
+
+# Analyze without parallel processing (for debugging)
+python scripts/analyze.py \
+    --results results/sionna/testing/results.npz \
+    --no-parallel \
+    --num_samples 100
+```
 
 ## 📚 Documentation
 

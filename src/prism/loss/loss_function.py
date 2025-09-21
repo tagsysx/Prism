@@ -90,9 +90,12 @@ class LossFunction(nn.Module):
         self.spatial_spectrum_enabled = ssl_config.get('enabled', False)
         self.ss_loss = None
         if self.spatial_spectrum_weight > 0 and self.spatial_spectrum_enabled:
-            # Pass the full config to SSLoss (it needs base_station and training sections)
-            full_config = {'base_station': config.get('base_station', {}), 
-                          'training': {'loss': {'spatial_spectrum_loss': ssl_config}}}
+            # Pass the full config to SSLoss (it needs base_station, user_equipment and training sections)
+            full_config = {
+                'base_station': config.get('base_station', {}), 
+                'user_equipment': config.get('user_equipment', {}),
+                'training': {'loss': {'spatial_spectrum_loss': ssl_config}}
+            }
             self.ss_loss = SSLoss(full_config)
         
         # Loss components tracking
@@ -123,20 +126,15 @@ class LossFunction(nn.Module):
         if masks is None:
             masks = {}
         
-        # CSI loss (hybrid: CMSE + Magnitude + Phase) - use original 3D CSI tensors
-        print(f"🔍 DEBUG: CSI loss check - keys: {list(predictions.keys())}, enabled: {self.csi_enabled}")
+        # CSI loss (hybrid: CMSE + Magnitude + Phase) - use original 4D CSI tensors
         if ('csi' in predictions and 'csi' in targets and self.csi_enabled):
-            # Use original 3D CSI tensors to preserve spatial structure
+            # Use original 4D CSI tensors to preserve spatial structure
             csi_pred = predictions['csi']
             csi_target = targets['csi']
-            
-            logger.info(f"🔍 Computing CSI loss - pred shape: {csi_pred.shape}, target shape: {csi_target.shape}")
-            logger.info(f"🔍 CSI enabled: {self.csi_enabled}, CSI weight: {self.csi_weight}")
             
             # Use CSILoss class for comprehensive CSI loss calculation
             try:
                 csi_loss_val = self.csi_loss(csi_pred, csi_target)
-                logger.info(f"🔍 CSI loss computed: {csi_loss_val}")
                 total_loss = total_loss + self.csi_weight * csi_loss_val
                 loss_components['csi_loss'] = csi_loss_val.item()
             except Exception as e:
@@ -148,13 +146,11 @@ class LossFunction(nn.Module):
                 total_loss = total_loss + self.csi_weight * csi_loss_val
                 loss_components['csi_loss'] = csi_loss_val.item()
         else:
-            logger.warning(f"⚠️ CSI loss skipped - enabled: {self.csi_enabled}, keys: {list(predictions.keys())}")
             loss_components['csi_loss'] = 0.0
         
-        # PDP loss (hybrid: MSE + Delay) - use original 3D CSI tensors for frequency domain analysis
+        # PDP loss (hybrid: MSE + Delay) - use original 4D CSI tensors for frequency domain analysis
         if ('csi' in predictions and 'csi' in targets and 
             self.pdp_enabled and self.pdp_weight > 0):
-            logger.info(f"🔍 Computing PDP loss - enabled: {self.pdp_enabled}, weight: {self.pdp_weight}")
             pdp_loss_val = self.pdp_loss(
                 predictions['csi'], 
                 targets['csi']
@@ -163,7 +159,6 @@ class LossFunction(nn.Module):
             loss_components['pdp_loss'] = pdp_loss_val.item()
         else:
             # PDP loss is disabled, set to 0
-            logger.info(f"🔍 PDP loss skipped - enabled: {self.pdp_enabled}, weight: {self.pdp_weight}")
             loss_components['pdp_loss'] = 0.0
         
         # Spatial Spectrum loss
@@ -171,11 +166,10 @@ class LossFunction(nn.Module):
             self.spatial_spectrum_enabled and
             'csi' in predictions and 'csi' in targets and 
             self.spatial_spectrum_weight > 0):
-            # Use selected CSI tensors for spatial spectrum loss
-            spatial_loss_val = self.ss_loss(
-                predictions['csi'], 
-                targets['csi']
-            )
+            
+            # SSLoss will handle CSI format conversion internally
+            logger.info(f"🔍 Computing spatial spectrum loss with CSI shape: {predictions['csi'].shape}")
+            spatial_loss_val = self.ss_loss(predictions['csi'], targets['csi'])
             total_loss = total_loss + self.spatial_spectrum_weight * spatial_loss_val
             loss_components['ss_loss'] = spatial_loss_val.item()
         

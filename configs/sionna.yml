@@ -1,28 +1,28 @@
 base_station:
   antenna_embedding_dim: 32
   antenna_type: mimo
-  num_antennas: 64
+  num_antennas: 64  # Sionna has 64 BS antennas (8x8 array)
   antenna_array:
-    configuration: "8x8"  # 8x8 = 64 antennas total
+    configuration: "8x8"  # Sionna has 8x8 BS antenna array
   ofdm:
-    bandwidth: 100.0e6
-    center_frequency: 3.5e9
+    bandwidth: 100.0e6  # Sionna bandwidth: 100 MHz
+    center_frequency: 3.5e9  # Sionna frequency: 3.5 GHz
     fft_size: 512
     guard_band_ratio: 0.1
     num_guard_carriers: 52
-    num_subcarriers: 407
-    subcarrier_spacing: 245.1e3
+    num_subcarriers: 408  # Sionna has 408 subcarriers
+    subcarrier_spacing: 245.1e3  # Sionna subcarrier spacing: 245.1 kHz
 
 tracing:
   max_ray_length: 250.0
   num_sampling_points: 16
   use_ipe_encoding: true
-  num_bs_antennas: 64
-  num_subcarriers: 408
+  num_bs_antennas: 64  # Sionna has 64 BS antennas
+  num_subcarriers: 408  # Sionna has 408 subcarriers
   use_mixed_precision: false
 
 input:
-  dataset_path: data/sionna/results
+  dataset_path: data/sionna/results  # Sionna dataset path
   random_seed: 42
   subcarrier_sampling:
     antenna_consistent: true
@@ -32,13 +32,14 @@ input:
   # Phase calibration configuration
   phase_calibration:
     enabled: true
-    reference_subcarrier_index: 0  # Use first subcarrier (index 0) as reference
+    reference_subcarrier_index: 0  # Use first subcarrier (index 0) as reference for Sionna
+
 neural_networks:
   antenna_codebook:
     embedding_dim: 32
     initialization: normal
     normalize: false
-    num_bs_antennas: 64
+    num_bs_antennas: 64  # Sionna has 64 BS antennas
     std: 0.1
   attenuation_network:
     activation: relu
@@ -53,12 +54,11 @@ neural_networks:
     n_heads: 16
     d_ff: 1024
     dropout_rate: 0.05
-    # 添加平滑正则化
+    # Add smoothing regularization
     smoothing_weight: 0.1
-    # 添加幅度约束
+    # Add magnitude constraint
     magnitude_constraint: true
     max_magnitude: 5.0
-  enabled: true
   frequency_codebook:
     basis_dim: 32
     initialization: complex_normal
@@ -68,6 +68,7 @@ neural_networks:
     antenna_embedding_dim: 32
     azimuth_divisions: 18
     elevation_divisions: 6
+    num_bs_antennas: 64  # Sionna has 64 BS antennas
     num_subcarriers: 408  # Sionna has 408 subcarriers
   radiance_network:
     activation: relu
@@ -78,6 +79,7 @@ neural_networks:
     output_dim: 32
     ue_position_dim: 63
     view_direction_dim: 63
+
 output:
   base_dir: results/sionna
   training:
@@ -87,10 +89,11 @@ output:
     log_level: INFO
     models_dir: '{{base_dir}}/training/models'
     tensorboard_dir: '{{base_dir}}/training/tensorboard'
+
 system:
   device: cuda
   fallback_to_cpu: true
-  
+
 training:
   num_epochs: 10
   batch_size: 8
@@ -120,8 +123,7 @@ training:
       enabled: false
       fusion_method: average
       loss_type: ssim
-      # Antenna array type: 'bs' for BS array, 'ue' for UE array
-      array_type: bs  # Use BS antenna array (64 antennas) for Sionna
+      orientation: bs  # Use BS antenna array (64 antennas) for Sionna
       phi_range:
       - 0.0
       - 10.0
@@ -133,7 +135,7 @@ training:
       - 0
       - 5.0
       - 90.0
-      # 子载波采样优化
+      # Subcarrier sampling optimization
       num_sampled_subcarriers: 1
       use_covariance_bartlett: false
       use_frequency_dependent_steering: true
@@ -142,6 +144,9 @@ training:
   ray_chunk_size: 10
   scaling_factor: 1.0e-9
   weight_decay: 1.0e-05
+
 user_equipment:
-  num_ue_antennas: 1
-  target_antenna_index: 0
+  num_ue_antennas: 1  # Sionna has 1 UE antenna
+  antenna_array:
+    configuration: "1x1"  # Sionna UE antenna array: single antenna
+  ue_antenna_count: 1  # Number of UE antennas to use (1=antenna 0, 2=antennas 0,1, 3=antennas 0,1,2, etc.)

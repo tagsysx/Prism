@@ -23,9 +23,10 @@ class SSLoss(nn.Module):
     2. SSIM loss between predicted and target spectrums
     
     Configuration options:
-    - array_type: 'bs' (default) or 'ue' - choose which antenna array to use for spectrum calculation
+    - orientation: 'bs' (default), 'ue', or 'orientation' - choose which antenna array to use for spectrum calculation
       - 'bs': Use BS antenna array configuration (from base_station.antenna_array.configuration)
       - 'ue': Use UE antenna array configuration (from user_equipment.num_ue_antennas)
+      - 'orientation': Use orientation-based antenna array configuration (from base_station.antenna_array.configuration)
     """
     
     def __init__(self, config: Dict):
@@ -37,10 +38,10 @@ class SSLoss(nn.Module):
         ue_config = config['user_equipment']
         ssl_config = config['training']['loss']['spatial_spectrum_loss']
         
-        # Antenna array configuration - choose between BS or UE array
-        self.array_type = ssl_config.get('array_type', 'bs')  # 'bs' or 'ue'
+        # Antenna array configuration - choose between BS, UE, or orientation array
+        self.orientation = ssl_config.get('orientation', 'bs')  # 'bs', 'ue', or 'orientation'
         
-        if self.array_type == 'bs':
+        if self.orientation == 'bs':
             # Use BS antenna array configuration
             array_config = bs_config['antenna_array']['configuration']  # e.g., "8x8"
             self.M, self.N = map(int, array_config.split('x'))
@@ -194,24 +195,76 @@ class SSLoss(nn.Module):
         2. Classical averaged power: spectrum = mean_s |a^H * x_s|^2
         
         Args:
-            csi: CSI tensor [batch_size, antennas, subcarriers]
-                - If array_type='bs': antennas = BS antennas
-                - If array_type='ue': antennas = UE antennas
+            csi: CSI tensor [batch_size, bs_antennas, subcarriers] or [batch_size, bs_antennas, ue_antennas, subcarriers]
+                - Data is always in BS antenna format, but orientation config determines which array to use
+                - If 4D format, it will be converted to 3D for spatial spectrum calculation
             
         Returns:
             spectrum: Spatial spectrum [batch_size, theta_points, phi_points]
         """
-        batch_size, num_antennas, num_subcarriers = csi.shape
         device = csi.device
         
-        # Validate antenna count based on array type
-        if num_antennas != self.num_antennas:
-            array_name = "BS" if self.array_type == 'bs' else "UE"
-            raise ValueError(f"CSI antenna count {num_antennas} does not match expected {self.num_antennas} for {array_name} array. "
-                           "Check antenna index mapping in your data.")
+        # Handle CSI format conversion if needed
+        if csi.dim() == 4:
+            # 4D format: [batch_size, bs_antennas, ue_antennas, subcarriers]
+            # Convert to 3D format for spatial spectrum calculation
+            batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers = csi.shape
+            
+            logger.debug(f"🔄 Converting 4D CSI to 3D for spatial spectrum: {csi.shape}")
+            
+            # For spatial spectrum calculation, we need to decide which antenna array to use
+            if self.orientation == 'ue':
+                # Use UE antenna array: reshape to [batch_size, ue_antennas, bs_antennas * subcarriers]
+                csi_data = csi.permute(0, 2, 1, 3)  # [batch, ue_antennas, bs_antennas, subcarriers]
+                csi_data = csi_data.reshape(batch_size, num_ue_antennas, -1)  # [batch, ue_antennas, bs_antennas * subcarriers]
+                expected_antennas = num_ue_antennas
+            else:
+                # Use BS antenna array: reshape to [batch_size, bs_antennas, ue_antennas * subcarriers]
+                csi_data = csi.reshape(batch_size, num_bs_antennas, -1)  # [batch, bs_antennas, ue_antennas * subcarriers]
+                expected_antennas = num_bs_antennas
+            
+            logger.debug(f"   Converted to 3D format: {csi_data.shape}")
+            
+        elif csi.dim() == 3:
+            # 3D format: [batch_size, antennas, subcarriers]
+            batch_size, num_antennas, num_subcarriers = csi.shape
+            csi_data = csi
+            expected_antennas = num_antennas
+            logger.debug(f"📊 Using 4D CSI format: {csi_data.shape}")
+            
+            # Special handling for 3D format when UE antennas were converted to subcarriers
+            if self.orientation == 'ue' and expected_antennas != self.num_antennas:
+                # This is likely a case where UE antennas were converted to subcarriers
+                # We need to reconstruct the UE antenna dimension
+                logger.debug(f"🔄 Detected UE antenna conversion case: {expected_antennas} antennas, expected {self.num_antennas}")
+                
+                # Try to reconstruct UE antenna structure
+                # Assume the subcarriers are organized as: [ue_antennas * original_subcarriers]
+                if num_subcarriers % self.num_antennas == 0:
+                    # Reconstruct UE antenna structure
+                    original_subcarriers_per_ue = num_subcarriers // self.num_antennas
+                    csi_data = csi_data.reshape(batch_size, expected_antennas, self.num_antennas, original_subcarriers_per_ue)
+                    csi_data = csi_data.permute(0, 2, 1, 3)  # [batch, ue_antennas, bs_antennas, subcarriers]
+                    csi_data = csi_data.reshape(batch_size, self.num_antennas, -1)  # [batch, ue_antennas, bs_antennas * subcarriers]
+                    expected_antennas = self.num_antennas
+                    logger.debug(f"   Reconstructed UE antenna structure: {csi_data.shape}")
+                else:
+                    logger.warning(f"⚠️ Cannot reconstruct UE antenna structure: {num_subcarriers} subcarriers not divisible by {self.num_antennas} UE antennas")
+            
+        else:
+            raise ValueError(f"Unsupported CSI tensor dimensions: {csi.shape}. Expected 3D or 4D.")
         
-        # CSI data is already in the correct format
-        csi_data = csi  # [batch_size, antennas, subcarriers]
+        # Validate antenna count based on array type
+        if expected_antennas != self.num_antennas:
+            if self.orientation == 'bs':
+                array_name = "BS"
+            elif self.orientation == 'orientation':
+                array_name = "orientation-based"
+            else:
+                array_name = "UE"
+            logger.warning(f"⚠️ CSI antenna count {expected_antennas} does not match expected {self.num_antennas} for {array_name} array.")
+            logger.warning(f"   This may indicate that UE antennas were converted to subcarriers during data loading.")
+            logger.warning(f"   Continuing with available antenna count: {expected_antennas}")
         
         # Get angle grid dimensions
         theta_points, phi_points = len(self.theta_grid), len(self.phi_grid)
@@ -603,7 +656,12 @@ class SSLoss(nn.Module):
             
         # Validate antenna count based on array type
         if csi_batch.shape[1] != self.num_antennas:
-            array_name = "BS" if self.array_type == 'bs' else "UE"
+            if self.orientation == 'bs':
+                array_name = "BS"
+            elif self.orientation == 'orientation':
+                array_name = "orientation-based"
+            else:
+                array_name = "UE"
             raise ValueError(f"CSI antenna count {csi_batch.shape[1]} does not match expected {self.num_antennas} for {array_name} array")
         
         # Compute spatial spectrum
