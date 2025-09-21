@@ -21,6 +21,11 @@ class SSLoss(nn.Module):
     Core workflow:
     1. CSI -> Spatial Spectrum (using Bartlett beamforming)
     2. SSIM loss between predicted and target spectrums
+    
+    Configuration options:
+    - array_type: 'bs' (default) or 'ue' - choose which antenna array to use for spectrum calculation
+      - 'bs': Use BS antenna array configuration (from base_station.antenna_array.configuration)
+      - 'ue': Use UE antenna array configuration (from user_equipment.num_ue_antennas)
     """
     
     def __init__(self, config: Dict):
@@ -29,12 +34,31 @@ class SSLoss(nn.Module):
         
         # Extract configurations
         bs_config = config['base_station']
+        ue_config = config['user_equipment']
         ssl_config = config['training']['loss']['spatial_spectrum_loss']
         
-        # Antenna array configuration
-        array_config = bs_config['antenna_array']['configuration']  # e.g., "8x8"
-        self.M, self.N = map(int, array_config.split('x'))
-        self.num_antennas = self.M * self.N
+        # Antenna array configuration - choose between BS or UE array
+        self.array_type = ssl_config.get('array_type', 'bs')  # 'bs' or 'ue'
+        
+        if self.array_type == 'bs':
+            # Use BS antenna array configuration
+            array_config = bs_config['antenna_array']['configuration']  # e.g., "8x8"
+            self.M, self.N = map(int, array_config.split('x'))
+            self.num_antennas = self.M * self.N
+            logger.info(f"🔧 SSLoss: Using BS antenna array ({self.M}x{self.N}={self.num_antennas} antennas)")
+        else:
+            # Use UE antenna array configuration
+            self.num_antennas = ue_config['num_ue_antennas']
+            # Get UE antenna array configuration
+            if 'antenna_array' in ue_config and 'configuration' in ue_config['antenna_array']:
+                array_config = ue_config['antenna_array']['configuration']  # e.g., "2x4"
+                self.M, self.N = map(int, array_config.split('x'))
+                logger.info(f"🔧 SSLoss: Using UE antenna array ({self.M}x{self.N}={self.num_antennas} antennas)")
+            else:
+                # Fallback to linear array (1xN)
+                self.M = 1
+                self.N = self.num_antennas
+                logger.info(f"🔧 SSLoss: Using UE antenna array (1x{self.N}={self.num_antennas} antennas, linear array)")
         
         # OFDM parameters
         ofdm_config = bs_config['ofdm']
@@ -170,21 +194,24 @@ class SSLoss(nn.Module):
         2. Classical averaged power: spectrum = mean_s |a^H * x_s|^2
         
         Args:
-            csi: CSI tensor [batch_size, bs_antennas, subcarriers]
+            csi: CSI tensor [batch_size, antennas, subcarriers]
+                - If array_type='bs': antennas = BS antennas
+                - If array_type='ue': antennas = UE antennas
             
         Returns:
             spectrum: Spatial spectrum [batch_size, theta_points, phi_points]
         """
-        batch_size, num_bs_antennas, num_subcarriers = csi.shape
+        batch_size, num_antennas, num_subcarriers = csi.shape
         device = csi.device
         
-        # Validate antenna count
-        if num_bs_antennas != self.num_antennas:
-            raise ValueError(f"CSI antenna count {num_bs_antennas} does not match expected {self.num_antennas}. "
+        # Validate antenna count based on array type
+        if num_antennas != self.num_antennas:
+            array_name = "BS" if self.array_type == 'bs' else "UE"
+            raise ValueError(f"CSI antenna count {num_antennas} does not match expected {self.num_antennas} for {array_name} array. "
                            "Check antenna index mapping in your data.")
         
         # CSI data is already in the correct format
-        csi_data = csi  # [batch_size, bs_antennas, subcarriers]
+        csi_data = csi  # [batch_size, antennas, subcarriers]
         
         # Get angle grid dimensions
         theta_points, phi_points = len(self.theta_grid), len(self.phi_grid)
@@ -574,9 +601,10 @@ class SSLoss(nn.Module):
         else:
             csi_batch = csi_sample
             
-        # Validate antenna count
+        # Validate antenna count based on array type
         if csi_batch.shape[1] != self.num_antennas:
-            raise ValueError(f"CSI antenna count {csi_batch.shape[1]} does not match expected {self.num_antennas}")
+            array_name = "BS" if self.array_type == 'bs' else "UE"
+            raise ValueError(f"CSI antenna count {csi_batch.shape[1]} does not match expected {self.num_antennas} for {array_name} array")
         
         # Compute spatial spectrum
         spectrum = self._csi_to_spatial_spectrum(csi_batch)[0]  # [theta_points, phi_points]

@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 class CSIEncoder(nn.Module):
     """Encoder for CSI data with spatial and frequency awareness."""
     
-    def __init__(self, d_model: int, dropout_rate: float = 0.1):
+    def __init__(self, d_model: int, num_antennas: int, num_subcarriers: int, dropout_rate: float = 0.1):
         super().__init__()
         self.d_model = d_model
         
@@ -33,8 +33,8 @@ class CSIEncoder(nn.Module):
         self.complex_projection = nn.Linear(2, d_model)  # [real, imag] -> d_model
         
         # Spatial and frequency embeddings
-        self.spatial_embedding = nn.Embedding(64, d_model)  # For 64 antennas
-        self.frequency_embedding = nn.Embedding(408, d_model)  # For 408 subcarriers
+        self.spatial_embedding = nn.Embedding(num_antennas, d_model)  # For variable antennas
+        self.frequency_embedding = nn.Embedding(num_subcarriers, d_model)  # For variable subcarriers
         
         # Layer normalization
         self.layer_norm = nn.LayerNorm(d_model)
@@ -219,7 +219,7 @@ class CSINetwork(nn.Module):
         self.max_magnitude = max_magnitude
         
         # Encoder
-        self.encoder = CSIEncoder(d_model, dropout_rate)
+        self.encoder = CSIEncoder(d_model, num_antennas, num_subcarriers, dropout_rate)
         
         # Transformer layers
         self.transformer_layers = nn.ModuleList([
@@ -317,27 +317,55 @@ class CSINetwork(nn.Module):
         kernel_size = 3
         padding = kernel_size // 2
         
-        # Apply 1D convolution along subcarrier dimension
-        smoothed = F.conv1d(
-            magnitude.unsqueeze(1),  # Add channel dimension
-            torch.ones(1, 1, kernel_size, device=magnitude.device) / kernel_size,
-            padding=padding
-        ).squeeze(1)
+        # Handle different input shapes
+        if magnitude.dim() == 3:  # [batch_size, num_antennas, num_subcarriers]
+            # Reshape to [batch_size * num_antennas, 1, num_subcarriers] for conv1d
+            batch_size, num_antennas, num_subcarriers = magnitude.shape
+            magnitude_reshaped = magnitude.view(batch_size * num_antennas, 1, num_subcarriers)
+            
+            # Apply 1D convolution along subcarrier dimension
+            smoothed = F.conv1d(
+                magnitude_reshaped,
+                torch.ones(1, 1, kernel_size, device=magnitude.device) / kernel_size,
+                padding=padding
+            )
+            
+            # Reshape back to original shape
+            smoothed = smoothed.view(batch_size, num_antennas, num_subcarriers)
+        else:
+            # For other shapes, use simple moving average
+            smoothed = magnitude
         
         return smoothed
     
     def _smooth_spatial(self, magnitude: torch.Tensor) -> torch.Tensor:
         """Apply spatial domain smoothing."""
+        # For single antenna case, no spatial smoothing needed
+        if magnitude.shape[1] == 1:
+            return magnitude
+        
         # Simple moving average across antennas
         kernel_size = 3
         padding = kernel_size // 2
         
-        # Apply 1D convolution along antenna dimension
-        smoothed = F.conv1d(
-            magnitude.transpose(1, 2).unsqueeze(1),  # Transpose and add channel dimension
-            torch.ones(1, 1, kernel_size, device=magnitude.device) / kernel_size,
-            padding=padding
-        ).squeeze(1).transpose(1, 2)
+        # Handle different input shapes
+        if magnitude.dim() == 3:  # [batch_size, num_antennas, num_subcarriers]
+            # Reshape to [batch_size * num_subcarriers, 1, num_antennas] for conv1d
+            batch_size, num_antennas, num_subcarriers = magnitude.shape
+            magnitude_reshaped = magnitude.transpose(1, 2).contiguous().view(batch_size * num_subcarriers, 1, num_antennas)
+            
+            # Apply 1D convolution along antenna dimension
+            smoothed = F.conv1d(
+                magnitude_reshaped,
+                torch.ones(1, 1, kernel_size, device=magnitude.device) / kernel_size,
+                padding=padding
+            )
+            
+            # Reshape back to original shape
+            smoothed = smoothed.view(batch_size, num_subcarriers, num_antennas).transpose(1, 2)
+        else:
+            # For other shapes, no smoothing
+            smoothed = magnitude
         
         return smoothed
     

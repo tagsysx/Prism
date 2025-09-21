@@ -143,7 +143,7 @@ class NNRayTracer:
         
         # Return in the same format as other ray tracers
         return {
-            'csi_predictions': csi_formatted
+            'csi': csi_formatted
         }
 
 

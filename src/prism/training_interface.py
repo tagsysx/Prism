@@ -86,12 +86,7 @@ class PrismTrainingInterface(nn.Module):
         self._validate_config()
         
         # Initialize LowRankRayTracer for CSI prediction
-        self.ray_tracer = LowRankRayTracer(
-            prism_network=self.prism_network,
-            enable_caching=True,
-            enable_profiling=False,
-            max_cache_size=50
-        )
+        self.ray_tracer = LowRankRayTracer(prism_network=self.prism_network)
         
         # Move ray_tracer to device
         self.ray_tracer = self.ray_tracer.to(self.device)
@@ -227,7 +222,7 @@ class PrismTrainingInterface(nn.Module):
             
         Returns:
             Dictionary containing:
-                - csi_predictions: [batch_size, num_bs_antennas, num_subcarriers, 1]
+                - csi: [batch_size, num_bs_antennas, num_subcarriers, 1]
                 - subcarrier_selection: Selection information
                 - intermediates: Ray tracing intermediates (if requested)
         """
@@ -281,12 +276,12 @@ class PrismTrainingInterface(nn.Module):
                 logger.debug(f"✅ Completed {sample_idx + 1}/{batch_size} samples, GPU memory: {memory_used:.1f} MB")
         
         # Combine results from all samples
-        combined_csi = torch.cat([result['csi_predictions'] for result in batch_results], dim=0)
+        combined_csi = torch.cat([result['csi'] for result in batch_results], dim=0)
         combined_selection = batch_results[0]['subcarrier_selection']  # Same for all samples
         
         # Prepare final outputs
         outputs = {
-            'csi_predictions': combined_csi,
+            'csi': combined_csi,
             'subcarrier_selection': combined_selection
         }
         
@@ -324,6 +319,18 @@ class PrismTrainingInterface(nn.Module):
         """
         Process a single sample to minimize memory usage.
         
+        This method implements the complete CSI prediction pipeline for a single sample:
+        1. Input validation and preprocessing
+        2. Frequency basis vector pre-computation (shared across antennas)
+        3. Antenna batch processing to reduce memory pressure
+        4. For each antenna:
+           a. PrismNetwork forward pass (spatial factors)
+           b. Ray tracing with LowRankRayTracer
+           c. CSI enhancement via transformer network
+           d. Memory cleanup
+        5. Combine all antenna predictions
+        6. Shape normalization and final formatting
+        
         Args:
             ue_position: UE position tensor of shape [3]
             bs_position: BS position tensor of shape [3]
@@ -335,30 +342,43 @@ class PrismTrainingInterface(nn.Module):
         """
         device = next(self.prism_network.parameters()).device
         
+        # ========================================
+        # STEP 1: Input validation and preprocessing
+        # ========================================
         # Basic validation - only check for invalid inputs (keep lightweight)
         if torch.isnan(ue_position).any() or torch.isnan(bs_position).any():
             raise ValueError("Input positions contain NaN values")
-        if (ue_position.abs() > 1000).any() or (bs_position.abs() > 1000).any():
+        if (ue_position.abs() > 5000).any() or (bs_position.abs() > 5000).any():
             logger.warning("Input positions have very large values - potential issue")
         
         # No subcarrier selection needed - we predict all subcarriers
         
         # Initialize sample results
-        sample_csi_predictions = []
+        sample_csi = []
         intermediates = [] if return_intermediates else None
         
+        # ========================================
+        # STEP 2: Memory optimization setup
+        # ========================================
         # MEMORY OPTIMIZATION: Process antennas in smaller batches
         num_antennas = antenna_indices.shape[1]  # num_bs_antennas
         antenna_batch_size = self.training_config.get('antenna_batch_size', 8)  # Default to 8 antennas per batch
         
         logger.debug(f"📡 Processing {num_antennas} antennas in batches of {antenna_batch_size}")
         
+        # ========================================
+        # STEP 3: Frequency basis vector pre-computation
+        # ========================================
         # Pre-compute frequency basis vectors (shared across all antennas)
+        # This avoids redundant computation for each antenna
         start_time = time.time()
         frequency_basis_vectors = self.prism_network.frequency_codebook()
         freq_compute_time = time.time() - start_time
         logger.debug(f"🔧 Pre-computed frequency basis vectors: {frequency_basis_vectors.shape} in {freq_compute_time:.4f}s")
         
+        # ========================================
+        # STEP 4: Antenna batch processing loop
+        # ========================================
         # Process antennas in batches to reduce memory pressure
         for batch_start in range(0, num_antennas, antenna_batch_size):
             batch_end = min(batch_start + antenna_batch_size, num_antennas)
@@ -366,12 +386,18 @@ class PrismTrainingInterface(nn.Module):
             
             logger.debug(f"  📦 Processing antenna batch {batch_start//antenna_batch_size + 1}: antennas {batch_start}-{batch_end-1}")
             
+            # ========================================
+            # STEP 4a: Individual antenna processing
+            # ========================================
             # Process each antenna in current batch
             for antenna_idx in range(batch_start, batch_end):
                 # Get current antenna index
                 current_antenna_indices = antenna_indices[:, antenna_idx:antenna_idx+1]  # [1, 1]
                 antenna_idx_int = current_antenna_indices.squeeze().item()  # Convert to int
                 
+                # ========================================
+                # STEP 4a.1: PrismNetwork forward pass
+                # ========================================
                 # Call PrismNetwork.forward() for spatial factors only (frequency basis pre-computed)
                 prism_outputs = self.prism_network.forward(
                     bs_position=bs_position,
@@ -388,8 +414,9 @@ class PrismTrainingInterface(nn.Module):
                 directions = prism_outputs['directions']                      # (num_directions, 3)
                 # Note: frequency_basis_vectors already pre-computed above
                 
-                # Transformer enhancement has been removed
-                
+                # ========================================
+                # STEP 4a.2: Ray tracing with LowRankRayTracer
+                # ========================================
                 # Ray tracing with LowRankRayTracer using pre-computed frequency basis
                 ray_trace_results = self.ray_tracer.trace_rays(
                     attenuation_vectors=attenuation_vectors,      # (num_directions, num_points, R)
@@ -398,8 +425,8 @@ class PrismTrainingInterface(nn.Module):
                 )
                 
                 # Quick validation for ray tracing results
-                if 'csi_predictions' in ray_trace_results:
-                    csi_pred = ray_trace_results['csi_predictions']
+                if 'csi' in ray_trace_results:
+                    csi_pred = ray_trace_results['csi']
                     if torch.isnan(csi_pred).any():
                         raise ValueError(f"NaN detected in ray trace output for antenna {antenna_idx}")
                     if torch.isinf(csi_pred).any():
@@ -414,9 +441,31 @@ class PrismTrainingInterface(nn.Module):
                     })
                 
                 # Extract predictions for this antenna
-                antenna_predictions = ray_trace_results['csi_predictions']  # [1, num_subcarriers]
-                sample_csi_predictions.append(antenna_predictions.clone())  # Clone to avoid reference issues
+                antenna_predictions = ray_trace_results['csi']  # [1, num_subcarriers]
                 
+                # ========================================
+                # STEP 4a.3: CSI enhancement via transformer
+                # ========================================
+                # Apply CSI enhancement (required)
+                # Handle different input shapes
+                if antenna_predictions.dim() == 1:
+                    # [num_subcarriers] -> [1, 1, num_subcarriers]
+                    reshaped_predictions = antenna_predictions.unsqueeze(0).unsqueeze(0)
+                elif antenna_predictions.dim() == 2:
+                    # [1, num_subcarriers] -> [1, 1, num_subcarriers]
+                    reshaped_predictions = antenna_predictions.unsqueeze(1)
+                else:
+                    # Already 3D: [batch_size, num_antennas, num_subcarriers]
+                    reshaped_predictions = antenna_predictions
+                
+                enhanced_predictions = self.prism_network.enhance_csi(reshaped_predictions)
+                # Remove the extra dimension: [1, 1, num_subcarriers] -> [1, num_subcarriers]
+                enhanced_predictions = enhanced_predictions.squeeze(1)
+                sample_csi.append(enhanced_predictions.clone())  # Clone to avoid reference issues
+                
+                # ========================================
+                # STEP 4a.4: Memory cleanup for this antenna
+                # ========================================
                 # Immediate memory cleanup for this antenna
                 del prism_outputs, attenuation_vectors, radiation_vectors, sampled_positions, directions
                 del ray_trace_results, antenna_predictions
@@ -424,27 +473,42 @@ class PrismTrainingInterface(nn.Module):
             # Memory cleanup after each antenna batch
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
         
+        # ========================================
+        # STEP 5: Combine all antenna predictions
+        # ========================================
         # Combine predictions from all antennas for this sample
         # Stack along antenna dimension: [1, num_bs_antennas, num_subcarriers]
         # Each antenna prediction is [1, num_subcarriers], we need to stack them
         
-        # Debug: Check sample_csi_predictions
-        logger.debug(f"📊 sample_csi_predictions length: {len(sample_csi_predictions)}")
-        if len(sample_csi_predictions) > 0:
-            logger.debug(f"📊 First prediction shape: {sample_csi_predictions[0].shape}")
-            logger.debug(f"📊 All prediction shapes: {[pred.shape for pred in sample_csi_predictions[:3]]}")
+        # Debug: Check sample_csi
+        logger.debug(f"📊 sample_csi length: {len(sample_csi)}")
+        if len(sample_csi) > 0:
+            logger.debug(f"📊 First prediction shape: {sample_csi[0].shape}")
+            logger.debug(f"📊 All prediction shapes: {[pred.shape for pred in sample_csi[:3]]}")
         
-        if len(sample_csi_predictions) == 0:
+        if len(sample_csi) == 0:
             logger.error("❌ No CSI predictions generated!")
             # Create dummy prediction
             dummy_prediction = torch.zeros(1, self.num_subcarriers, device=device, dtype=torch.complex64)
-            sample_csi_predictions = [dummy_prediction]
+            sample_csi = [dummy_prediction]
         
-        # Each prediction is [408], we need to stack them to get [1, num_antennas, num_subcarriers]
-        # First reshape each prediction to [1, 1, 408], then stack along dim=1
-        reshaped_predictions = [pred.unsqueeze(0).unsqueeze(0) for pred in sample_csi_predictions]  # [1, 1, 408]
+        # Each prediction is [1, 408] or [408], we need to stack them to get [1, num_antennas, num_subcarriers]
+        # Handle different prediction shapes
+        reshaped_predictions = []
+        for pred in sample_csi:
+            if pred.dim() == 1:  # [408]
+                reshaped_pred = pred.unsqueeze(0).unsqueeze(0)  # [1, 1, 408]
+            elif pred.dim() == 2:  # [1, 408]
+                reshaped_pred = pred.unsqueeze(1)  # [1, 1, 408]
+            else:  # Already 3D
+                reshaped_pred = pred
+            reshaped_predictions.append(reshaped_pred)
+        
         combined_csi_raw = torch.cat(reshaped_predictions, dim=1)  # [1, num_antennas, num_subcarriers]
         
+        # ========================================
+        # STEP 6: Shape normalization and final formatting
+        # ========================================
         # Handle subcarrier count mismatch dynamically
         logger.debug(f"📊 combined_csi_raw shape: {combined_csi_raw.shape}")
         predicted_subcarriers = combined_csi_raw.shape[2]
@@ -464,9 +528,12 @@ class PrismTrainingInterface(nn.Module):
         combined_csi = combined_csi_raw  # Already in correct format
         logger.debug(f"📐 Final CSI shape: {combined_csi.shape} (format: [batch, antennas, subcarriers])")
         
+        # ========================================
+        # STEP 7: Prepare final result and cleanup
+        # ========================================
         # Prepare result for this sample
         result = {
-            'csi_predictions': combined_csi,
+            'csi': combined_csi,
             'subcarrier_selection': None  # All subcarriers used, no selection needed
         }
         
@@ -474,7 +541,7 @@ class PrismTrainingInterface(nn.Module):
             result['intermediates'] = intermediates
         
         # Cleanup intermediate data to free memory
-        del sample_csi_predictions
+        del sample_csi
         if intermediates:
             del intermediates
             
@@ -602,6 +669,11 @@ class PrismTrainingInterface(nn.Module):
                 
         except Exception as e:
             logger.error(f"Loss computation failed: {e}")
+            logger.error(f"Exception type: {type(e)}")
+            logger.error(f"Predictions dict keys: {list(predictions_dict.keys())}")
+            logger.error(f"Targets dict keys: {list(targets_dict.keys())}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             # Return a small positive loss to prevent training crash
             loss = torch.tensor(1e-6, requires_grad=True, device=device)
             

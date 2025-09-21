@@ -12,16 +12,27 @@ base_station:
     num_guard_carriers: 52
     num_subcarriers: 407
     subcarrier_spacing: 245.1e3
-  polarization: dual
+
+tracing:
+  max_ray_length: 250.0
+  num_sampling_points: 16
+  use_ipe_encoding: true
+  num_bs_antennas: 64
+  num_subcarriers: 408
+  use_mixed_precision: false
+
 input:
   dataset_path: data/sionna/results
   random_seed: 42
-  scenario: P300/ray_tracing_5g_simulation_P300
   subcarrier_sampling:
     antenna_consistent: true
     sampling_method: uniform
     sampling_ratio: 1
   train_ratio: 0.8
+  # Phase calibration configuration
+  phase_calibration:
+    enabled: true
+    reference_subcarrier_index: 0  # Use first subcarrier (index 0) as reference
 neural_networks:
   antenna_codebook:
     embedding_dim: 32
@@ -36,6 +47,17 @@ neural_networks:
     num_layers: 3
     output_dim: 32
     use_shortcuts: true
+  csi_network:
+    d_model: 256
+    n_layers: 4
+    n_heads: 16
+    d_ff: 1024
+    dropout_rate: 0.05
+    # 添加平滑正则化
+    smoothing_weight: 0.1
+    # 添加幅度约束
+    magnitude_constraint: true
+    max_magnitude: 5.0
   enabled: true
   frequency_codebook:
     basis_dim: 32
@@ -46,13 +68,7 @@ neural_networks:
     antenna_embedding_dim: 32
     azimuth_divisions: 18
     elevation_divisions: 6
-  feature_dim: 128
-  max_ray_length: 250.0
-  num_bs_antennas: 64
-  num_sampling_points: 16
-  num_subcarriers: 408
-  use_ipe_encoding: true
-  use_mixed_precision: false
+    num_subcarriers: 408  # Sionna has 408 subcarriers
   radiance_network:
     activation: relu
     antenna_embedding_dim: 32
@@ -74,28 +90,7 @@ output:
 system:
   device: cuda
   fallback_to_cpu: true
-transformer:
-  use_enhancement: false
-  d_model: 64
-  n_layers: 1
-  n_heads: 2
-  d_ff: 256
-  dropout_rate: 0.1
-  max_seq_len: 5000
-  local_window_size: 8
-  global_interval: 2
-csi_enhancement:
-  use_enhancement: true
-  d_model: 256
-  n_layers: 4
-  n_heads: 16
-  d_ff: 1024
-  dropout_rate: 0.05
-  # 添加平滑正则化
-  smoothing_weight: 0.1
-  # 添加幅度约束
-  magnitude_constraint: true
-  max_magnitude: 5.0
+  
 training:
   num_epochs: 10
   batch_size: 8
@@ -125,6 +120,8 @@ training:
       enabled: false
       fusion_method: average
       loss_type: ssim
+      # Antenna array type: 'bs' for BS array, 'ue' for UE array
+      array_type: bs  # Use BS antenna array (64 antennas) for Sionna
       phi_range:
       - 0.0
       - 10.0
@@ -141,12 +138,9 @@ training:
       use_covariance_bartlett: false
       use_frequency_dependent_steering: true
     spatial_spectrum_weight: 0.0
-  antenna_batch_size: 8
   auto_checkpoint: true
-  micro_antenna_batching: true
-  progressive_cleanup: true
   ray_chunk_size: 10
-  ue_chunk_size: 1
+  scaling_factor: 1.0e-9
   weight_decay: 1.0e-05
 user_equipment:
   num_ue_antennas: 1

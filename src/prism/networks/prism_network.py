@@ -54,9 +54,9 @@ class PrismNetwork(nn.Module):
         attenuation_network_config: dict = None,
         frequency_codebook_config: dict = None,
         radiance_network_config: dict = None,
-        # CSI enhancement configuration
-        use_csi_enhancement: bool = False,
-        csi_enhancement_config: dict = None,
+        # CSI network configuration
+        use_csi_network: bool = False,
+        csi_network_config: dict = None,
         **kwargs
     ):
         super().__init__()
@@ -86,9 +86,9 @@ class PrismNetwork(nn.Module):
         self.radiance_network_config = radiance_network_config or {}
         
         
-        # CSI enhancement configuration
-        self.use_csi_enhancement = use_csi_enhancement
-        self.csi_enhancement_config = csi_enhancement_config or {}
+        # CSI network configuration
+        self.use_csi_network = use_csi_network
+        self.csi_network_config = csi_network_config or {}
         
         # Initialize positional encoders
         if use_ipe_encoding:
@@ -161,18 +161,18 @@ class PrismNetwork(nn.Module):
         # 5. LowRankTransformer has been removed
         
         # 6. CSINetwork: Enhance CSI using Transformer
-        if self.use_csi_enhancement:
+        if self.use_csi_network:
             self.csi_network = CSINetwork(
-                d_model=self.csi_enhancement_config.get('d_model', 128),
-                n_layers=self.csi_enhancement_config.get('n_layers', 2),
-                n_heads=self.csi_enhancement_config.get('n_heads', 8),
-                d_ff=self.csi_enhancement_config.get('d_ff', 512),
-                dropout_rate=self.csi_enhancement_config.get('dropout_rate', 0.1),
-                num_antennas=self.num_bs_antennas,
+                d_model=self.csi_network_config.get('d_model', 128),
+                n_layers=self.csi_network_config.get('n_layers', 2),
+                n_heads=self.csi_network_config.get('n_heads', 8),
+                d_ff=self.csi_network_config.get('d_ff', 512),
+                dropout_rate=self.csi_network_config.get('dropout_rate', 0.1),
+                num_antennas=1,  # Chrissy dataset uses 1 antenna
                 num_subcarriers=self.num_subcarriers,
-                smoothing_weight=self.csi_enhancement_config.get('smoothing_weight', 0.1),
-                magnitude_constraint=self.csi_enhancement_config.get('magnitude_constraint', True),
-                max_magnitude=self.csi_enhancement_config.get('max_magnitude', 5.0)
+                smoothing_weight=self.csi_network_config.get('smoothing_weight', 0.1),
+                magnitude_constraint=self.csi_network_config.get('magnitude_constraint', True),
+                max_magnitude=self.csi_network_config.get('max_magnitude', 5.0)
             )
             logger.info("🔧 CSINetwork initialized and enabled")
         else:
@@ -564,7 +564,7 @@ class PrismNetwork(nn.Module):
         Returns:
             enhanced_csi: Enhanced CSI tensor [batch_size, num_antennas, num_subcarriers]
         """
-        if self.use_csi_enhancement and self.csi_network is not None:
+        if self.use_csi_network and self.csi_network is not None:
             logger.debug(f"🔧 Applying CSI enhancement: {csi.shape}")
             enhanced_csi = self.csi_network(csi)
             logger.debug(f"✅ CSI enhancement completed: {enhanced_csi.shape}")
@@ -585,7 +585,7 @@ class PrismNetwork(nn.Module):
             'max_ray_length': self.max_ray_length,
             'num_sampling_points': self.num_sampling_points,
             'use_ipe_encoding': self.use_ipe_encoding,
-            'use_csi_enhancement': self.use_csi_enhancement,
+            'use_csi_network': self.use_csi_network,
             'total_parameters': sum(p.numel() for p in self.parameters()),
             'trainable_parameters': sum(p.numel() for p in self.parameters() if p.requires_grad)
         }
@@ -603,7 +603,7 @@ class PrismNetwork(nn.Module):
             'num_sampling_points': self.num_sampling_points,
             'use_ipe_encoding': self.use_ipe_encoding,
             'use_mixed_precision': self.use_mixed_precision,
-            'use_csi_enhancement': self.use_csi_enhancement
+            'use_csi_network': self.use_csi_network
         }
 
 

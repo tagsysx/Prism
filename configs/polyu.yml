@@ -3,7 +3,7 @@ base_station:
   antenna_type: mimo
   num_antennas: 1  # PolyU has 1 BS antenna
   antenna_array:
-    configuration: "1x1"  # 1x1 = 1 antenna total
+    configuration: "1x1"  # PolyU has 1 BS antenna
   ofdm:
     bandwidth: 20.0e6  # PolyU WiFi bandwidth: 20 MHz
     center_frequency: 2.4e9  # PolyU WiFi frequency: 2.4 GHz
@@ -12,17 +12,27 @@ base_station:
     num_guard_carriers: 0
     num_subcarriers: 64  # PolyU has 64 subcarriers
     subcarrier_spacing: 312.5e3  # PolyU WiFi subcarrier spacing: 312.5 kHz
-  polarization: single
+
+tracing:
+  max_ray_length: 250.0
+  num_sampling_points: 16
+  use_ipe_encoding: true
+  num_bs_antennas: 1  # PolyU has 1 BS antenna
+  num_subcarriers: 64  # PolyU has 64 subcarriers
+  use_mixed_precision: false
 
 input:
   dataset_path: data/polyu/data.h5  # PolyU dataset path
   random_seed: 42
-  scenario: polyu_wifi
   subcarrier_sampling:
     antenna_consistent: true
     sampling_method: uniform
     sampling_ratio: 1
   train_ratio: 0.8
+  # Phase calibration configuration
+  phase_calibration:
+    enabled: true
+    reference_subcarrier_index: 1  # Use second subcarrier (index 1) as reference for PolyU
 
 neural_networks:
   antenna_codebook:
@@ -38,7 +48,17 @@ neural_networks:
     num_layers: 3
     output_dim: 32
     use_shortcuts: true
-  enabled: true
+  csi_network:
+    d_model: 128
+    n_layers: 2
+    n_heads: 8
+    d_ff: 512
+    dropout_rate: 0.1
+    # Add smoothing regularization
+    smoothing_weight: 0.1
+    # Add magnitude constraint
+    magnitude_constraint: true
+    max_magnitude: 50
   frequency_codebook:
     basis_dim: 32
     initialization: complex_normal
@@ -49,13 +69,7 @@ neural_networks:
     azimuth_divisions: 18
     elevation_divisions: 6
     num_bs_antennas: 1  # PolyU has 1 BS antenna
-  feature_dim: 128
-  max_ray_length: 250.0
-  num_bs_antennas: 1  # PolyU has 1 BS antenna
-  num_sampling_points: 16
-  num_subcarriers: 64  # PolyU has 64 subcarriers
-  use_ipe_encoding: true
-  use_mixed_precision: false
+    num_subcarriers: 64  # PolyU has 64 subcarriers
   radiance_network:
     activation: relu
     antenna_embedding_dim: 32
@@ -72,7 +86,7 @@ output:
     checkpoint_dir: '{{base_dir}}/training/checkpoints'
     log_dir: '{{base_dir}}/training/logs'
     log_file: '{{base_dir}}/training/logs/training.log'
-    log_level: INFO
+    log_level: DEBUG
     models_dir: '{{base_dir}}/training/models'
     tensorboard_dir: '{{base_dir}}/training/tensorboard'
 
@@ -80,32 +94,9 @@ system:
   device: cuda
   fallback_to_cpu: true
 
-transformer:
-  use_enhancement: false
-  d_model: 64
-  n_layers: 1
-  n_heads: 2
-  d_ff: 256
-  dropout_rate: 0.1
-  max_seq_len: 5000
-  local_window_size: 8
-  global_interval: 2
-
-csi_enhancement:
-  use_enhancement: true
-  d_model: 256
-  n_layers: 4
-  n_heads: 16
-  d_ff: 1024
-  dropout_rate: 0.05
-  # Add smoothing regularization
-  smoothing_weight: 0.1
-  # Add magnitude constraint
-  magnitude_constraint: true
-  max_magnitude: 5.0
 
 training:
-  num_epochs: 10
+  num_epochs: 5
   batch_size: 8
   checkpoint_frequency: 5
   enable_gradient_checkpointing: true
@@ -120,11 +111,11 @@ training:
       normalize_weights: true
     csi_weight: 1.0
     pdp_loss:
-      enabled: true
+      enabled: false
       fft_size: 128  # Adjusted for 64 subcarriers
       normalize_pdp: true
       type: hybrid
-    pdp_weight: 0.3
+    pdp_weight: 0.0
     regularization_loss:
       enabled: false
     regularization_weight: 0.0
@@ -133,6 +124,7 @@ training:
       enabled: false
       fusion_method: average
       loss_type: ssim
+      array_type: ue  # Use UE antenna array (8 antennas) for retraining
       phi_range:
       - 0.0
       - 10.0
@@ -149,14 +141,13 @@ training:
       use_covariance_bartlett: false
       use_frequency_dependent_steering: true
     spatial_spectrum_weight: 0.0
-  antenna_batch_size: 8
   auto_checkpoint: true
-  micro_antenna_batching: true
-  progressive_cleanup: true
   ray_chunk_size: 10
-  ue_chunk_size: 1
+  scaling_factor: 1.0e-9
   weight_decay: 1.0e-05
 
 user_equipment:
   num_ue_antennas: 8  # PolyU has 8 UE antennas
+  antenna_array:
+    configuration: "2x4"  # PolyU UE antenna array: 2 rows x 4 columns
   target_antenna_index: 0

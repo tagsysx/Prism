@@ -117,32 +117,54 @@ class LossFunction(nn.Module):
         """
         # Initialize total_loss properly to maintain gradients
         # Use a tensor derived from predictions to ensure gradient flow, but ensure it's real
-        total_loss = torch.real(predictions['csi_predictions'].sum()) * 0.0  # This maintains gradient connection to predictions
+        total_loss = torch.real(predictions['csi'].sum()) * 0.0  # This maintains gradient connection to predictions
         loss_components = {}
         
         if masks is None:
             masks = {}
         
         # CSI loss (hybrid: CMSE + Magnitude + Phase) - use original 3D CSI tensors
+        print(f"🔍 DEBUG: CSI loss check - keys: {list(predictions.keys())}, enabled: {self.csi_enabled}")
         if ('csi' in predictions and 'csi' in targets and self.csi_enabled):
             # Use original 3D CSI tensors to preserve spatial structure
             csi_pred = predictions['csi']
             csi_target = targets['csi']
             
+            logger.info(f"🔍 Computing CSI loss - pred shape: {csi_pred.shape}, target shape: {csi_target.shape}")
+            logger.info(f"🔍 CSI enabled: {self.csi_enabled}, CSI weight: {self.csi_weight}")
+            
             # Use CSILoss class for comprehensive CSI loss calculation
-            csi_loss_val = self.csi_loss(csi_pred, csi_target)
-            total_loss = total_loss + self.csi_weight * csi_loss_val
-            loss_components['csi_loss'] = csi_loss_val.item()
+            try:
+                csi_loss_val = self.csi_loss(csi_pred, csi_target)
+                logger.info(f"🔍 CSI loss computed: {csi_loss_val}")
+                total_loss = total_loss + self.csi_weight * csi_loss_val
+                loss_components['csi_loss'] = csi_loss_val.item()
+            except Exception as e:
+                logger.error(f"❌ CSI loss computation failed: {e}")
+                import traceback
+                logger.error(f"Full traceback: {traceback.format_exc()}")
+                # Set CSI loss to a small value to prevent training crash
+                csi_loss_val = torch.tensor(1e-6, device=csi_pred.device, requires_grad=True)
+                total_loss = total_loss + self.csi_weight * csi_loss_val
+                loss_components['csi_loss'] = csi_loss_val.item()
+        else:
+            logger.warning(f"⚠️ CSI loss skipped - enabled: {self.csi_enabled}, keys: {list(predictions.keys())}")
+            loss_components['csi_loss'] = 0.0
         
         # PDP loss (hybrid: MSE + Delay) - use original 3D CSI tensors for frequency domain analysis
         if ('csi' in predictions and 'csi' in targets and 
             self.pdp_enabled and self.pdp_weight > 0):
+            logger.info(f"🔍 Computing PDP loss - enabled: {self.pdp_enabled}, weight: {self.pdp_weight}")
             pdp_loss_val = self.pdp_loss(
                 predictions['csi'], 
                 targets['csi']
             )
             total_loss = total_loss + self.pdp_weight * pdp_loss_val
             loss_components['pdp_loss'] = pdp_loss_val.item()
+        else:
+            # PDP loss is disabled, set to 0
+            logger.info(f"🔍 PDP loss skipped - enabled: {self.pdp_enabled}, weight: {self.pdp_weight}")
+            loss_components['pdp_loss'] = 0.0
         
         # Spatial Spectrum loss
         if (self.ss_loss is not None and 

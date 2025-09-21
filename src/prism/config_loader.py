@@ -50,6 +50,7 @@ class SpatialSpectrumLossConfig:
     algorithm: str = 'bartlett'
     fusion_method: str = 'average'
     loss_type: str = 'ssim'
+    array_type: str = 'bs'  # 'bs' for BS antenna array, 'ue' for UE antenna array
     theta_range: List[float] = field(default_factory=lambda: [0, 5.0, 90.0])
     phi_range: List[float] = field(default_factory=lambda: [0.0, 10.0, 360.0])
     ssim_window_size: int = 11
@@ -80,7 +81,15 @@ class TrainingConfig:
     auto_checkpoint: bool = True
     checkpoint_frequency: int = 5
     epoch_save_interval: int = 1
+    scaling_factor: float = 1e-6
     loss: LossConfig = field(default_factory=LossConfig)
+
+
+@dataclass
+class PhaseCalibrationConfig:
+    """Phase calibration configuration."""
+    enabled: bool = True
+    reference_subcarrier_index: int = 0
 
 
 @dataclass
@@ -88,7 +97,6 @@ class DataConfig:
     """Data configuration."""
     enabled: bool = True
     dataset_path: str = "data/sionna"
-    scenario: str = "P300"
     ue_antenna_index: int = 0
     random_seed: int = 42
     train_ratio: float = 0.8
@@ -96,6 +104,7 @@ class DataConfig:
     sampling_ratio: float = 0.5
     sampling_method: str = 'uniform'
     antenna_consistent: bool = True
+    phase_calibration: PhaseCalibrationConfig = field(default_factory=PhaseCalibrationConfig)
 
 
 @dataclass
@@ -193,16 +202,29 @@ class ModernConfigLoader:
         """Parse configuration into structured dataclasses."""
         # Neural network configurations
         nn_config = self._processed_config.get('neural_networks', {})
+        if not nn_config:
+            raise ValueError("❌ Missing required 'neural_networks' configuration section")
+        
+        # Validate required neural network sections
+        required_nn_sections = ['prism_network', 'attenuation_network', 'radiance_network', 'antenna_codebook']
+        for section in required_nn_sections:
+            if section not in nn_config:
+                raise ValueError(f"❌ Missing required neural network section: '{section}'")
         
         # Use network configuration classes directly
-        self.prism_network = PrismNetworkConfig(**nn_config.get('prism_network', {}))
-        self.attenuation_network = AttenuationNetworkConfig(**nn_config.get('attenuation_network', {}))
-        self.radiance_network = RadianceNetworkConfig(**nn_config.get('radiance_network', {}))
-        self.antenna_codebook = AntennaEmbeddingCodebookConfig(**nn_config.get('antenna_codebook', {}))
+        self.prism_network = PrismNetworkConfig(**nn_config['prism_network'])
+        self.attenuation_network = AttenuationNetworkConfig(**nn_config['attenuation_network'])
+        self.radiance_network = RadianceNetworkConfig(**nn_config['radiance_network'])
+        self.antenna_codebook = AntennaEmbeddingCodebookConfig(**nn_config['antenna_codebook'])
         
         # Training configuration
         training_config = self._processed_config.get('training', {})
+        if not training_config:
+            raise ValueError("❌ Missing required 'training' configuration section")
+        
         loss_config = training_config.get('loss', {})
+        if not loss_config:
+            raise ValueError("❌ Missing required 'loss' configuration in training section")
         
         # Parse loss configurations
         csi_loss = self._parse_dataclass(
@@ -229,11 +251,29 @@ class ModernConfigLoader:
             TrainingConfig, training_config, {'loss': loss}
         )
         
-        # Data configuration
-        data_config = self._processed_config.get('data', {})
+        # Data configuration - support both 'data' and 'input' keys
+        data_config = self._processed_config.get('data', self._processed_config.get('input', {}))
+        if not data_config:
+            raise ValueError("❌ Missing required 'data' or 'input' configuration section")
+        
+        # Validate required data parameters
+        required_data_params = ['dataset_path', 'train_ratio']
+        for param in required_data_params:
+            if param not in data_config:
+                raise ValueError(f"❌ Missing required data parameter: '{param}'")
+        
         subcarrier_config = data_config.get('subcarrier_sampling', {})
+        phase_calibration_config = data_config.get('phase_calibration', {})
+        
+        # Parse phase calibration config
+        phase_calibration = self._parse_dataclass(
+            PhaseCalibrationConfig, phase_calibration_config
+        )
+        
+        # Parse data config with phase calibration
         self.data = self._parse_dataclass(
-            DataConfig, {**data_config, **subcarrier_config}
+            DataConfig, {**data_config, **subcarrier_config}, 
+            {'phase_calibration': phase_calibration}
         )
         
         # Output configuration
@@ -333,10 +373,20 @@ class ModernConfigLoader:
     
     def get_prism_network_kwargs(self) -> Dict[str, Any]:
         """Get PrismNetwork initialization arguments."""
-        # Get transformer configuration from raw config
-        transformer_config = self._processed_config.get('transformer', {})
-        # Get CSI enhancement configuration from raw config
-        csi_enhancement_config = self._processed_config.get('csi_enhancement', {})
+        # Get CSI network configuration from neural_networks section
+        neural_networks_config = self._processed_config.get('neural_networks', {})
+        if not neural_networks_config:
+            raise ValueError("❌ Missing required 'neural_networks' configuration section")
+        
+        csi_network_config = neural_networks_config.get('csi_network', {})
+        if not csi_network_config:
+            raise ValueError("❌ Missing required 'csi_network' configuration in neural_networks section")
+        
+        # Validate required CSI network parameters
+        required_csi_params = ['d_model', 'n_layers', 'n_heads', 'd_ff', 'dropout_rate']
+        for param in required_csi_params:
+            if param not in csi_network_config:
+                raise ValueError(f"❌ Missing required CSI network parameter: '{param}'")
         
         return {
             'num_subcarriers': self.prism_network.num_subcarriers,
@@ -352,12 +402,9 @@ class ModernConfigLoader:
             'attenuation_network_config': self.attenuation_network.__dict__,
             'radiance_network_config': self.radiance_network.__dict__,
             'antenna_codebook_config': self.antenna_codebook.__dict__,
-            # Add transformer configuration
-            'use_low_rank_transformer': transformer_config.get('use_enhancement', False),
-            'low_rank_transformer_config': transformer_config,
-            # Add CSI enhancement configuration
-            'use_csi_enhancement': csi_enhancement_config.get('use_enhancement', False),
-            'csi_enhancement_config': csi_enhancement_config,
+            # Add CSI network configuration
+            'use_csi_network': True,  # Always enable CSI network when config exists
+            'csi_network_config': csi_network_config,
         }
     
     def get_training_kwargs(self) -> Dict[str, Any]:
@@ -389,7 +436,6 @@ class ModernConfigLoader:
         """Get data loader configuration."""
         return {
             'dataset_path': self.data.dataset_path,
-            'scenario': self.data.scenario,
             'ue_antenna_index': self.data.ue_antenna_index,
             'random_seed': self.data.random_seed,
             'train_ratio': self.data.train_ratio,
@@ -397,6 +443,10 @@ class ModernConfigLoader:
             'sampling_ratio': self.data.sampling_ratio,
             'sampling_method': self.data.sampling_method,
             'antenna_consistent': self.data.antenna_consistent,
+            'phase_calibration': {
+                'enabled': self.data.phase_calibration.enabled,
+                'reference_subcarrier_index': self.data.phase_calibration.reference_subcarrier_index,
+            },
         }
     
     def get_output_paths(self) -> Dict[str, str]:
@@ -488,7 +538,6 @@ class ModernConfigLoader:
             },
             'data': {
                 'dataset_path': self.data.dataset_path,
-                'scenario': self.data.scenario,
                 'train_ratio': self.data.train_ratio,
                 'sampling_ratio': self.data.sampling_ratio,
             },

@@ -234,7 +234,7 @@ class NaiveRayTracer:
         
         # Return in the same format as other ray tracers
         return {
-            'csi_predictions': csi_formatted,
+            'csi': csi_formatted,
             'selected_subcarriers': selected_subcarriers
         }
 
