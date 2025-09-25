@@ -4,6 +4,8 @@ base_station:
   num_antennas: 64  # Chrissy has 64 BS antennas (8x8 array)
   antenna_array:
     configuration: "8x8"  # Chrissy has 8x8 BS antenna array
+    spacing_x: 0.0405  # Antenna spacing in x direction (half wavelength at 3.7 GHz)
+    spacing_y: 0.0405  # Antenna spacing in y direction (half wavelength at 3.7 GHz)
   ofdm:
     bandwidth: 100.0e6  # Chrissy bandwidth: 100 MHz
     center_frequency: 3.7e9  # Chrissy frequency: 3.7 GHz
@@ -30,7 +32,7 @@ input:
   # Calibration configuration
   calibration:
     enabled: true
-    reference_subcarrier_index: 204  # Use second subcarrier (index 1) as reference for PolyU
+    reference_subcarrier_index: 204  # Use first subcarrier (index 0) as reference for Chrissy
 
 neural_networks:
   antenna_codebook:
@@ -98,6 +100,16 @@ training:
   epoch_save_interval: 1
   gradient_accumulation_steps: 1
   learning_rate: 0.00015
+  lr_scheduler:
+    type: 'reduce_on_plateau'
+    mode: 'min'
+    factor: 0.5          # More aggressive reduction (30% → 50%)
+    patience: 2           # Faster response (4 → 2 epochs)
+    threshold: 0.001     # More lenient threshold (0.0001 → 0.001)
+    threshold_mode: 'rel'
+    cooldown: 1
+    min_lr_plateau: 0.00001  # Higher minimum LR (0.000005 → 0.00001)
+    verbose: true
   loss:
     csi_loss:
       enabled: true
@@ -111,7 +123,7 @@ training:
       fft_size: 512  # Adjusted for 408 subcarriers
       normalize_pdp: true
       type: hybrid
-    pdp_weight: 0.5
+    pdp_weight: 0.0
     regularization_loss:
       enabled: false
     regularization_weight: 0.0
@@ -147,11 +159,13 @@ user_equipment:
   num_ue_antennas: 4  # Chrissy-u4 has 4 UE antennas
   antenna_array:
     configuration: "1x4"  # Chrissy-u4 UE antenna array: 1x4 antennas
+    spacing_x: 0.0405  # Antenna spacing in x direction (half wavelength at 3.7 GHz)
+    spacing_y: 0.0405  # Antenna spacing in y direction (half wavelength at 3.7 GHz)
   ue_antenna_count: 4  # Number of UE antennas to use (4=antennas 0, 1, 2, and 3)
 
 analysis:
   pas:
     ignore_amplitude: false  # Whether to ignore amplitude and only use phase for spatial spectrum computation
-    count: 500  # Maximum number of spatial spectrum samples to analyze (randomly selected from all samples)
+    count: 5000  # Maximum number of spatial spectrum samples to analyze (randomly selected from all samples)
     enabled: true  # Enable PAS analysis
     use_parallel: false  # Enable parallel processing for PAS analysis

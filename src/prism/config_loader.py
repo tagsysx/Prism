@@ -56,6 +56,19 @@ class LossConfig:
 
 
 @dataclass
+class LRSchedulerConfig:
+    """Learning rate scheduler configuration."""
+    type: str = 'reduce_on_plateau'
+    mode: str = 'min'
+    factor: float = 0.7
+    patience: int = 4
+    threshold: float = 0.0001
+    threshold_mode: str = 'rel'
+    cooldown: int = 1
+    min_lr_plateau: float = 0.000005
+    verbose: bool = False
+
+@dataclass
 class TrainingConfig:
     """Training configuration."""
     learning_rate: float = 1e-4
@@ -68,6 +81,7 @@ class TrainingConfig:
     epoch_save_interval: int = 1
     scaling_factor: float = 1e-6
     loss: LossConfig = field(default_factory=LossConfig)
+    lr_scheduler: LRSchedulerConfig = field(default_factory=LRSchedulerConfig)
 
 
 @dataclass

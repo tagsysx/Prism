@@ -306,17 +306,44 @@ class PrismTrainer(BaseRunner):
             weight_decay=self.training_config['weight_decay']
         )
         
-        # Create scheduler
+        # Create scheduler from config
+        scheduler_config = getattr(self.config_loader.training, 'lr_scheduler', {})
+        
+        # Handle both dict and object cases
+        if isinstance(scheduler_config, dict):
+            scheduler_params = {
+                'mode': scheduler_config.get('mode', 'min'),
+                'factor': scheduler_config.get('factor', 0.7),
+                'patience': scheduler_config.get('patience', 4),
+                'threshold': scheduler_config.get('threshold', 0.0001),
+                'threshold_mode': scheduler_config.get('threshold_mode', 'rel'),
+                'cooldown': scheduler_config.get('cooldown', 1),
+                'min_lr': scheduler_config.get('min_lr_plateau', 0.000005),
+                'verbose': scheduler_config.get('verbose', False)
+            }
+        else:
+            scheduler_params = {
+                'mode': getattr(scheduler_config, 'mode', 'min'),
+                'factor': getattr(scheduler_config, 'factor', 0.7),
+                'patience': getattr(scheduler_config, 'patience', 4),
+                'threshold': getattr(scheduler_config, 'threshold', 0.0001),
+                'threshold_mode': getattr(scheduler_config, 'threshold_mode', 'rel'),
+                'cooldown': getattr(scheduler_config, 'cooldown', 1),
+                'min_lr': getattr(scheduler_config, 'min_lr_plateau', 0.000005),
+                'verbose': getattr(scheduler_config, 'verbose', False)
+            }
+        
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
-            mode='min',
-            factor=0.7,
-            patience=4,
-            threshold=0.0001,
-            threshold_mode='rel',
-            cooldown=1,
-            min_lr=0.000005
+            **scheduler_params
         )
+        
+        # Log scheduler configuration
+        self.logger.info(f"✅ Scheduler created: ReduceLROnPlateau")
+        self.logger.info(f"   Factor: {scheduler_params['factor']}")
+        self.logger.info(f"   Patience: {scheduler_params['patience']}")
+        self.logger.info(f"   Threshold: {scheduler_params['threshold']}")
+        self.logger.info(f"   Min LR: {scheduler_params['min_lr']}")
         
         # Create GradScaler for mixed precision training with proper initialization
         if self.config_loader.prism_network.use_mixed_precision and torch.cuda.is_available():

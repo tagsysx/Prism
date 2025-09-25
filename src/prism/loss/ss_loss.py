@@ -530,9 +530,14 @@ class SSLoss(nn.Module):
         pred_spectrum = self._csi_to_spatial_spectrum(predicted_csi)
         target_spectrum = self._csi_to_spatial_spectrum(target_csi)
         
-        # Normalize spectrums to [0, 1]
-        pred_norm = pred_spectrum / (pred_spectrum.amax(dim=(1, 2), keepdim=True) + 1e-8)
-        target_norm = target_spectrum / (target_spectrum.amax(dim=(1, 2), keepdim=True) + 1e-8)
+        # Normalize spectrums to [0, 1] using consistent normalization
+        # Use the maximum value across both predicted and target spectrums for each sample
+        max_values = torch.maximum(
+            pred_spectrum.amax(dim=(1, 2), keepdim=True),
+            target_spectrum.amax(dim=(1, 2), keepdim=True)
+        )
+        pred_norm = pred_spectrum / (max_values + 1e-8)
+        target_norm = target_spectrum / (max_values + 1e-8)
         
         # Compute SSIM loss
         return self._compute_ssim_loss(pred_norm, target_norm)

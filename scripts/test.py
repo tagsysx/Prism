@@ -214,7 +214,11 @@ class PrismTester(BaseRunner):
             raise
         
         # Initialize device and model
-        self.device = self.config_loader.get_device()
+        if self.gpu_id is not None and torch.cuda.is_available():
+            self.device = torch.device(f'cuda:{self.gpu_id}')
+            logger.info(f"🎯 Using specific GPU: {self.gpu_id}")
+        else:
+            self.device = self.config_loader.get_device()
         self.model = None
         self.checkpoint_info = {}
         

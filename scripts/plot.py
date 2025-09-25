@@ -237,8 +237,8 @@ class CSIPlotter:
         for i, sample in enumerate(samples):
             logger.info(f"   Creating CSI sample {i+1}/{num_samples}...")
             
-            # Create individual figure for each sample with amplitude, phase, and cos(phase) subplots
-            fig, axes = plt.subplots(3, 1, figsize=(15, 15))
+            # Create individual figure for each sample with amplitude and phase subplots
+            fig, axes = plt.subplots(2, 1, figsize=(15, 10))
             
             # Extract sample information
             sample_idx = sample.get('sample_idx', i)
@@ -266,12 +266,22 @@ class CSIPlotter:
             ax_amp.legend(fontsize=11)
             ax_amp.grid(True, alpha=0.3)
             
-            # Plot phase comparison
+            # Plot phase comparison with wrapping consideration
             ax_phase = axes[1]
             pred_phase = np.angle(pred_real + 1j * pred_imag)
             target_phase = np.angle(target_real + 1j * target_imag)
             
-            ax_phase.plot(subcarriers, pred_phase, 'b-', linewidth=2, label='Predicted')
+            # Apply phase wrapping to predicted phase to minimize distance to target
+            pred_phase_wrapped = np.copy(pred_phase)
+            for j in range(len(pred_phase)):
+                phase_diff = pred_phase[j] - target_phase[j]
+                # Wrap to [-π, π] range
+                phase_diff_wrapped = np.arctan2(np.sin(phase_diff), np.cos(phase_diff))
+                # Choose the wrapped version if it's closer to target
+                if abs(phase_diff_wrapped) < abs(phase_diff):
+                    pred_phase_wrapped[j] = target_phase[j] + phase_diff_wrapped
+            
+            ax_phase.plot(subcarriers, pred_phase_wrapped, 'b-', linewidth=2, label='Predicted (wrapped)')
             ax_phase.plot(subcarriers, target_phase, 'r--', linewidth=2, label='Target')
             
             ax_phase.set_xlabel('Subcarrier Index', fontsize=12)
@@ -281,21 +291,21 @@ class CSIPlotter:
             ax_phase.legend(fontsize=11)
             ax_phase.grid(True, alpha=0.3)
             
-            # Plot cos(phase) comparison
-            ax_cos_phase = axes[2]
-            pred_cos_phase = np.cos(pred_phase)
-            target_cos_phase = np.cos(target_phase)
-            
-            ax_cos_phase.plot(subcarriers, pred_cos_phase, 'b-', linewidth=2, label='Predicted cos(phase)')
-            ax_cos_phase.plot(subcarriers, target_cos_phase, 'r--', linewidth=2, label='Target cos(phase)')
-            
-            ax_cos_phase.set_xlabel('Subcarrier Index', fontsize=12)
-            ax_cos_phase.set_ylabel('cos(Phase)', fontsize=12)
-            ax_cos_phase.set_title(f'CSI cos(Phase) Comparison\nSample {sample_idx}, BS Ant {bs_antenna_idx}, UE Ant {ue_antenna_idx}', 
-                                 fontsize=14, fontweight='bold')
-            ax_cos_phase.legend(fontsize=11)
-            ax_cos_phase.grid(True, alpha=0.3)
-            ax_cos_phase.set_ylim([-1.1, 1.1])  # cos(phase) range is [-1, 1]
+            # Plot cos(phase) comparison - COMMENTED OUT
+            # ax_cos_phase = axes[2]
+            # pred_cos_phase = np.cos(pred_phase)
+            # target_cos_phase = np.cos(target_phase)
+            # 
+            # ax_cos_phase.plot(subcarriers, pred_cos_phase, 'b-', linewidth=2, label='Predicted cos(phase)')
+            # ax_cos_phase.plot(subcarriers, target_cos_phase, 'r--', linewidth=2, label='Target cos(phase)')
+            # 
+            # ax_cos_phase.set_xlabel('Subcarrier Index', fontsize=12)
+            # ax_cos_phase.set_ylabel('cos(Phase)', fontsize=12)
+            # ax_cos_phase.set_title(f'CSI cos(Phase) Comparison\nSample {sample_idx}, BS Ant {bs_antenna_idx}, UE Ant {ue_antenna_idx}', 
+            #                      fontsize=14, fontweight='bold')
+            # ax_cos_phase.legend(fontsize=11)
+            # ax_cos_phase.grid(True, alpha=0.3)
+            # ax_cos_phase.set_ylim([-1.1, 1.1])  # cos(phase) range is [-1, 1]
             
             plt.tight_layout()
             
@@ -488,13 +498,13 @@ class CSIPlotter:
         
         similarity_metrics = data['similarity_metrics']
         
-        # Filter out relative_error_similarity and log_spectral_distance
-        colors = ['blue', 'green', 'orange', 'purple']
-        metrics = ['cosine_similarity', 'spectral_correlation', 'bhattacharyya_coefficient', 'jensen_shannon_divergence']
-        labels = ['Cosine Similarity', 'Spectral Correlation', 'Bhattacharyya Coefficient', 'Jensen-Shannon Divergence']
+        # Filter out relative_error_similarity and log_spectral_distance, add SSIM and NMSE
+        colors = ['blue', 'green', 'orange', 'purple', 'red', 'brown']
+        metrics = ['cosine_similarity', 'spectral_correlation', 'bhattacharyya_coefficient', 'jensen_shannon_divergence', 'ssim', 'nmse']
+        labels = ['Cosine Similarity', 'Spectral Correlation', 'Bhattacharyya Coefficient', 'Jensen-Shannon Divergence', 'SSIM', 'NMSE Similarity']
         
-        # Create figure with 2x2 subplots (2 rows x 2 columns for 4 metrics)
-        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        # Create figure with 2x3 subplots (2 rows x 3 columns for 6 metrics)
+        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
         axes = axes.flatten()  # Flatten to 1D array for easier indexing
         
         # Plot each metric in separate subplot
@@ -506,14 +516,20 @@ class CSIPlotter:
             sorted_values = np.sort(values)
             cdf = np.arange(1, len(sorted_values) + 1) / len(sorted_values)
             
+            # Calculate mean and 20th percentile
+            mean_value = np.mean(values)
+            percentile_20 = np.percentile(values, 20)
+            
             ax.plot(sorted_values, cdf, color=color, linewidth=2, 
-                   label=f'{label} (Mean: {np.mean(values):.4f})')
+                   label=f'{label}\nMean: {mean_value:.4f}\n20th %ile: {percentile_20:.4f}')
             
             ax.set_xlabel('Similarity Value', fontsize=10)
             ax.set_ylabel('Cumulative Probability', fontsize=10)
             ax.set_title(f'{label} CDF', fontsize=12, fontweight='bold')
-            ax.legend(fontsize=9)
+            ax.legend(fontsize=8)
             ax.grid(True, alpha=0.3)
+        
+        # All 6 subplots are used for 6 metrics
         
         plt.tight_layout()
         
@@ -557,8 +573,12 @@ class CSIPlotter:
                 sorted_values = np.sort(values)
                 cdf = np.arange(1, len(sorted_values) + 1) / len(sorted_values)
                 
+                # Calculate mean and 20th percentile
+                mean_value = np.mean(values)
+                percentile_20 = np.percentile(values, 20)
+                
                 ax_bs.plot(sorted_values, cdf, color=color, linewidth=2, 
-                          label=f'BS {label} (Mean: {np.mean(values):.4f})')
+                          label=f'BS {label}\nMean: {mean_value:.4f}\n20th %ile: {percentile_20:.4f}')
                 
                 ax_bs.set_xlabel('Similarity Value', fontsize=12)
                 ax_bs.set_ylabel('Cumulative Probability', fontsize=12)
@@ -566,7 +586,7 @@ class CSIPlotter:
                 # Dynamic x-axis range: start from actual min, end at 1
                 min_val = np.min(values)
                 ax_bs.set_xlim(min_val, 1.0)
-                ax_bs.legend(fontsize=11)
+                ax_bs.legend(fontsize=9)
                 ax_bs.grid(True, alpha=0.3)
             
             # Plot UE analysis
@@ -578,8 +598,12 @@ class CSIPlotter:
                 sorted_values = np.sort(values)
                 cdf = np.arange(1, len(sorted_values) + 1) / len(sorted_values)
                 
+                # Calculate mean and 20th percentile
+                mean_value = np.mean(values)
+                percentile_20 = np.percentile(values, 20)
+                
                 ax_ue.plot(sorted_values, cdf, color=color, linewidth=2, 
-                          label=f'UE {label} (Mean: {np.mean(values):.4f})')
+                          label=f'UE {label}\nMean: {mean_value:.4f}\n20th %ile: {percentile_20:.4f}')
                 
                 ax_ue.set_xlabel('Similarity Value', fontsize=12)
                 ax_ue.set_ylabel('Cumulative Probability', fontsize=12)
@@ -587,7 +611,7 @@ class CSIPlotter:
                 # Dynamic x-axis range: start from actual min, end at 1
                 min_val = np.min(values)
                 ax_ue.set_xlim(min_val, 1.0)
-                ax_ue.legend(fontsize=11)
+                ax_ue.legend(fontsize=9)
                 ax_ue.grid(True, alpha=0.3)
         
         plt.tight_layout()
