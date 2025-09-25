@@ -112,8 +112,9 @@ class LowRankRayTracer(nn.Module):
                 
                 # Second-order term: sum over points of (U^S ⊗ U^ρ ⊗ Û^ρ) · (V ⊗ V ⊗ V) * Δt
                 # Only for k > 0 (skip first point)
-                # Initialize second_order_chunk outside the if-else block
-                second_order_chunk = torch.zeros(ray_chunk_size, num_virtual_subcarriers, dtype=torch.complex64, device=device)
+                # Initialize second_order_chunk with actual ray count
+                actual_ray_count = ray_end - ray_start
+                second_order_chunk = torch.zeros(actual_ray_count, num_virtual_subcarriers, dtype=torch.complex64, device=device)
                 
                 if False:  # num_points > 1:  # DISABLED: Skip second-order term to avoid OOM
                     # Memory-optimized computation: avoid creating large 5D tensor us_outer_hat

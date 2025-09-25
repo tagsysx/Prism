@@ -4,6 +4,8 @@ base_station:
   num_antennas: 64  # Sionna has 64 BS antennas (8x8 array)
   antenna_array:
     configuration: "8x8"  # Sionna has 8x8 BS antenna array
+    spacing_x: 0.0429  # Antenna spacing in x direction (half wavelength at 3.5 GHz)
+    spacing_y: 0.0429  # Antenna spacing in y direction (half wavelength at 3.5 GHz)
   ofdm:
     bandwidth: 100.0e6  # Sionna bandwidth: 100 MHz
     center_frequency: 3.5e9  # Sionna frequency: 3.5 GHz
@@ -149,4 +151,10 @@ user_equipment:
   num_ue_antennas: 1  # Sionna has 1 UE antenna
   antenna_array:
     configuration: "1x1"  # Sionna UE antenna array: single antenna
+    spacing_x: 0.0429  # Antenna spacing in x direction (half wavelength at 3.5 GHz)
+    spacing_y: 0.0429  # Antenna spacing in y direction (half wavelength at 3.5 GHz)
   ue_antenna_count: 1  # Number of UE antennas to use (1=antenna 0, 2=antennas 0,1, 3=antennas 0,1,2, etc.)
+
+testing:
+  ss_error:
+    side: "bs"

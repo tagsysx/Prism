@@ -164,7 +164,7 @@ class PrismTester(BaseRunner):
     - Chrissy: Custom dataset format
     """
     
-    def __init__(self, config_path: str, model_path: str = None, data_path: str = None, output_dir: str = None, gpu_id: int = None):
+    def __init__(self, config_path: str, model_path: str = None, data_path: str = None, output_dir: str = None, gpu_id: int = None, random_seed: int = None):
         """Initialize tester with configuration and optional model/data/output paths"""
         self.gpu_id = gpu_id  # Store GPU ID for device setup
         
@@ -185,7 +185,8 @@ class PrismTester(BaseRunner):
             dataset_path = data_config['dataset_path']
             self.data_path = data_path or dataset_path
             self.train_ratio = data_config['train_ratio']
-            self.random_seed = data_config['random_seed']
+            # 使用命令行参数覆盖配置文件中的随机种子
+            self.random_seed = random_seed if random_seed is not None else data_config['random_seed']
             logger.info(f"Using dataset: {self.data_path}")
             logger.info(f"Train ratio: {self.train_ratio}, Random seed: {self.random_seed}")
                 
@@ -351,6 +352,10 @@ class PrismTester(BaseRunner):
                         'sampling_ratio': data_config['sampling_ratio'],
                         'sampling_method': data_config['sampling_method'],
                         'antenna_consistent': data_config['antenna_consistent']
+                    },
+                    'calibration': {
+                        'enabled': data_config['calibration']['enabled'],
+                        'reference_subcarrier_index': data_config['calibration']['reference_subcarrier_index']
                     }
                 },
                 'loss_functions': self.config_loader.training.loss.__dict__,
@@ -507,9 +512,13 @@ class PrismTester(BaseRunner):
                     
                     batch_predictions = outputs['csi']
                     
-                    # Store results
-                    predictions.append(batch_predictions.cpu())
-                    targets.append(batch_target_csi.cpu())
+                    # Apply CSI calibration to both predictions and targets
+                    batch_predictions_calibrated = self.model._csi_calibration(batch_predictions)
+                    batch_targets_calibrated = self.model._csi_calibration(batch_target_csi)
+                    
+                    # Store calibrated results
+                    predictions.append(batch_predictions_calibrated.cpu())
+                    targets.append(batch_targets_calibrated.cpu())
                     
                     monitor.end_batch(i // test_batch_size)
                     
@@ -521,25 +530,18 @@ class PrismTester(BaseRunner):
         
         # Concatenate all results
         if predictions:
-            all_predictions = torch.cat(predictions, dim=0)
-            all_targets = torch.cat(targets, dim=0)
+            all_predictions_calibrated = torch.cat(predictions, dim=0)
+            all_targets_calibrated = torch.cat(targets, dim=0)
             
-            # Apply phase calibration to both predictions and targets
-            logger.info("🔧 Applying phase calibration to CSI data...")
-            predictions_calibrated = self.model._apply_phase_calibration_to_batch(all_predictions)
-            targets_calibrated = self.model._apply_phase_calibration_to_batch(all_targets)
-            
-            logger.info("✅ Phase calibration completed")
-            logger.info(f"   Original predictions shape: {all_predictions.shape}")
-            logger.info(f"   Calibrated predictions shape: {predictions_calibrated.shape}")
-            logger.info(f"   Original targets shape: {all_targets.shape}")
-            logger.info(f"   Calibrated targets shape: {targets_calibrated.shape}")
+            logger.info("✅ CSI calibration completed during testing")
+            logger.info(f"   Calibrated predictions shape: {all_predictions_calibrated.shape}")
+            logger.info(f"   Calibrated targets shape: {all_targets_calibrated.shape}")
             
             # Calculate metrics using calibrated CSI
-            self._calculate_metrics(predictions_calibrated, targets_calibrated)
+            self._calculate_metrics(all_predictions_calibrated, all_targets_calibrated)
             
-            # Save both original and calibrated results
-            self._save_results(all_predictions, all_targets, predictions_calibrated, targets_calibrated)
+            # Save calibrated results
+            self._save_results(all_predictions_calibrated, all_targets_calibrated)
             
             
             logger.info("✅ Testing completed successfully")
@@ -652,35 +654,38 @@ class PrismTester(BaseRunner):
         
         logger.info(f"💾 Metrics saved to: {metrics_file}")
     
-    def _save_results(self, predictions: torch.Tensor, targets: torch.Tensor, 
-                      predictions_calibrated: torch.Tensor = None, targets_calibrated: torch.Tensor = None):
-        """Save testing results including both original and calibrated CSI"""
-        logger.info("💾 Saving testing results...")
+    def _save_results(self, predictions_calibrated: torch.Tensor, targets_calibrated: torch.Tensor):
+        """Save testing results with calibrated CSI"""
+        logger.info("💾 Saving calibrated CSI testing results...")
         
         results_file = self.output_dir / 'predictions' / 'test_results.npz'
         
-        # Prepare data dictionary
+        # Prepare data dictionary with calibrated CSI
         save_data = {
-            'predictions': predictions.cpu().numpy(),
-            'targets': targets.cpu().numpy(),
+            'predictions': predictions_calibrated.cpu().numpy(),
+            'targets': targets_calibrated.cpu().numpy(),
             'test_ue_positions': self.test_ue_positions.cpu().numpy(),
             'test_bs_positions': self.test_bs_positions.cpu().numpy()
         }
         
-        # Add calibrated CSI if provided
-        if predictions_calibrated is not None and targets_calibrated is not None:
-            save_data.update({
-                'predictions_calibrated': predictions_calibrated.cpu().numpy(),
-                'targets_calibrated': targets_calibrated.cpu().numpy()
-            })
-            logger.info("💾 Saving both original and calibrated CSI data")
-        else:
-            logger.info("💾 Saving original CSI data only")
-        
         np.savez_compressed(results_file, **save_data)
         
-        logger.info(f"💾 Results saved to: {results_file}")
+        logger.info(f"💾 Calibrated CSI results saved to: {results_file}")
         logger.info(f"   File contains: {list(save_data.keys())}")
+        logger.info(f"   CSI calibration applied: reference subcarrier index = {self.model.reference_subcarrier_index}")
+        
+        # 输出详细的文件信息
+        print(f"\n💾 预测结果文件保存完成:")
+        print(f"{'='*60}")
+        print(f"📄 文件路径: {results_file}")
+        print(f"📊 文件大小: {results_file.stat().st_size / 1024 / 1024:.2f} MB")
+        print(f"📊 数据形状:")
+        print(f"   - predictions: {save_data['predictions'].shape}")
+        print(f"   - targets: {save_data['targets'].shape}")
+        print(f"   - test_ue_positions: {save_data['test_ue_positions'].shape}")
+        print(f"   - test_bs_positions: {save_data['test_bs_positions'].shape}")
+        print(f"🔧 CSI校准: 已应用 (参考子载波索引: {self.model.reference_subcarrier_index})")
+        print(f"{'='*60}")
     
     # End of Selection
 
@@ -713,18 +718,42 @@ Examples:
     parser.add_argument('--data', help='Path to test data file (optional, will use config path)')
     parser.add_argument('--output', help='Output directory for results (optional, will use config output dir)')
     parser.add_argument('--gpu', type=int, default=0, help='GPU ID to use (default: 0)')
+    parser.add_argument('--random-seed', type=int, help='Random seed for test data sampling (default: use config value)')
     
     args = parser.parse_args()
     
     try:
         print(f"🚀 Starting Prism testing with configuration: {args.config}")
         
+        # 显示预测结果文件保存位置信息
+        print(f"\n📁 预测结果文件保存位置信息:")
+        print(f"{'='*60}")
+        
+        # 创建临时配置加载器来获取输出路径
+        temp_config_loader = ModernConfigLoader(args.config)
+        output_paths = temp_config_loader.get_output_paths()
+        
+        # 显示输出目录结构
+        base_dir = output_paths.get('base_dir', 'results')
+        testing_dir = Path(base_dir) / 'testing'
+        predictions_dir = testing_dir / 'predictions'
+        results_file = predictions_dir / 'test_results.npz'
+        
+        print(f"📂 基础输出目录: {base_dir}")
+        print(f"📂 测试结果目录: {testing_dir}")
+        print(f"📂 预测结果目录: {predictions_dir}")
+        print(f"📄 预测结果文件: {results_file}")
+        print(f"📄 文件格式: .npz (NumPy压缩格式)")
+        print(f"📄 文件内容: predictions, targets, test_ue_positions, test_bs_positions")
+        print(f"{'='*60}\n")
+        
         tester = PrismTester(
             config_path=args.config,
             model_path=args.model,
             data_path=args.data,
             output_dir=args.output,
-            gpu_id=args.gpu
+            gpu_id=args.gpu,
+            random_seed=args.random_seed
         )
         
         # Run testing

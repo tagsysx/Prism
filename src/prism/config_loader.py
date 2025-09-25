@@ -43,19 +43,6 @@ class PDPLossConfig:
     delay_weight: float = 0.3
 
 
-@dataclass
-class SpatialSpectrumLossConfig:
-    """Spatial Spectrum Loss configuration."""
-    enabled: bool = True
-    algorithm: str = 'bartlett'
-    fusion_method: str = 'average'
-    loss_type: str = 'ssim'
-    orientation: str = 'bs'  # 'bs' for BS antenna array, 'ue' for UE antenna array, 'orientation' for orientation-based array
-    theta_range: List[float] = field(default_factory=lambda: [0, 5.0, 90.0])
-    phi_range: List[float] = field(default_factory=lambda: [0.0, 10.0, 360.0])
-    ssim_window_size: int = 11
-    ssim_k1: float = 0.01
-    ssim_k2: float = 0.03
 
 
 @dataclass
@@ -63,11 +50,9 @@ class LossConfig:
     """Overall loss configuration."""
     csi_weight: float = 0.7
     pdp_weight: float = 300.0
-    spatial_spectrum_weight: float = 50.0
     regularization_weight: float = 0.01
     csi_loss: CSILossConfig = field(default_factory=CSILossConfig)
     pdp_loss: PDPLossConfig = field(default_factory=PDPLossConfig)
-    spatial_spectrum_loss: SpatialSpectrumLossConfig = field(default_factory=SpatialSpectrumLossConfig)
 
 
 @dataclass
@@ -86,8 +71,8 @@ class TrainingConfig:
 
 
 @dataclass
-class PhaseCalibrationConfig:
-    """Phase calibration configuration."""
+class CalibrationConfig:
+    """Calibration configuration."""
     enabled: bool = True
     reference_subcarrier_index: int = 0
 
@@ -103,7 +88,7 @@ class DataConfig:
     sampling_ratio: float = 0.5
     sampling_method: str = 'uniform'
     antenna_consistent: bool = True
-    phase_calibration: PhaseCalibrationConfig = field(default_factory=PhaseCalibrationConfig)
+    calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
 
 
 @dataclass
@@ -224,7 +209,7 @@ class ModernConfigLoader:
         self.num_bs_antennas = base_station.get('num_antennas', 64)
         self.base_subcarriers = base_station.get('ofdm', {}).get('num_subcarriers', 64)
         self.ue_antenna_count = user_equipment.get('ue_antenna_count', 1)
-        self.total_subcarriers = self.base_subcarriers * self.ue_antenna_count
+        self.num_virtual_subcarriers = self.base_subcarriers * self.ue_antenna_count
         
         # Parse network configurations with derived parameters
         # 1. PrismNetwork - remove derived parameters that should come from base config
@@ -247,13 +232,13 @@ class ModernConfigLoader:
         
         # 5. FrequencyCodebook - store config with derived num_subcarriers
         freq_config = nn_config.get('frequency_codebook', {}).copy()
-        freq_config['num_subcarriers'] = self.total_subcarriers
+        freq_config['num_subcarriers'] = self.num_virtual_subcarriers
         self.frequency_codebook_config = freq_config
         
         # 6. CSINetwork - store config with derived max_antennas and max_subcarriers
         csi_config = nn_config.get('csi_network', {}).copy()
-        csi_config['max_antennas'] = self.num_bs_antennas
-        csi_config['max_subcarriers'] = self.total_subcarriers
+        csi_config['num_bs_antennas'] = self.num_bs_antennas
+        csi_config['num_subcarriers'] = self.base_subcarriers  # CSI network uses real subcarriers (408)
         self.csi_network_config = csi_config
         
         # Training configuration
@@ -274,15 +259,11 @@ class ModernConfigLoader:
             PDPLossConfig, loss_config.get('pdp_loss', {})
         )
         
-        spatial_spectrum_loss = self._parse_dataclass(
-            SpatialSpectrumLossConfig, loss_config.get('spatial_spectrum_loss', {})
-        )
         
         loss = self._parse_dataclass(
             LossConfig, loss_config, {
                 'csi_loss': csi_loss,
-                'pdp_loss': pdp_loss,
-                'spatial_spectrum_loss': spatial_spectrum_loss
+                'pdp_loss': pdp_loss
             }
         )
         
@@ -302,20 +283,20 @@ class ModernConfigLoader:
                 raise ValueError(f"❌ Missing required data parameter: '{param}'")
         
         subcarrier_config = data_config.get('subcarrier_sampling', {})
-        phase_calibration_config = data_config.get('phase_calibration', {})
+        calibration_config = data_config.get('calibration', {})
         
-        # Parse phase calibration config
-        phase_calibration = self._parse_dataclass(
-            PhaseCalibrationConfig, phase_calibration_config
+        # Parse calibration config
+        calibration = self._parse_dataclass(
+            CalibrationConfig, calibration_config
         )
         
         # Get user_equipment configuration
         user_equipment_config = self._processed_config.get('user_equipment', {})
         
-        # Parse data config with phase calibration
+        # Parse data config with calibration
         self.data = self._parse_dataclass(
             DataConfig, {**data_config, **subcarrier_config}, 
-            {'phase_calibration': phase_calibration}
+            {'calibration': calibration}
         )
         
         # User Equipment configuration
@@ -421,14 +402,14 @@ class ModernConfigLoader:
     
     def get_prism_network_kwargs(self) -> Dict[str, Any]:
         """Get PrismNetwork initialization arguments."""
-        # Get CSI network configuration from neural_networks section
-        neural_networks_config = self._processed_config.get('neural_networks', {})
-        if not neural_networks_config:
-            raise ValueError("❌ Missing required 'neural_networks' configuration section")
+        # Get CSI network configuration (use the parsed config with derived parameters)
+        csi_network_config = self.csi_network_config.copy()
         
-        csi_network_config = neural_networks_config.get('csi_network', {})
-        if not csi_network_config:
-            raise ValueError("❌ Missing required 'csi_network' configuration in neural_networks section")
+        # Add OFDM configuration to CSI network config for subcarrier count
+        base_station = self._processed_config.get('base_station', {})
+        ofdm_config = base_station.get('ofdm', {})
+        if ofdm_config:
+            csi_network_config['ofdm'] = ofdm_config
         
         # Validate required CSI network parameters
         required_csi_params = ['d_model', 'n_layers', 'n_heads', 'd_ff', 'dropout_rate']
@@ -437,7 +418,8 @@ class ModernConfigLoader:
                 raise ValueError(f"❌ Missing required CSI network parameter: '{param}'")
         
         return {
-            'num_subcarriers': self.base_subcarriers,  # 每个UE天线的子载波数
+            'num_subcarriers': self.base_subcarriers,  # 真实子载波数 (408)
+            'num_virtual_subcarriers': self.num_virtual_subcarriers,  # 虚拟子载波数 (408 * 4 = 1632)
             'num_bs_antennas': self.num_bs_antennas,     # 从基础配置获取
             'feature_dim': self.prism_network.feature_dim,
             'antenna_embedding_dim': self.prism_network.antenna_embedding_dim,
@@ -451,9 +433,9 @@ class ModernConfigLoader:
             'radiance_network_config': self.radiance_network.__dict__,
             'antenna_codebook_config': self.antenna_codebook.__dict__,
             'frequency_codebook_config': self.frequency_codebook_config,
-            # Add CSI network configuration
-            'use_csi_network': True,  # Always enable CSI network when config exists
-            'csi_network_config': csi_network_config,
+        # Add CSI network configuration
+        'use_csi_network': True,  # CSI network is always enabled
+        'csi_network_config': csi_network_config,
         }
     
     def get_training_kwargs(self) -> Dict[str, Any]:
@@ -474,11 +456,9 @@ class ModernConfigLoader:
         return {
             'csi_weight': self.training.loss.csi_weight,
             'pdp_weight': self.training.loss.pdp_weight,
-            'spatial_spectrum_weight': self.training.loss.spatial_spectrum_weight,
             'regularization_weight': self.training.loss.regularization_weight,
-            'csi_loss_config': self.training.loss.csi_loss,
-            'pdp_loss_config': self.training.loss.pdp_loss,
-            'spatial_spectrum_loss_config': self.training.loss.spatial_spectrum_loss,
+            'csi_loss': self.training.loss.csi_loss.__dict__,  # Use correct key name
+            'pdp_loss': self.training.loss.pdp_loss.__dict__   # Use correct key name
         }
     
     def get_data_loader_config(self) -> Dict[str, Any]:
@@ -492,9 +472,9 @@ class ModernConfigLoader:
             'sampling_ratio': self.data.sampling_ratio,
             'sampling_method': self.data.sampling_method,
             'antenna_consistent': self.data.antenna_consistent,
-            'phase_calibration': {
-                'enabled': self.data.phase_calibration.enabled,
-                'reference_subcarrier_index': self.data.phase_calibration.reference_subcarrier_index,
+            'calibration': {
+                'enabled': self.data.calibration.enabled,
+                'reference_subcarrier_index': self.data.calibration.reference_subcarrier_index,
             },
         }
     
@@ -518,7 +498,6 @@ class ModernConfigLoader:
         """Create loss function instances."""
         from .loss.csi_loss import CSILoss
         from .loss.pdp_loss import PDPLoss
-        from .loss.ss_loss import SSLoss
         
         loss_functions = {}
         
@@ -540,16 +519,6 @@ class ModernConfigLoader:
                 delay_weight=self.training.loss.pdp_loss.delay_weight,
             )
         
-        # Spatial Spectrum Loss (requires full config including base_station)
-        if self.training.loss.spatial_spectrum_loss.enabled:
-            # Check if required base_station config exists
-            if 'base_station' in self._processed_config:
-                try:
-                    loss_functions['spatial_spectrum_loss'] = SSLoss(self._processed_config)
-                except Exception as e:
-                    logger.warning(f"Failed to create SSLoss: {e}. Skipping spatial spectrum loss.")
-            else:
-                logger.warning("SSLoss requires base_station configuration. Skipping spatial spectrum loss.")
         
         return loss_functions
     
@@ -582,8 +551,7 @@ class ModernConfigLoader:
             },
             'loss_weights': {
                 'csi_weight': self.training.loss.csi_weight,
-                'pdp_weight': self.training.loss.pdp_weight,
-                'spatial_spectrum_weight': self.training.loss.spatial_spectrum_weight,
+                'pdp_weight': self.training.loss.pdp_weight
             },
             'data': {
                 'dataset_path': self.data.dataset_path,

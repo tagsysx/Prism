@@ -30,8 +30,7 @@ import argparse
 import logging
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
-import seaborn as sns
+# Note: matplotlib import removed - plot functionality moved to plot.py
 from pathlib import Path
 import json
 from datetime import datetime
@@ -47,49 +46,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from prism.config_loader import ModernConfigLoader
 
-
-def compute_ssim(img1: np.ndarray, img2: np.ndarray, data_range: float = 1.0) -> float:
-    """
-    Compute Structural Similarity Index (SSIM) between two images.
-    
-    Args:
-        img1: First image array
-        img2: Second image array  
-        data_range: Data range of the images
-        
-    Returns:
-        SSIM value between 0 and 1
-    """
-    # Ensure arrays are the same shape
-    if img1.shape != img2.shape:
-        raise ValueError(f"Images must have the same shape: {img1.shape} vs {img2.shape}")
-    
-    # Convert to float
-    img1 = img1.astype(np.float64)
-    img2 = img2.astype(np.float64)
-    
-    # Constants for SSIM computation
-    c1 = (0.01 * data_range) ** 2
-    c2 = (0.03 * data_range) ** 2
-    
-    # Compute means
-    mu1 = np.mean(img1)
-    mu2 = np.mean(img2)
-    
-    # Compute variances and covariance
-    sigma1_sq = np.var(img1)
-    sigma2_sq = np.var(img2)
-    sigma12 = np.mean((img1 - mu1) * (img2 - mu2))
-    
-    # Compute SSIM
-    numerator = (2 * mu1 * mu2 + c1) * (2 * sigma12 + c2)
-    denominator = (mu1**2 + mu2**2 + c1) * (sigma1_sq + sigma2_sq + c2)
-    
-    if denominator == 0:
-        return 1.0 if numerator == 0 else 0.0
-    
-    ssim_value = numerator / denominator
-    return float(ssim_value)
 
 # Configure logging
 logging.basicConfig(
@@ -113,7 +69,7 @@ class CSIAnalyzer:
     """
     
     def __init__(self, config_path: str, results_path: str = None, output_dir: str = None, fft_size: int = 2048, 
-                 use_parallel: bool = True, num_workers: int = None):
+                 num_workers: int = None):
         """
         Initialize CSI analyzer
         
@@ -122,16 +78,31 @@ class CSIAnalyzer:
             results_path: Path to test results (.npz file) - optional, will auto-detect from config
             output_dir: Output directory for analysis results
             fft_size: FFT size for PDP computation
-            use_parallel: Whether to use parallel processing for spatial spectrum computation
             num_workers: Number of parallel workers (default: CPU count - 1)
         """
         self.config_path = Path(config_path)
         self.fft_size = fft_size
-        self.use_parallel = use_parallel
         self.num_workers = num_workers if num_workers is not None else max(1, cpu_count() - 1)
         
         # Load configuration
         self.config_loader = ModernConfigLoader(self.config_path)
+        
+        # Load spatial spectrum configuration
+        testing_config = self.config_loader._processed_config.get('testing', {})
+        ss_error_config = testing_config.get('ss_error', {})
+        self.ignore_amplitude = ss_error_config.get('ignore_amplitude', False)  # Default to False
+        self.ss_sample_count = ss_error_config.get('count', 500)  # Default to 500 samples
+        
+        # Load analysis configuration for parallel processing
+        analysis_config = self.config_loader._processed_config.get('analysis', {})
+        pas_config = analysis_config.get('pas', {})
+        self.use_parallel = pas_config.get('use_parallel', True)  # Default to True
+        self.pas_enabled = pas_config.get('enabled', True)  # Default to True
+        
+        logger.info(f"📋 Ignore amplitude for spatial spectrum: {self.ignore_amplitude}")
+        logger.info(f"📋 Spatial spectrum sample count: {self.ss_sample_count}")
+        logger.info(f"📋 PAS analysis enabled: {self.pas_enabled}")
+        logger.info(f"📋 Use parallel processing: {self.use_parallel}")
         
         # Determine results path
         if results_path:
@@ -153,7 +124,9 @@ class CSIAnalyzer:
         
         # Create output directories
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        (self.output_dir / 'metrics').mkdir(parents=True, exist_ok=True)
+        # Create analysis directory in testing folder (not plots)
+        self.analysis_dir = self.output_dir.parent / 'analysis'
+        self.analysis_dir.mkdir(parents=True, exist_ok=True)
         
         # Load test results
         self._load_results()
@@ -163,15 +136,49 @@ class CSIAnalyzer:
         logger.info(f"   Results path: {self.results_path}")
         logger.info(f"   Output directory: {self.output_dir}")
         logger.info(f"   FFT size for PDP: {self.fft_size}")
-        logger.info(f"   Parallel processing: {self.use_parallel} ({self.num_workers} workers)")
+        logger.info(f"   Parallel processing: {self.use_parallel}")
         logger.info(f"   Data shape: {self.predictions.shape}")
     
+    def _is_target_csi_zero(self, target_csi: torch.Tensor, threshold: float = 1e-12) -> bool:
+        """
+        Check if target CSI is effectively zero (no ground truth)
+        
+        Args:
+            target_csi: Target CSI tensor
+            threshold: Threshold for considering values as zero
+            
+        Returns:
+            True if target CSI is effectively zero, False otherwise
+        """
+        if target_csi.is_complex():
+            # For complex data, check magnitude
+            magnitude = torch.abs(target_csi)
+            return torch.all(magnitude < threshold).item()
+        else:
+            # For real data, check absolute values
+            return torch.all(torch.abs(target_csi) < threshold).item()
+
     def _load_results(self):
         """Load test results from .npz file"""
         logger.info("📂 Loading test results...")
         
+        # 输出详细的数据文件信息
+        print(f"\n📂 正在加载预测结果数据:")
+        print(f"{'='*60}")
+        print(f"📄 数据文件路径: {self.results_path}")
+        
         if not self.results_path.exists():
+            print(f"❌ 错误: 数据文件不存在!")
+            print(f"   请确保test.py脚本已经运行并生成了预测结果文件")
+            print(f"   或者检查文件路径是否正确")
+            print(f"{'='*60}")
             raise FileNotFoundError(f"Results file not found: {self.results_path}")
+        
+        # 显示文件信息
+        file_size_mb = self.results_path.stat().st_size / 1024 / 1024
+        print(f"📊 文件大小: {file_size_mb:.2f} MB")
+        print(f"📊 文件格式: .npz (NumPy压缩格式)")
+        print(f"{'='*60}")
         
         # Load data
         data = np.load(self.results_path)
@@ -209,6 +216,40 @@ class CSIAnalyzer:
         logger.info(f"   Predictions shape: {self.predictions.shape}")
         logger.info(f"   Targets shape: {self.targets.shape}")
         logger.info(f"   Data type: {self.predictions.dtype}")
+        
+        # 输出成功加载的详细信息
+        print(f"✅ 数据加载成功!")
+        print(f"📊 数据形状:")
+        print(f"   - predictions: {self.predictions.shape}")
+        print(f"   - targets: {self.targets.shape}")
+        print(f"   - test_ue_positions: {self.ue_positions.shape if self.ue_positions is not None else 'None'}")
+        print(f"   - test_bs_positions: {self.bs_positions.shape if self.bs_positions is not None else 'None'}")
+        print(f"📊 数据类型: {self.predictions.dtype}")
+        print(f"📊 数据来源: test.py脚本生成的预测结果")
+        print(f"{'='*60}")
+        
+        # Check if CSI data appears to be calibrated
+        # Calibrated CSI typically has reference subcarrier values close to 1+0j
+        if self.predictions.is_complex():
+            # Check if reference subcarrier (middle subcarrier) values are close to 1+0j
+            middle_subcarrier = self.predictions.shape[-1] // 2
+            ref_pred = self.predictions[:, :, :, middle_subcarrier]
+            ref_target = self.targets[:, :, :, middle_subcarrier]
+            
+            pred_ref_mean = torch.mean(torch.abs(ref_pred)).item()
+            target_ref_mean = torch.mean(torch.abs(ref_target)).item()
+            
+            logger.info(f"   CSI Calibration Status:")
+            logger.info(f"     Reference subcarrier index: {middle_subcarrier}")
+            logger.info(f"     Predicted reference magnitude mean: {pred_ref_mean:.6f}")
+            logger.info(f"     Target reference magnitude mean: {target_ref_mean:.6f}")
+            
+            # Check if data appears calibrated (reference values close to 1.0)
+            if 0.8 <= pred_ref_mean <= 1.2 and 0.8 <= target_ref_mean <= 1.2:
+                logger.info(f"     ✅ CSI data appears to be CALIBRATED (reference values ~1.0)")
+            else:
+                logger.info(f"     ⚠️  CSI data may NOT be calibrated (reference values far from 1.0)")
+        
         # Handle complex data min/max calculation
         if self.predictions.is_complex():
             pred_abs = torch.abs(self.predictions)
@@ -227,121 +268,30 @@ class CSIAnalyzer:
         """Perform comprehensive CSI analysis"""
         logger.info("🧪 Starting comprehensive CSI analysis...")
         
-        # 1. Per-subcarrier amplitude and phase analysis
-        self._analyze_per_subcarrier_csi()
+        # 1. Error distribution analysis
+        logger.info("Starting CSI error distribution analysis (amplitude and phase MAE)...")
+        self._analyze_csi()
         
-        # 2. Error distribution analysis
-        self._analyze_error_distributions()
-        
-        # 3. PDP analysis
+        # 2. PDP analysis with NMSE similarity CDF
+        logger.info("Starting PDP analysis...")
         self._analyze_pdp()
         
-        # 4. Spectrum analysis
-        self._analyze_spectrum()
+        # 3. Spatial spectrum analysis (if enabled)
+        if self.pas_enabled:
+            logger.info("Starting spatial spectrum analysis...")
+            self._analyze_spatial_spectra()
+        else:
+            logger.info("Skipping spatial spectrum analysis (disabled in config)")
+            self.spatial_spectrum_stats = {}
         
-        # 5. Random CSI samples comparison (skip spatial spectrum analysis)
-        self._analyze_random_csi_samples()
-        
-        # 6. Generate summary report
+        # 4. Generate summary report
+        logger.info("Generating summary report...")
         self._generate_summary_report()
         
         logger.info("✅ CSI analysis completed successfully!")
     
-    def _analyze_per_subcarrier_csi(self):
-        """Analyze per-subcarrier amplitude and phase distributions"""
-        logger.info("📊 Analyzing per-subcarrier CSI distributions...")
-        
-        # Convert to complex tensors if needed
-        if not self.predictions.is_complex():
-            self.predictions = self.predictions + 1j * torch.zeros_like(self.predictions)
-        if not self.targets.is_complex():
-            self.targets = self.targets + 1j * torch.zeros_like(self.targets)
-        
-        # Extract amplitude and phase
-        pred_amp = torch.abs(self.predictions)
-        target_amp = torch.abs(self.targets)
-        pred_phase = torch.angle(self.predictions)
-        target_phase = torch.angle(self.targets)
-        
-        # Flatten for CDF computation (all subcarriers across all samples and antennas)
-        pred_amp_flat = pred_amp.flatten().numpy()
-        target_amp_flat = target_amp.flatten().numpy()
-        pred_phase_flat = pred_phase.flatten().numpy()
-        target_phase_flat = target_phase.flatten().numpy()
-        
-        # Compute CDFs
-        pred_amp_cdf = self._compute_empirical_cdf(pred_amp_flat)
-        target_amp_cdf = self._compute_empirical_cdf(target_amp_flat)
-        pred_phase_cdf = self._compute_empirical_cdf(pred_phase_flat)
-        target_phase_cdf = self._compute_empirical_cdf(target_phase_flat)
-        
-        # Create visualization
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
-        fig.suptitle('Per-Subcarrier CSI Analysis: Amplitude and Phase CDFs', fontsize=16, fontweight='bold')
-        
-        # Amplitude CDFs
-        ax1.plot(pred_amp_cdf[0], pred_amp_cdf[1], 'r-', linewidth=2, label='Predicted Amplitude')
-        ax1.plot(target_amp_cdf[0], target_amp_cdf[1], 'b-', linewidth=2, label='Target Amplitude')
-        ax1.set_xlabel('Amplitude Value')
-        ax1.set_ylabel('Cumulative Probability')
-        ax1.set_title('Amplitude CDF Comparison')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        ax1.set_ylim(0, 1)
-        
-        # Phase CDFs
-        ax2.plot(pred_phase_cdf[0], pred_phase_cdf[1], 'r-', linewidth=2, label='Predicted Phase')
-        ax2.plot(target_phase_cdf[0], target_phase_cdf[1], 'b-', linewidth=2, label='Target Phase')
-        ax2.set_xlabel('Phase Value (rad)')
-        ax2.set_ylabel('Cumulative Probability')
-        ax2.set_title('Phase CDF Comparison')
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-        ax2.set_ylim(0, 1)
-        ax2.set_xlim(-np.pi, np.pi)
-        
-        # Amplitude distributions
-        ax3.hist(pred_amp_flat, bins=50, alpha=0.7, color='red', label='Predicted', density=True)
-        ax3.hist(target_amp_flat, bins=50, alpha=0.7, color='blue', label='Target', density=True)
-        ax3.set_xlabel('Amplitude Value')
-        ax3.set_ylabel('Density')
-        ax3.set_title('Amplitude Distribution')
-        ax3.legend()
-        ax3.grid(True, alpha=0.3)
-        
-        # Phase distributions
-        ax4.hist(pred_phase_flat, bins=50, alpha=0.7, color='red', label='Predicted', density=True)
-        ax4.hist(target_phase_flat, bins=50, alpha=0.7, color='blue', label='Target', density=True)
-        ax4.set_xlabel('Phase Value (rad)')
-        ax4.set_ylabel('Density')
-        ax4.set_title('Phase Distribution')
-        ax4.legend()
-        ax4.grid(True, alpha=0.3)
-        ax4.set_xlim(-np.pi, np.pi)
-        
-        plt.tight_layout()
-        
-        # Save plot
-        plot_path = self.output_dir / 'per_subcarrier_csi_analysis.png'
-        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        logger.info(f"✅ Per-subcarrier CSI analysis saved: {plot_path}")
-        
-        # Store results for summary
-        self.per_subcarrier_stats = {
-            'pred_amp_mean': float(np.mean(pred_amp_flat)),
-            'pred_amp_std': float(np.std(pred_amp_flat)),
-            'target_amp_mean': float(np.mean(target_amp_flat)),
-            'target_amp_std': float(np.std(target_amp_flat)),
-            'pred_phase_mean': float(np.mean(pred_phase_flat)),
-            'pred_phase_std': float(np.std(pred_phase_flat)),
-            'target_phase_mean': float(np.mean(target_phase_flat)),
-            'target_phase_std': float(np.std(target_phase_flat))
-        }
-    
-    def _analyze_error_distributions(self):
-        """Analyze amplitude MAE and phase MAE distributions"""
+    def _analyze_csi(self):
+        """Analyze CSI data including error distributions and random samples"""
         logger.info("📊 Analyzing amplitude MAE and phase MAE distributions...")
         
         # Convert to complex tensors if needed
@@ -365,6 +315,11 @@ class CSIAnalyzer:
                     pred_phase = torch.angle(self.predictions[batch_idx, bs_idx, ue_idx, :])
                     target_phase = torch.angle(self.targets[batch_idx, bs_idx, ue_idx, :])
                     
+                    # Skip if target CSI is zero (no ground truth)
+                    if self._is_target_csi_zero(self.targets[batch_idx, bs_idx, ue_idx, :]):
+                        logger.warning(f"Skipping CSI analysis for sample {batch_idx}, BS antenna {bs_idx}, UE antenna {ue_idx} - target CSI is zero (no ground truth)")
+                        continue
+                    
                     # Compute amplitude MAE
                     amp_mae = torch.mean(torch.abs(pred_amp - target_amp)).item()
                     amp_mae_values.append(amp_mae)
@@ -380,64 +335,20 @@ class CSIAnalyzer:
         phase_mae_values = np.array(phase_mae_values)
         
         # Compute CDFs for MAE distributions
-        amp_mae_cdf = self._compute_empirical_cdf(amp_mae_values)
-        phase_mae_cdf = self._compute_empirical_cdf(phase_mae_values)
+        amp_mae_cdf = _compute_empirical_cdf(amp_mae_values)
+        phase_mae_cdf = _compute_empirical_cdf(phase_mae_values)
         
-        # Create visualization focused on MAE distributions
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
-        fig.suptitle('CSI Error Analysis: Amplitude MAE and Phase MAE Distributions', fontsize=16, fontweight='bold')
+        # Note: Plot functionality has been moved to plot.py script
+        # To create error distribution plots, use the CSIPlotter class in plot.py
         
-        # Amplitude MAE CDF
-        ax1.plot(amp_mae_cdf[0], amp_mae_cdf[1], 'r-', linewidth=2, label='Amplitude MAE')
-        ax1.set_xlabel('Amplitude MAE')
-        ax1.set_ylabel('Cumulative Probability')
-        ax1.set_title('Amplitude MAE CDF')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        ax1.set_ylim(0, 1)
+        logger.info(f"✅ Amplitude MAE and phase MAE analysis completed")
         
-        # Amplitude MAE Histogram
-        ax2.hist(amp_mae_values, bins=50, alpha=0.7, color='red', edgecolor='black', density=True)
-        ax2.set_xlabel('Amplitude MAE')
-        ax2.set_ylabel('Density')
-        ax2.set_title(f'Amplitude MAE Distribution (Mean: {np.mean(amp_mae_values):.4f})')
-        ax2.grid(True, alpha=0.3)
+        # Compute CDF values for amplitude and phase
+        amp_sorted = np.sort(amp_mae_values)
+        amp_cdf = np.arange(1, len(amp_sorted) + 1) / len(amp_sorted)
         
-        # Phase MAE CDF
-        ax3.plot(phase_mae_cdf[0], phase_mae_cdf[1], 'b-', linewidth=2, label='Phase MAE')
-        ax3.set_xlabel('Phase MAE (rad)')
-        ax3.set_ylabel('Cumulative Probability')
-        ax3.set_title('Phase MAE CDF')
-        ax3.legend()
-        ax3.grid(True, alpha=0.3)
-        ax3.set_ylim(0, 1)
-        
-        # Phase MAE Histogram
-        ax4.hist(phase_mae_values, bins=50, alpha=0.7, color='blue', edgecolor='black', density=True)
-        ax4.set_xlabel('Phase MAE (rad)')
-        ax4.set_ylabel('Density')
-        ax4.set_title(f'Phase MAE Distribution (Mean: {np.mean(phase_mae_values):.4f})')
-        ax4.grid(True, alpha=0.3)
-        
-        # Add statistics text box
-        stats_text = f"""Error Statistics:
-Amplitude MAE: {np.mean(amp_mae_values):.4f} ± {np.std(amp_mae_values):.4f}
-Phase MAE: {np.mean(phase_mae_values):.4f} ± {np.std(phase_mae_values):.4f}
-Median Amp MAE: {np.median(amp_mae_values):.4f}
-Median Phase MAE: {np.median(phase_mae_values):.4f}"""
-        
-        ax4.text(0.02, 0.98, stats_text, transform=ax4.transAxes, 
-                verticalalignment='top', fontsize=10, 
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-        
-        plt.tight_layout()
-        
-        # Save plot
-        plot_path = self.output_dir / 'error_distribution_analysis.png'
-        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        logger.info(f"✅ Amplitude MAE and phase MAE analysis saved: {plot_path}")
+        phase_sorted = np.sort(phase_mae_values)
+        phase_cdf = np.arange(1, len(phase_sorted) + 1) / len(phase_sorted)
         
         # Store results for summary
         self.error_stats = {
@@ -447,8 +358,87 @@ Median Phase MAE: {np.median(phase_mae_values):.4f}"""
             'phase_mae_mean': float(np.mean(phase_mae_values)),
             'phase_mae_std': float(np.std(phase_mae_values)),
             'phase_mae_median': float(np.median(phase_mae_values)),
-            'num_subcarriers': num_subcarriers
+            'num_subcarriers': num_subcarriers,
+            'total_csi_count': len(amp_mae_values),
+            'all_amp_mae_values': amp_mae_values.tolist(),
+            'all_phase_mae_values': phase_mae_values.tolist(),
+            'amp_mae_cdf_values': amp_sorted.tolist(),
+            'amp_mae_cdf_probabilities': amp_cdf.tolist(),
+            'phase_mae_cdf_values': phase_sorted.tolist(),
+            'phase_mae_cdf_probabilities': phase_cdf.tolist()
         }
+        
+        # Save detailed error data to JSON
+        error_file = self.analysis_dir / 'detailed_csi_analysis.json'
+        with open(error_file, 'w') as f:
+            json.dump({
+                'error_statistics': self.error_stats,
+                'timestamp': datetime.now().isoformat()
+            }, f, indent=2)
+        
+        logger.info(f"✅ Detailed error analysis saved: {error_file}")
+        logger.info(f"   Analyzed {len(amp_mae_values)} CSI samples")
+        
+        # Random CSI samples analysis
+        logger.info("📊 Analyzing random CSI samples with random antenna combinations...")
+        
+        # Get data dimensions - only support 4D CSI data
+        if len(self.predictions.shape) != 4:
+            raise ValueError(f"Only 4D CSI data is supported. Current shape: {self.predictions.shape}. Expected: [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]")
+        
+        batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers = self.predictions.shape
+        
+        # Randomly select 50 BS-UE antenna combinations (increased from 20 for better diversity)
+        # 使用时间戳作为随机种子，增加每次运行的多样性
+        import time
+        dynamic_seed = int(time.time() * 1000) % 10000  # 使用毫秒时间戳
+        np.random.seed(dynamic_seed)
+        logger.info(f"🔀 Using dynamic random seed: {dynamic_seed} for antenna sampling")
+        demo_samples = []
+        max_attempts = 100  # Maximum attempts to find valid samples
+        attempts = 0
+        
+        while len(demo_samples) < 50 and attempts < max_attempts:
+            sample_idx = np.random.choice(batch_size)
+            bs_idx = np.random.choice(num_bs_antennas)
+            ue_idx = np.random.choice(num_ue_antennas)
+            
+            # Get CSI for this combination
+            pred_csi = self.predictions[sample_idx, bs_idx, ue_idx, :].numpy()
+            target_csi = self.targets[sample_idx, bs_idx, ue_idx, :].numpy()
+            
+            # Skip if target CSI is zero (no ground truth)
+            if self._is_target_csi_zero(torch.from_numpy(target_csi)):
+                logger.warning(f"Skipping CSI sample attempt {attempts+1} - sample {sample_idx}, BS antenna {bs_idx}, UE antenna {ue_idx} - target CSI is zero (no ground truth)")
+                attempts += 1
+                continue
+            
+            demo_samples.append({
+                'sample_idx': int(sample_idx),
+                'bs_antenna_idx': int(bs_idx),
+                'ue_antenna_idx': int(ue_idx),
+                'predicted_csi_real': pred_csi.real.tolist(),
+                'predicted_csi_imag': pred_csi.imag.tolist(),
+                'target_csi_real': target_csi.real.tolist(),
+                'target_csi_imag': target_csi.imag.tolist()
+            })
+            attempts += 1
+        
+        if len(demo_samples) < 50:
+            logger.warning(f"Only found {len(demo_samples)} valid CSI samples out of {max_attempts} attempts. Some samples had zero target CSI.")
+        
+        # Save demo CSI samples to JSON
+        demo_file = self.analysis_dir / 'demo_csi_samples.json'
+        with open(demo_file, 'w') as f:
+            json.dump({
+                'demo_samples': demo_samples,
+                'num_samples': len(demo_samples),
+                'csi_shape': [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers],
+                'timestamp': datetime.now().isoformat()
+            }, f, indent=2)
+        
+        logger.info(f"✅ Demo CSI samples saved: {demo_file}")
+        logger.info(f"   Saved {len(demo_samples)} CSI samples")
     
     def _analyze_pdp(self):
         """Analyze Power Delay Profile (PDP) with FFT-based computation"""
@@ -471,6 +461,7 @@ Median Phase MAE: {np.median(phase_mae_values):.4f}"""
         # Initialize PDP arrays
         pred_pdp_all = []
         target_pdp_all = []
+        valid_sample_info = []  # Store sample info for valid PDPs
         
         logger.info(f"   Computing PDP for {batch_size} samples × {total_antennas} antennas...")
         
@@ -480,20 +471,30 @@ Median Phase MAE: {np.median(phase_mae_values):.4f}"""
         for sample_idx in range(batch_size):
             # 4D format: [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
             for bs_idx in range(num_bs_antennas):
-                    for ue_idx in range(num_ue_antennas):
-                        # Get CSI for this sample, BS antenna, and UE antenna
-                        pred_csi = self.predictions[sample_idx, bs_idx, ue_idx, :].numpy()
-                        target_csi = self.targets[sample_idx, bs_idx, ue_idx, :].numpy()
-                        
-                        pred_pdp = self._compute_pdp(pred_csi, self.fft_size)
-                        target_pdp = self._compute_pdp(target_csi, self.fft_size)
-                        
-                        pred_pdp_all.append(pred_pdp)
-                        target_pdp_all.append(target_pdp)
-                        
-                        processed_count += 1
-                        if processed_count % 50 == 0:  # Progress update every 50 PDP computations
-                            logger.info(f"     PDP computation progress: {processed_count}/{total_pdp_computations} ({processed_count/total_pdp_computations*100:.1f}%)")
+                for ue_idx in range(num_ue_antennas):
+                    # Get CSI for this sample, BS antenna, and UE antenna
+                    pred_csi = self.predictions[sample_idx, bs_idx, ue_idx, :].numpy()
+                    target_csi = self.targets[sample_idx, bs_idx, ue_idx, :].numpy()
+                    
+                    # Skip if target CSI is zero (no ground truth)
+                    if self._is_target_csi_zero(self.targets[sample_idx, bs_idx, ue_idx, :]):
+                        logger.warning(f"Skipping PDP analysis for sample {sample_idx}, BS antenna {bs_idx}, UE antenna {ue_idx} - target CSI is zero (no ground truth)")
+                        continue
+                    
+                    pred_pdp = self._compute_pdp(pred_csi, self.fft_size)
+                    target_pdp = self._compute_pdp(target_csi, self.fft_size)
+                    
+                    pred_pdp_all.append(pred_pdp)
+                    target_pdp_all.append(target_pdp)
+                    valid_sample_info.append({
+                        'sample_idx': sample_idx,
+                        'bs_idx': bs_idx,
+                        'ue_idx': ue_idx
+                    })
+                    
+                    processed_count += 1
+                    if processed_count % 50 == 0:  # Progress update every 50 PDP computations
+                        logger.info(f"     PDP computation progress: {processed_count}/{total_pdp_computations} ({processed_count/total_pdp_computations*100:.1f}%)")
         
         # Convert to numpy arrays
         pred_pdp_all = np.array(pred_pdp_all)
@@ -504,93 +505,139 @@ Median Phase MAE: {np.median(phase_mae_values):.4f}"""
         # Compute PDP MAE
         pdp_mae = np.mean(np.abs(pred_pdp_all - target_pdp_all), axis=0)
         
-        # Compute Global Similarity Metrics
-        logger.info("   Computing global similarity metrics...")
-        global_metrics, global_metrics_raw = self._compute_global_similarity_metrics(pred_pdp_all, target_pdp_all)
+        # Compute all similarity metrics in a single loop
+        logger.info("   Computing all PDP similarity metrics...")
+        cosine_similarity_values = []
+        relative_error_similarity_values = []
+        spectral_correlation_values = []
+        log_spectral_distance_values = []
+        bhattacharyya_coefficient_values = []
+        jensen_shannon_divergence_values = []
         
-        # Compute CDFs
-        pdp_mae_cdf = self._compute_empirical_cdf(pdp_mae)
+        for i in range(len(pred_pdp_all)):
+            pred_pdp = pred_pdp_all[i]
+            target_pdp = target_pdp_all[i]
+            
+            # Cosine Similarity
+            pred_flat = pred_pdp.flatten()
+            target_flat = target_pdp.flatten()
+            
+            dot_product = np.sum(pred_flat * target_flat)
+            pred_norm = np.sqrt(np.sum(pred_flat ** 2))
+            target_norm = np.sqrt(np.sum(target_flat ** 2))
+            
+            if pred_norm < 1e-12 or target_norm < 1e-12:
+                cosine_similarity = 0.0
+            else:
+                cosine = dot_product / (pred_norm * target_norm)
+                cosine = np.clip(cosine, -1.0, 1.0)  # Ensure valid range
+                # Map cosine similarity from [-1, 1] to [0, 1]
+                cosine_similarity = (cosine + 1.0) / 2.0
+            
+            cosine_similarity_values.append(cosine_similarity)
+            
+            # Relative Error Similarity
+            relative_error = np.mean(np.abs(pred_pdp - target_pdp) / (np.abs(target_pdp) + 1e-12))
+            # Map to [0, 1], smaller error = higher similarity
+            # Use exponential decay to map relative error to similarity
+            relative_error_similarity = np.exp(-relative_error)
+            relative_error_similarity_values.append(relative_error_similarity)
+            
+            # Spectral Correlation Coefficient
+            scc = _compute_spectral_correlation_coefficient(pred_pdp, target_pdp)
+            spectral_correlation_values.append(scc)
+            
+            # Log Spectral Distance
+            lsd = _compute_log_spectral_distance(pred_pdp, target_pdp)
+            log_spectral_distance_values.append(lsd)
+            
+            # Bhattacharyya Coefficient
+            bc = _compute_bhattacharyya_coefficient(pred_pdp, target_pdp)
+            bhattacharyya_coefficient_values.append(bc)
+            
+            # Jensen-Shannon Divergence
+            jsd = _compute_jensen_shannon_divergence(pred_pdp, target_pdp)
+            jensen_shannon_divergence_values.append(jsd)
         
-        # Compute CDFs for global similarity metrics
-        mse_cdf = self._compute_empirical_cdf(global_metrics_raw['mse_values'])
-        rmse_cdf = self._compute_empirical_cdf(global_metrics_raw['rmse_values'])
-        nmse_cdf = self._compute_empirical_cdf(global_metrics_raw['nmse_values'])
-        cosine_sim_cdf = self._compute_empirical_cdf(global_metrics_raw['cosine_sim_values'])
+        logger.info(f"✅ All PDP similarity metrics computed")
         
-        # Create visualization
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
-        fig.suptitle(f'Power Delay Profile Analysis with Global Similarity Metrics (FFT Size: {self.fft_size})', fontsize=16, fontweight='bold')
+        # Note: Plot functionality has been moved to plot.py script
+        # To create PDP comparison plots, use the CSIPlotter class in plot.py
         
-        # MSE CDF
-        ax1.plot(mse_cdf[0], mse_cdf[1], 'r-', linewidth=2, label='MSE')
-        ax1.set_xlabel('MSE Value')
-        ax1.set_ylabel('Cumulative Probability')
-        ax1.set_title('MSE CDF')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        ax1.set_ylim(0, 1)
-        
-        # PDP MAE CDF
-        ax2.plot(pdp_mae_cdf[0], pdp_mae_cdf[1], 'g-', linewidth=2, label='PDP MAE')
-        ax2.set_xlabel('PDP MAE Value')
-        ax2.set_ylabel('Cumulative Probability')
-        ax2.set_title('PDP MAE CDF')
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-        ax2.set_ylim(0, 1)
-        
-        # RMSE CDF
-        ax3.plot(rmse_cdf[0], rmse_cdf[1], 'g-', linewidth=2, label='RMSE')
-        ax3.set_xlabel('RMSE Value')
-        ax3.set_ylabel('Cumulative Probability')
-        ax3.set_title('RMSE CDF')
-        ax3.legend()
-        ax3.grid(True, alpha=0.3)
-        ax3.set_ylim(0, 1)
-        
-        # Cosine Similarity CDF
-        ax4.plot(cosine_sim_cdf[0], cosine_sim_cdf[1], 'purple', linewidth=2, label='Cosine Similarity')
-        ax4.set_xlabel('Cosine Similarity Value')
-        ax4.set_ylabel('Cumulative Probability')
-        ax4.set_title('Cosine Similarity CDF')
-        ax4.grid(True, alpha=0.3)
-        ax4.legend()
-        ax4.set_ylim(0, 1)
-        
-        # Add global similarity metrics text
-        metrics_text = f"""Global Similarity Metrics:
-MSE: {global_metrics['mse_mean']:.6f} ± {global_metrics['mse_std']:.6f}
-RMSE: {global_metrics['rmse_mean']:.6f} ± {global_metrics['rmse_std']:.6f}
-NMSE: {global_metrics['nmse_mean']:.6f} ± {global_metrics['nmse_std']:.6f}
-Cosine Sim: {global_metrics['cosine_sim_mean']:.6f} ± {global_metrics['cosine_sim_std']:.6f}"""
-        
-        ax4.text(0.02, 0.98, metrics_text, transform=ax4.transAxes, 
-                verticalalignment='top', fontsize=9, 
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-        
-        plt.tight_layout()
-        
-        # Save plot
-        plot_path = self.output_dir / 'pdp_analysis.png'
-        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        logger.info(f"✅ PDP analysis saved: {plot_path}")
-        
-        # Create random PDP comparison
-        self._plot_random_pdp_comparison(pred_pdp_all, target_pdp_all, batch_size, num_bs_antennas, num_ue_antennas)
-        
-        # Store results for summary
+        # Store basic PDP stats for summary
         self.pdp_stats = {
             'pdp_mae_mean': float(np.mean(pdp_mae)),
             'pdp_mae_std': float(np.std(pdp_mae)),
             'fft_size': self.fft_size,
-            'global_similarity': global_metrics
+            'total_pdp_samples': len(pred_pdp_all)
         }
+        
+        # Save detailed PDP similarity analysis to separate file
+        logger.info("   Saving detailed PDP similarity analysis...")
+        detailed_pdp_data = {
+            'pdp_analysis_info': {
+                'fft_size': self.fft_size,
+                'total_pdp_samples': len(pred_pdp_all),
+                'pdp_shape': pred_pdp_all.shape,
+                'timestamp': datetime.now().isoformat()
+            },
+            'similarity_metrics': {
+                'cosine_similarity': cosine_similarity_values,
+                'relative_error_similarity': relative_error_similarity_values,
+                'spectral_correlation': spectral_correlation_values,
+                'log_spectral_distance': log_spectral_distance_values,
+                'bhattacharyya_coefficient': bhattacharyya_coefficient_values,
+                'jensen_shannon_divergence': jensen_shannon_divergence_values
+            }
+        }
+        
+        # Save detailed PDP analysis to JSON
+        detailed_pdp_file = self.analysis_dir / 'detailed_pdp_analysis.json'
+        with open(detailed_pdp_file, 'w') as f:
+            json.dump(detailed_pdp_data, f, indent=2)
+        
+        logger.info(f"✅ Detailed PDP analysis saved: {detailed_pdp_file}")
+        logger.info(f"   Saved {len(pred_pdp_all)} PDP similarity values for each metric")
+        
+        # Save 10 random PDP samples for demo
+        logger.info("   Saving 10 random PDP samples for demo...")
+        np.random.seed(42)  # For reproducibility
+        
+        # Ensure we don't try to select more samples than available
+        num_demo_samples = min(10, len(pred_pdp_all))
+        demo_pdp_indices = np.random.choice(len(pred_pdp_all), size=num_demo_samples, replace=False)
+        
+        demo_pdp_samples = []
+        for i, idx in enumerate(demo_pdp_indices):
+            # Use the stored sample information for valid PDPs
+            sample_info = valid_sample_info[idx]
+            
+            demo_pdp_samples.append({
+                'sample_idx': int(sample_info['sample_idx']),
+                'bs_antenna_idx': int(sample_info['bs_idx']),
+                'ue_antenna_idx': int(sample_info['ue_idx']),
+                'predicted_pdp': pred_pdp_all[idx].tolist(),
+                'target_pdp': target_pdp_all[idx].tolist(),
+                'pdp_length': len(pred_pdp_all[idx])
+            })
+        
+        # Save demo PDP samples to JSON
+        demo_pdp_file = self.analysis_dir / 'demo_pdp_samples.json'
+        with open(demo_pdp_file, 'w') as f:
+            json.dump({
+                'demo_pdp_samples': demo_pdp_samples,
+                'num_samples': len(demo_pdp_samples),
+                'pdp_shape': pred_pdp_all.shape,
+                'fft_size': self.fft_size,
+                'timestamp': datetime.now().isoformat()
+            }, f, indent=2)
+        
+        logger.info(f"✅ Demo PDP samples saved: {demo_pdp_file}")
+        logger.info(f"   Saved {len(demo_pdp_samples)} PDP samples")
     
     def _analyze_spatial_spectra(self):
-        """Analyze spatial spectra for BS and UE antenna arrays"""
-        logger.info("📊 Analyzing spatial spectra...")
+        """Analyze spatial spectra for BS and UE antenna arrays using proper array geometry"""
+        logger.info("📊 Analyzing spatial spectra with proper array geometry...")
         
         # Convert to complex tensors if needed
         if not self.predictions.is_complex():
@@ -599,10 +646,38 @@ Cosine Sim: {global_metrics['cosine_sim_mean']:.6f} ± {global_metrics['cosine_s
             self.targets = self.targets + 1j * torch.zeros_like(self.targets)
         
         # Get antenna configuration from config
+        bs_config = self.config_loader._processed_config['base_station']['antenna_array']
+        ue_config = self.config_loader._processed_config['user_equipment']['antenna_array']
+        ofdm_config = self.config_loader._processed_config['base_station']['ofdm']
+        analysis_config = self.config_loader._processed_config.get('analysis', {}).get('pas', {})
+        
         bs_antenna_count = self.config_loader.num_bs_antennas
         ue_antenna_count = self.config_loader.ue_antenna_count
         
+        # Log detailed antenna structure information
+        logger.info("📡 Antenna Structure Information:")
         logger.info(f"   BS antennas: {bs_antenna_count}, UE antennas: {ue_antenna_count}")
+        logger.info(f"   BS array config: {bs_config['configuration']}")
+        logger.info(f"   UE array config: {ue_config['configuration']}")
+        # Calculate antenna spacing from center frequency for logging
+        c = 3e8  # Speed of light in m/s
+        wavelength = c / float(ofdm_config['center_frequency'])
+        antenna_spacing = wavelength / 2
+        
+        logger.info(f"   BS spacing: x={antenna_spacing:.3f}m, y={antenna_spacing:.3f}m (calculated from {float(ofdm_config['center_frequency'])/1e9:.2f} GHz)")
+        logger.info(f"   UE spacing: x={antenna_spacing:.3f}m, y={antenna_spacing:.3f}m (calculated from {float(ofdm_config['center_frequency'])/1e9:.2f} GHz)")
+        
+        # Log OFDM configuration
+        logger.info("📡 OFDM Configuration:")
+        logger.info(f"   Center frequency: {float(ofdm_config['center_frequency'])/1e9:.2f} GHz")
+        logger.info(f"   Bandwidth: {float(ofdm_config['bandwidth'])/1e6:.1f} MHz")
+        logger.info(f"   Subcarrier spacing: {float(ofdm_config['subcarrier_spacing'])/1e3:.1f} kHz")
+        logger.info(f"   Number of subcarriers: {ofdm_config['num_subcarriers']}")
+        
+        # Log analysis parameters
+        logger.info("📊 Analysis Parameters:")
+        logger.info(f"   Ignore amplitude: {analysis_config['ignore_amplitude']}")
+        logger.info(f"   Sample count: {analysis_config['count']}")
         
         # Determine CSI data shape - only support 4D CSI data
         if len(self.predictions.shape) != 4:
@@ -610,1012 +685,769 @@ Cosine Sim: {global_metrics['cosine_sim_mean']:.6f} ± {global_metrics['cosine_s
         
         batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers = self.predictions.shape
         
+        # Log detailed CSI information
+        logger.info("📊 CSI Data Information:")
         logger.info(f"   CSI shape: {self.predictions.shape}")
-        logger.info(f"   Detected: {num_bs_antennas} BS antennas, {num_ue_antennas} UE antennas")
+        logger.info(f"   Batch size: {batch_size}")
+        logger.info(f"   BS antennas: {num_bs_antennas}")
+        logger.info(f"   UE antennas: {num_ue_antennas}")
+        logger.info(f"   Subcarriers: {num_subcarriers}")
+        logger.info(f"   Total CSI elements: {batch_size * num_bs_antennas * num_ue_antennas * num_subcarriers:,}")
+        logger.info(f"   CSI data type: {self.predictions.dtype}")
+        logger.info(f"   CSI memory size: {self.predictions.element_size() * self.predictions.nelement() / 1024**2:.2f} MB")
         
         # Initialize results storage
         spatial_spectrum_stats = {}
         
         # Analyze BS spatial spectrum if BS antennas > 1
         if num_bs_antennas > 1:
-            logger.info("   Computing BS spatial spectra accuracy (NMSE-based)...")
-            bs_accuracy_values = self._compute_spatial_spectrum_accuracy(
+            logger.info("   Computing BS spatial spectra...")
+            bs_results = self._compute_spatial_spectrum_analysis(
                 self.predictions, self.targets, 
-                antenna_dim=1,  # BS antenna dimension
-                antenna_count=num_bs_antennas,
-                antenna_type="BS"
+                antenna_type="BS",
+                array_config=bs_config,
+                ofdm_config=ofdm_config,
+                analysis_config=analysis_config,
+                batch_size=batch_size,
+                num_antennas=num_ue_antennas,  # BS端：为每个UE天线计算空间谱
+                num_subcarriers=num_subcarriers
             )
-            spatial_spectrum_stats['bs_accuracy'] = {
-                'mean': float(np.mean(bs_accuracy_values)),
-                'std': float(np.std(bs_accuracy_values)),
-                'median': float(np.median(bs_accuracy_values)),
-                'min': float(np.min(bs_accuracy_values)),
-                'max': float(np.max(bs_accuracy_values)),
-                'values': bs_accuracy_values.tolist()
-            }
-            logger.info(f"   BS Accuracy: {np.mean(bs_accuracy_values):.2f}% ± {np.std(bs_accuracy_values):.2f}%")
+            spatial_spectrum_stats['bs_analysis'] = bs_results
+            logger.info(f"   BS Analysis completed: {bs_results['total_samples']} samples")
         
         # Analyze UE spatial spectrum if UE antennas > 1
         if num_ue_antennas > 1:
-            logger.info("   Computing UE spatial spectra accuracy (NMSE-based)...")
-            ue_accuracy_values = self._compute_spatial_spectrum_accuracy(
+            logger.info("   Computing UE spatial spectra...")
+            ue_results = self._compute_spatial_spectrum_analysis(
                 self.predictions, self.targets,
-                antenna_dim=2,  # UE antenna dimension
-                antenna_count=num_ue_antennas,
-                antenna_type="UE"
+                antenna_type="UE",
+                array_config=ue_config,
+                ofdm_config=ofdm_config,
+                analysis_config=analysis_config,
+                batch_size=batch_size,
+                num_antennas=num_bs_antennas,  # UE端：为每个BS天线计算空间谱
+                num_subcarriers=num_subcarriers
             )
-            spatial_spectrum_stats['ue_accuracy'] = {
-                'mean': float(np.mean(ue_accuracy_values)),
-                'std': float(np.std(ue_accuracy_values)),
-                'median': float(np.median(ue_accuracy_values)),
-                'min': float(np.min(ue_accuracy_values)),
-                'max': float(np.max(ue_accuracy_values)),
-                'values': ue_accuracy_values.tolist()
-            }
-            logger.info(f"   UE Accuracy: {np.mean(ue_accuracy_values):.2f}% ± {np.std(ue_accuracy_values):.2f}%")
-        
-        # Create accuracy CDF plot
-        self._plot_spatial_spectrum_accuracy_cdf(spatial_spectrum_stats)
-        
-        # Create random spatial spectrum comparison
-        self._plot_random_spatial_spectra_comparison()
-        
-        # Create individual spatial spectrum comparisons
-        self._plot_individual_spatial_spectra_comparisons()
+            spatial_spectrum_stats['ue_analysis'] = ue_results
+            logger.info(f"   UE Analysis completed: {ue_results['total_samples']} samples")
         
         # Store results for summary
         self.spatial_spectrum_stats = spatial_spectrum_stats
         
+        # Create unified PAS analysis file
+        self._create_unified_pas_analysis()
+        
         logger.info("✅ Spatial spectrum analysis completed!")
     
-    def _compute_spatial_spectrum_accuracy(self, predictions: torch.Tensor, targets: torch.Tensor, 
-                                          antenna_dim: int, antenna_count: int, antenna_type: str) -> np.ndarray:
-        """
-        Compute spatial spectrum accuracy using NMSE-based method with parallel processing.
+    def _create_unified_pas_analysis(self):
+        """Create unified PAS analysis file with similarity metrics only"""
+        logger.info("📊 Creating unified PAS analysis file...")
         
-        This implements the most scientific and professional approach:
-        Accuracy (%) = max(0, (1 - NMSE) × 100)
-        where NMSE = mean(|H_pred - H_gt|²) / mean(|H_gt|²)
+        unified_data = {
+            'analysis_info': {
+                'timestamp': datetime.now().isoformat(),
+                'total_bs_samples': 0,
+                'total_ue_samples': 0
+            },
+            'bs_analysis': {},
+            'ue_analysis': {}
+        }
         
-        This method is widely recognized in academic and engineering communities as the most
-        appropriate way to measure signal fidelity in spatial spectrum analysis.
-        """
-        
-        batch_size = predictions.shape[0]
-        num_subcarriers = predictions.shape[-1]
-        total_samples = batch_size * num_subcarriers
-        
-        logger.info(f"🔍 Computing spatial spectrum accuracy (NMSE-based) for {antenna_type} antennas ({total_samples} samples)...")
-        
-        # Prepare arguments for parallel processing
-        args_list = []
-        for batch_idx in range(batch_size):
-            for subcarrier_idx in range(num_subcarriers):
-                # Extract CSI for this batch and subcarrier
-                # 4D format: [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
-                if antenna_dim == 1:  # BS antennas
-                    pred_csi = predictions[batch_idx, :, :, subcarrier_idx]  # [num_bs_antennas, num_ue_antennas]
-                    target_csi = targets[batch_idx, :, :, subcarrier_idx]
-                else:  # UE antennas
-                    pred_csi = predictions[batch_idx, :, :, subcarrier_idx].T  # [num_ue_antennas, num_bs_antennas]
-                    target_csi = targets[batch_idx, :, :, subcarrier_idx].T
-                
-                args_list.append((pred_csi, target_csi, antenna_dim, antenna_type, batch_idx, subcarrier_idx))
-        
-        # Use parallel processing if enabled and we have enough samples
-        if hasattr(self, 'use_parallel') and self.use_parallel and len(args_list) > 4:
-            logger.info(f"   Using parallel processing with {self.num_workers} workers...")
+        # Process BS analysis if available
+        if 'bs_analysis' in self.spatial_spectrum_stats:
+            bs_data = self.spatial_spectrum_stats['bs_analysis']
+            unified_data['analysis_info']['total_bs_samples'] = bs_data['total_samples']
             
-            # Suppress multiprocessing warnings
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                
-                # Use multiprocessing Pool
-                with Pool(processes=self.num_workers) as pool:
-                    # Create partial function with self bound
-                    compute_func = partial(self._compute_single_spatial_spectrum_accuracy)
-                    
-                    # Process in chunks to avoid memory issues
-                    chunk_size = max(1, len(args_list) // (self.num_workers * 4))
-                    results = pool.map(compute_func, args_list, chunksize=chunk_size)
-            
-            # Extract accuracies from results
-            accuracy_values = [result[0] for result in results]
-            
-        else:
-            # Fallback to sequential processing
-            logger.info(f"   Using sequential processing...")
-            accuracy_values = []
-            processed_samples = 0
-            
-            for args in args_list:
-                processed_samples += 1
-                if processed_samples % 100 == 0:
-                    logger.info(f"   Processing sample {processed_samples}/{total_samples} for {antenna_type} antennas...")
-                
-                result = self._compute_single_spatial_spectrum_accuracy(args)
-                accuracy_values.append(result[0])
+            # Load similarity data from file
+            similarity_file = self.analysis_dir / 'detailed_spatial_spectrum_similarity_bs.json'
+            if similarity_file.exists():
+                with open(similarity_file, 'r') as f:
+                    bs_similarity_data = json.load(f)
+                    unified_data['bs_analysis'] = {
+                        'antenna_type': 'BS',
+                        'array_shape': bs_data['array_shape'],
+                        'is_2d_array': bs_data['is_2d_array'],
+                        'total_samples': bs_data['total_samples'],
+                        'similarity_metrics': bs_similarity_data['similarity_metrics']
+                    }
         
-        logger.info(f"✅ Completed accuracy computation for {antenna_type} antennas: {len(accuracy_values)} samples")
-        logger.info(f"   Mean accuracy: {np.mean(accuracy_values):.2f}%, Std: {np.std(accuracy_values):.2f}%")
-        return np.array(accuracy_values)
+        # Process UE analysis if available
+        if 'ue_analysis' in self.spatial_spectrum_stats:
+            ue_data = self.spatial_spectrum_stats['ue_analysis']
+            unified_data['analysis_info']['total_ue_samples'] = ue_data['total_samples']
+            
+            # Load similarity data from file
+            similarity_file = self.analysis_dir / 'detailed_spatial_spectrum_similarity_ue.json'
+            if similarity_file.exists():
+                with open(similarity_file, 'r') as f:
+                    ue_similarity_data = json.load(f)
+                    unified_data['ue_analysis'] = {
+                        'antenna_type': 'UE',
+                        'array_shape': ue_data['array_shape'],
+                        'is_2d_array': ue_data['is_2d_array'],
+                        'total_samples': ue_data['total_samples'],
+                        'similarity_metrics': ue_similarity_data['similarity_metrics']
+                    }
+        
+        # Save unified PAS analysis
+        unified_file = self.analysis_dir / 'detailed_pas_analysis.json'
+        with open(unified_file, 'w') as f:
+            json.dump(unified_data, f, indent=2)
+        
+        logger.info(f"✅ Unified PAS analysis saved: {unified_file}")
+        
+        # Create demo samples file
+        self._create_demo_pas_samples()
     
-    def _plot_spatial_spectrum_accuracy_cdf(self, spatial_spectrum_stats: Dict):
-        """
-        Plot CDF of accuracy values for spatial spectra using NMSE-based method.
+    def _create_demo_pas_samples(self):
+        """Create demo PAS samples file with 5 BS and 5 UE samples"""
+        logger.info("📊 Creating demo PAS samples file...")
         
-        This plot shows the cumulative distribution of spatial spectrum accuracy,
-        which represents signal fidelity percentage based on the most scientific
-        and professional NMSE-based approach.
-        """
-        logger.info("📊 Creating spatial spectrum accuracy CDF plot (NMSE-based)...")
+        demo_data = {
+            'demo_info': {
+                'timestamp': datetime.now().isoformat(),
+                'bs_samples': 0,
+                'ue_samples': 0
+            },
+            'bs_samples': [],
+            'ue_samples': []
+        }
         
-        plt.figure(figsize=(12, 8))
+        # Load BS demo samples
+        bs_demo_file = self.analysis_dir / 'demo_pas_samples_bs.json'
+        if bs_demo_file.exists():
+            with open(bs_demo_file, 'r') as f:
+                bs_demo_data = json.load(f)
+                demo_data['bs_samples'] = bs_demo_data['demo_samples'][:5]  # Take first 5 samples
+                demo_data['demo_info']['bs_samples'] = len(demo_data['bs_samples'])
         
-        plot_count = 0
-        if 'bs_accuracy' in spatial_spectrum_stats:
-            plot_count += 1
-        if 'ue_accuracy' in spatial_spectrum_stats:
-            plot_count += 1
+        # Load UE demo samples
+        ue_demo_file = self.analysis_dir / 'demo_pas_samples_ue.json'
+        if ue_demo_file.exists():
+            with open(ue_demo_file, 'r') as f:
+                ue_demo_data = json.load(f)
+                demo_data['ue_samples'] = ue_demo_data['demo_samples'][:5]  # Take first 5 samples
+                demo_data['demo_info']['ue_samples'] = len(demo_data['ue_samples'])
         
-        if plot_count == 0:
-            logger.warning("No spatial spectrum accuracy data to plot")
-            return
+        # Save unified demo file
+        demo_file = self.analysis_dir / 'demo_pas_samples.json'
+        with open(demo_file, 'w') as f:
+            json.dump(demo_data, f, indent=2)
         
-        subplot_idx = 1
-        
-        # Plot BS Accuracy CDF
-        if 'bs_accuracy' in spatial_spectrum_stats:
-            plt.subplot(plot_count, 1, subplot_idx)
-            bs_accuracy_values = spatial_spectrum_stats['bs_accuracy']['values']
-            bs_accuracy_sorted = np.sort(bs_accuracy_values)
-            bs_accuracy_cdf = np.arange(1, len(bs_accuracy_sorted) + 1) / len(bs_accuracy_sorted)
-            
-            plt.plot(bs_accuracy_sorted, bs_accuracy_cdf, 'b-', linewidth=2, label='BS Spatial Spectrum Accuracy')
-            
-            plt.xlabel('Accuracy (%)')
-            plt.ylabel('Cumulative Probability')
-            plt.title(f'BS Spatial Spectrum Accuracy CDF (NMSE-based)\nMean: {spatial_spectrum_stats["bs_accuracy"]["mean"]:.2f}%, Median: {spatial_spectrum_stats["bs_accuracy"]["median"]:.2f}%')
-            plt.grid(True, alpha=0.3)
-            plt.legend()
-            plt.ylim(0, 1)
-            plt.xlim(0, 100)
-            
-            # Add percentile lines
-            percentiles = [25, 50, 75, 90, 95]
-            for p in percentiles:
-                value = np.percentile(bs_accuracy_values, p)
-                plt.axvline(value, color='gray', linestyle='--', alpha=0.5)
-                plt.text(value, 0.1, f'{p}%', rotation=90, fontsize=8)
-            
-            subplot_idx += 1
-        
-        # Plot UE Accuracy CDF
-        if 'ue_accuracy' in spatial_spectrum_stats:
-            plt.subplot(plot_count, 1, subplot_idx)
-            ue_accuracy_values = spatial_spectrum_stats['ue_accuracy']['values']
-            ue_accuracy_sorted = np.sort(ue_accuracy_values)
-            ue_accuracy_cdf = np.arange(1, len(ue_accuracy_sorted) + 1) / len(ue_accuracy_sorted)
-            
-            plt.plot(ue_accuracy_sorted, ue_accuracy_cdf, 'r-', linewidth=2, label='UE Spatial Spectrum Accuracy')
-            
-            plt.xlabel('Accuracy (%)')
-            plt.ylabel('Cumulative Probability')
-            plt.title(f'UE Spatial Spectrum Accuracy CDF (NMSE-based)\nMean: {spatial_spectrum_stats["ue_accuracy"]["mean"]:.2f}%, Median: {spatial_spectrum_stats["ue_accuracy"]["median"]:.2f}%')
-            plt.grid(True, alpha=0.3)
-            plt.legend()
-            plt.ylim(0, 1)
-            plt.xlim(0, 100)
-            
-            # Add percentile lines
-            percentiles = [25, 50, 75, 90, 95]
-            for p in percentiles:
-                value = np.percentile(ue_accuracy_values, p)
-                plt.axvline(value, color='gray', linestyle='--', alpha=0.5)
-                plt.text(value, 0.1, f'{p}%', rotation=90, fontsize=8)
-        
-        plt.tight_layout()
-        
-        # Save plot
-        plot_path = self.output_dir / 'spatial_spectrum_accuracy_cdf.png'
-        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        logger.info(f"✅ Spatial spectrum accuracy CDF plot saved: {plot_path}")
+        logger.info(f"✅ Demo PAS samples saved: {demo_file}")
+        logger.info(f"   BS samples: {demo_data['demo_info']['bs_samples']}")
+        logger.info(f"   UE samples: {demo_data['demo_info']['ue_samples']}")
     
-    def _plot_random_spatial_spectra_comparison(self):
-        """Plot random spatial spectra comparison (10 samples, left: ground truth, right: predicted)"""
-        logger.info("📊 Creating random spatial spectra comparison...")
+    def _compute_spatial_spectrum_analysis(self, predictions: torch.Tensor, targets: torch.Tensor,
+                                         antenna_type: str, array_config: dict, ofdm_config: dict,
+                                         analysis_config: dict, batch_size: int, num_antennas: int,
+                                         num_subcarriers: int) -> dict:
+        """Compute spatial spectrum analysis for given antenna type"""
         
-        # Convert to complex tensors if needed
-        if not self.predictions.is_complex():
-            self.predictions = self.predictions + 1j * torch.zeros_like(self.predictions)
-        if not self.targets.is_complex():
-            self.targets = self.targets + 1j * torch.zeros_like(self.targets)
+        # Parse array configuration
+        array_shape = self._parse_array_configuration(array_config['configuration'])
         
-        # Get antenna configuration
-        bs_antenna_count = self.config_loader.num_bs_antennas
-        ue_antenna_count = self.config_loader.ue_antenna_count
+        # Get OFDM parameters
+        center_freq = float(ofdm_config['center_frequency'])
         
-        # Determine CSI data shape - only support 4D CSI data
-        if len(self.predictions.shape) != 4:
-            raise ValueError(f"Only 4D CSI data is supported. Current shape: {self.predictions.shape}. Expected: [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]")
-        
-        batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers = self.predictions.shape
-        
-        # Randomly select 10 samples
-        np.random.seed(42)  # For reproducibility
-        selected_indices = np.random.choice(batch_size, size=min(10, batch_size), replace=False)
-        logger.info(f"   Selected samples: {selected_indices}")
-        
-        # Determine which spatial spectra to plot
-        plot_bs = num_bs_antennas > 1
-        plot_ue = num_ue_antennas > 1
-        
-        if not plot_bs and not plot_ue:
-            logger.warning("No multi-antenna arrays found for spatial spectrum comparison")
-            return
-        
-        # Create figure with subplots
-        num_plots = 0
-        if plot_bs:
-            num_plots += 1
-        if plot_ue:
-            num_plots += 1
-            
-        fig, axes = plt.subplots(num_plots, 1, figsize=(16, 4 * num_plots))
-        if num_plots == 1:
-            axes = [axes]
-        
-        plot_idx = 0
-        
-        # Plot BS spatial spectra if applicable
-        if plot_bs:
-            ax = axes[plot_idx]
-            self._plot_spatial_spectra_for_antenna_type(
-                ax, selected_indices, antenna_dim=1, antenna_type="BS",
-                num_bs_antennas=num_bs_antennas, num_ue_antennas=num_ue_antennas,
-                num_subcarriers=num_subcarriers
-            )
-            plot_idx += 1
-        
-        # Plot UE spatial spectra if applicable
-        if plot_ue:
-            ax = axes[plot_idx]
-            self._plot_spatial_spectra_for_antenna_type(
-                ax, selected_indices, antenna_dim=2, antenna_type="UE",
-                num_bs_antennas=num_bs_antennas, num_ue_antennas=num_ue_antennas,
-                num_subcarriers=num_subcarriers
-            )
-        
-        plt.tight_layout()
-        
-        # Save plot
-        plot_path = self.output_dir / 'random_spatial_spectra_comparison.png'
-        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        logger.info(f"✅ Random spatial spectra comparison saved: {plot_path}")
-    
-    def _plot_spatial_spectra_for_antenna_type(self, ax, selected_indices, antenna_dim, antenna_type,
-                                              num_bs_antennas, num_ue_antennas, num_subcarriers):
-        """Plot spatial spectra for a specific antenna type"""
-        
-        # Create a grid of subplots within the main subplot
-        n_samples = len(selected_indices)
-        
-        # Remove the original axis
-        ax.remove()
-        
-        # Create subplot grid: 10 rows, 2 columns (left: GT, right: Pred)
-        fig = plt.gcf()
-        gs = fig.add_gridspec(n_samples, 2, hspace=0.3, wspace=0.1)
-        
-        for i, sample_idx in enumerate(selected_indices):
-            # Left subplot: Ground Truth
-            ax_gt = fig.add_subplot(gs[i, 0])
-            # Right subplot: Predicted
-            ax_pred = fig.add_subplot(gs[i, 1])
-            
-            # Select a representative subcarrier (middle one)
-            subcarrier_idx = num_subcarriers // 2
-            
-            # Extract CSI for this sample and subcarrier
-            # 4D format: [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
-            if antenna_dim == 1:  # BS antennas
-                gt_csi = self.targets[sample_idx, :, :, subcarrier_idx]  # [num_bs_antennas, num_ue_antennas]
-                pred_csi = self.predictions[sample_idx, :, :, subcarrier_idx]
-            else:  # UE antennas
-                gt_csi = self.targets[sample_idx, :, :, subcarrier_idx].T  # [num_ue_antennas, num_bs_antennas]
-                pred_csi = self.predictions[sample_idx, :, :, subcarrier_idx].T
-            
-            # Compute spatial spectrum using Bartlett algorithm
-            gt_spectrum = self._compute_bartlett_spatial_spectrum(gt_csi)
-            pred_spectrum = self._compute_bartlett_spatial_spectrum(pred_csi)
-            
-            # Convert to numpy
-            gt_spectrum_np = gt_spectrum.detach().cpu().numpy()
-            pred_spectrum_np = pred_spectrum.detach().cpu().numpy()
-            
-            # Plot ground truth (Bartlett spatial spectrum is always 2D: azimuth × elevation)
-            im_gt = ax_gt.imshow(gt_spectrum_np, cmap='viridis', aspect='auto')
-            ax_gt.set_title(f'Sample {sample_idx} - GT', fontsize=8)
-            ax_gt.set_ylabel('Elevation (deg)', fontsize=7)
-            if i == n_samples - 1:  # Last row
-                ax_gt.set_xlabel('Azimuth (deg)', fontsize=7)
-            
-            # Plot predicted (Bartlett spatial spectrum is always 2D: azimuth × elevation)
-            im_pred = ax_pred.imshow(pred_spectrum_np, cmap='viridis', aspect='auto')
-            ax_pred.set_title(f'Sample {sample_idx} - Pred', fontsize=8)
-            ax_pred.set_ylabel('Elevation (deg)', fontsize=7)
-            if i == n_samples - 1:  # Last row
-                ax_pred.set_xlabel('Azimuth (deg)', fontsize=7)
-            
-            # Set consistent color scale
-            vmin = min(gt_spectrum_np.min(), pred_spectrum_np.min())
-            vmax = max(gt_spectrum_np.max(), pred_spectrum_np.max())
-            im_gt.set_clim(vmin, vmax)
-            im_pred.set_clim(vmin, vmax)
-            
-            # Set axis ticks for azimuth and elevation (36×5 resolution)
-            azimuth_ticks = np.arange(0, gt_spectrum_np.shape[1], max(1, gt_spectrum_np.shape[1]//6))
-            elevation_ticks = np.arange(0, gt_spectrum_np.shape[0], max(1, gt_spectrum_np.shape[0]//3))
-            
-            ax_gt.set_xticks(azimuth_ticks)
-            ax_gt.set_xticklabels([f'{int(az*10)}' for az in azimuth_ticks], fontsize=6)
-            ax_gt.set_yticks(elevation_ticks)
-            ax_gt.set_yticklabels([f'{int(el*18)}' for el in elevation_ticks], fontsize=6)
-            
-            ax_pred.set_xticks(azimuth_ticks)
-            ax_pred.set_xticklabels([f'{int(az*10)}' for az in azimuth_ticks], fontsize=6)
-            ax_pred.set_yticks(elevation_ticks)
-            ax_pred.set_yticklabels([f'{int(el*18)}' for el in elevation_ticks], fontsize=6)
-            
-            # Remove ticks for cleaner look
-            ax_gt.tick_params(labelsize=6)
-            ax_pred.tick_params(labelsize=6)
-        
-        # Add main title
-        plt.suptitle(f'{antenna_type} Spatial Spectra Comparison (Subcarrier {num_subcarriers//2})', 
-                    fontsize=12, y=0.98)
-    
-    def _plot_individual_spatial_spectra_comparisons(self):
-        """Plot individual spatial spectrum comparisons (10 samples, each as separate figure)"""
-        logger.info("📊 Creating individual spatial spectrum comparisons...")
-        
-        # Convert to complex tensors if needed
-        if not self.predictions.is_complex():
-            self.predictions = self.predictions + 1j * torch.zeros_like(self.predictions)
-        if not self.targets.is_complex():
-            self.targets = self.targets + 1j * torch.zeros_like(self.targets)
-        
-        # Get antenna configuration
-        bs_antenna_count = self.config_loader.num_bs_antennas
-        ue_antenna_count = self.config_loader.ue_antenna_count
-        
-        # Determine CSI data shape - only support 4D CSI data
-        if len(self.predictions.shape) != 4:
-            raise ValueError(f"Only 4D CSI data is supported. Current shape: {self.predictions.shape}. Expected: [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]")
-        
-        batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers = self.predictions.shape
-        
-        # Randomly select 10 samples
-        np.random.seed(42)  # For reproducibility
-        selected_indices = np.random.choice(batch_size, size=min(10, batch_size), replace=False)
-        logger.info(f"   Selected samples: {selected_indices}")
-        
-        # Determine which spatial spectra to plot
-        plot_bs = num_bs_antennas > 1
-        plot_ue = num_ue_antennas > 1
-        
-        if not plot_bs and not plot_ue:
-            logger.warning("No multi-antenna arrays found for spatial spectrum comparison")
-            return
-        
-        # Create ss directory
-        ss_dir = self.output_dir / 'ss'
-        ss_dir.mkdir(exist_ok=True)
-        
-        # Plot individual comparisons
-        if plot_bs:
-            self._plot_individual_spatial_spectra_for_antenna_type(
-                selected_indices, antenna_dim=1, antenna_type="BS",
-                num_bs_antennas=num_bs_antennas, num_ue_antennas=num_ue_antennas,
-                num_subcarriers=num_subcarriers, output_dir=ss_dir
-            )
-        
-        if plot_ue:
-            self._plot_individual_spatial_spectra_for_antenna_type(
-                selected_indices, antenna_dim=2, antenna_type="UE",
-                num_bs_antennas=num_bs_antennas, num_ue_antennas=num_ue_antennas,
-                num_subcarriers=num_subcarriers, output_dir=ss_dir
-            )
-        
-        logger.info(f"✅ Individual spatial spectrum comparisons saved to: {ss_dir}")
-    
-    def _plot_individual_spatial_spectra_for_antenna_type(self, selected_indices, antenna_dim, antenna_type,
-                                                         num_bs_antennas, num_ue_antennas, num_subcarriers, output_dir):
-        """Plot individual spatial spectra for a specific antenna type"""
-        
-        # Select a representative subcarrier (middle one)
-        subcarrier_idx = num_subcarriers // 2
-        
-        # First pass: compute all spectra to determine global colorbar range
-        all_spectra = []
-        for sample_idx in selected_indices:
-            # Extract CSI for this sample and subcarrier
-            # 4D format: [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
-            if antenna_dim == 1:  # BS antennas
-                gt_csi = self.targets[sample_idx, :, :, subcarrier_idx]  # [num_bs_antennas, num_ue_antennas]
-                pred_csi = self.predictions[sample_idx, :, :, subcarrier_idx]
-            else:  # UE antennas
-                gt_csi = self.targets[sample_idx, :, :, subcarrier_idx].T  # [num_ue_antennas, num_bs_antennas]
-                pred_csi = self.predictions[sample_idx, :, :, subcarrier_idx].T
-            
-            # Compute spatial spectrum using Bartlett algorithm
-            gt_spectrum = self._compute_bartlett_spatial_spectrum(gt_csi)
-            pred_spectrum = self._compute_bartlett_spatial_spectrum(pred_csi)
-            
-            all_spectra.extend([gt_spectrum, pred_spectrum])
-        
-        # Determine global colorbar range for normalization
-        all_spectra_tensor = torch.stack(all_spectra)
-        global_min = all_spectra_tensor.min().item()
-        global_max = all_spectra_tensor.max().item()
-        
-        # Normalize all spectra to [0, 1] range
-        normalized_spectra = []
-        for spectrum in all_spectra:
-            normalized_spectrum = (spectrum - global_min) / (global_max - global_min + 1e-8)
-            normalized_spectra.append(normalized_spectrum)
-        
-        # Use [0, 1] as colorbar range for normalized data
-        vmin, vmax = 0.0, 1.0
-        
-        # Second pass: create individual plots
-        for i, sample_idx in enumerate(selected_indices):
-            # Get normalized spectra (index 2*i for GT, 2*i+1 for Pred)
-            gt_spectrum_norm = normalized_spectra[2*i]
-            pred_spectrum_norm = normalized_spectra[2*i+1]
-            
-            # Convert to numpy
-            gt_spectrum_np = gt_spectrum_norm.detach().cpu().numpy()
-            pred_spectrum_np = pred_spectrum_norm.detach().cpu().numpy()
-            
-            # Create figure with side-by-side comparison
-            fig, (ax_gt, ax_pred) = plt.subplots(1, 2, figsize=(16, 6))
-            
-            # Plot ground truth
-            im_gt = ax_gt.imshow(gt_spectrum_np, cmap='viridis', aspect='auto', vmin=vmin, vmax=vmax)
-            ax_gt.set_title(f'Sample {sample_idx} - Ground Truth', fontsize=14, fontweight='bold')
-            ax_gt.set_xlabel('Azimuth (deg)', fontsize=12)
-            ax_gt.set_ylabel('Elevation (deg)', fontsize=12)
-            
-            # Plot predicted
-            im_pred = ax_pred.imshow(pred_spectrum_np, cmap='viridis', aspect='auto', vmin=vmin, vmax=vmax)
-            ax_pred.set_title(f'Sample {sample_idx} - Predicted', fontsize=14, fontweight='bold')
-            ax_pred.set_xlabel('Azimuth (deg)', fontsize=12)
-            ax_pred.set_ylabel('Elevation (deg)', fontsize=12)
-            
-            # Set axis ticks for azimuth and elevation (36×5 resolution)
-            azimuth_ticks = np.arange(0, gt_spectrum_np.shape[1], max(1, gt_spectrum_np.shape[1]//6))
-            elevation_ticks = np.arange(0, gt_spectrum_np.shape[0], max(1, gt_spectrum_np.shape[0]//3))
-            
-            for ax in [ax_gt, ax_pred]:
-                ax.set_xticks(azimuth_ticks)
-                ax.set_xticklabels([f'{int(az*10)}' for az in azimuth_ticks], fontsize=10)
-                ax.set_yticks(elevation_ticks)
-                ax.set_yticklabels([f'{int(el*18)}' for el in elevation_ticks], fontsize=10)
-            
-            # Add colorbar
-            cbar = plt.colorbar(im_pred, ax=[ax_gt, ax_pred], shrink=0.8, aspect=20)
-            cbar.set_label('Normalized Spatial Spectrum Power', fontsize=12)
-            
-            # Add main title
-            plt.suptitle(f'{antenna_type} Spatial Spectrum Comparison - Sample {sample_idx} (Subcarrier {subcarrier_idx})', 
-                        fontsize=16, fontweight='bold', y=0.95)
-            
-            plt.tight_layout()
-            
-            # Save individual plot
-            plot_path = output_dir / f'{antenna_type.lower()}_spatial_spectrum_sample_{sample_idx:03d}.png'
-            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            
-            logger.info(f"   Saved: {plot_path}")
-    
-    def _compute_bartlett_spatial_spectrum(self, csi: torch.Tensor) -> torch.Tensor:
-        """
-        Compute spatial spectrum using Bartlett algorithm with vectorized operations.
-        
-        Args:
-            csi: Complex CSI tensor [num_antennas_1, num_antennas_2] or [num_antennas]
-            
-        Returns:
-            spatial_spectrum: Spatial spectrum tensor
-        """
-        # Get carrier frequency from config
-        base_station_config = self.config_loader._processed_config.get('base_station', {})
-        carrier_freq = base_station_config.get('carrier_frequency', 2.4e9)  # Default to 2.4 GHz
-        
-        # Calculate wavelength
+        # Calculate antenna spacing from center frequency (half wavelength)
         c = 3e8  # Speed of light in m/s
-        wavelength = c / carrier_freq
-        
-        # Calculate antenna spacing (half wavelength)
+        wavelength = c / center_freq
         antenna_spacing = wavelength / 2
         
-        if csi.dim() == 1:
-            # 1D case: [num_antennas]
-            num_antennas = csi.shape[0]
+        # Use calculated spacing for both x and y directions
+        spacing_x = antenna_spacing
+        spacing_y = antenna_spacing
+        bandwidth = float(ofdm_config['bandwidth'])
+        subcarrier_spacing = float(ofdm_config['subcarrier_spacing'])
+        
+        # Get analysis parameters
+        ignore_amplitude = analysis_config['ignore_amplitude']
+        max_samples = analysis_config['count']
+        
+        logger.info(f"   Array shape: {array_shape}, Spacing: ({spacing_x}, {spacing_y})")
+        logger.info(f"   Center freq: {center_freq/1e9:.2f} GHz, Bandwidth: {bandwidth/1e6:.1f} MHz")
+        
+        # Determine if we need 1D or 2D spatial spectrum
+        is_2d_array = len(array_shape) == 2 and array_shape[1] > 1
+        
+        # Generate all possible sample combinations: (batch_idx, antenna_idx, subcarrier_idx)
+        all_samples = []
+        for batch_idx in range(batch_size):
+            for antenna_idx in range(num_antennas):
+                for subcarrier_idx in range(num_subcarriers):
+                    all_samples.append((batch_idx, antenna_idx, subcarrier_idx))
+        
+        # Randomly sample if we have more samples than configured limit
+        if len(all_samples) > max_samples:
+            np.random.seed(42)  # For reproducible results
+            selected_samples = np.random.choice(len(all_samples), size=max_samples, replace=False)
+            all_samples = [all_samples[i] for i in selected_samples]
+            logger.info(f"   Randomly selected {max_samples} samples from {batch_size * num_antennas * num_subcarriers} total samples")
+        
+        # Process samples with parallel computation
+        # Prepare arguments for parallel processing
+        process_args = []
+        for batch_idx, antenna_idx, subcarrier_idx in all_samples:
+            # Extract CSI for this sample
+            if antenna_type == "BS":
+                # BS端：提取到特定UE天线的信道向量
+                # antenna_idx 是UE天线索引 (0-3)
+                pred_csi = predictions[batch_idx, :, antenna_idx, subcarrier_idx]  # [num_bs_antennas]
+                target_csi = targets[batch_idx, :, antenna_idx, subcarrier_idx]
+            else:  # UE
+                # UE端：提取到特定BS天线的信道向量
+                # antenna_idx 是BS天线索引 (0-63)
+                pred_csi = predictions[batch_idx, antenna_idx, :, subcarrier_idx]  # [num_ue_antennas]
+                target_csi = targets[batch_idx, antenna_idx, :, subcarrier_idx]
             
-            # Define azimuth and elevation angles (36×5 = 180 angle combinations for optimal performance)
-            azimuth_angles = torch.arange(0, 360, 10, dtype=torch.float32, device=csi.device)  # 0, 10, 20, ..., 350 (36 points)
-            elevation_angles = torch.arange(0, 90, 18, dtype=torch.float32, device=csi.device)  # 0, 18, 36, 54, 72 (5 points)
+            # Skip if target CSI is zero (no ground truth)
+            if self._is_target_csi_zero(target_csi):
+                logger.warning(f"Skipping spatial spectrum analysis for sample {batch_idx}, antenna {antenna_idx}, subcarrier {subcarrier_idx}, {antenna_type} antennas - target CSI is zero (no ground truth)")
+                continue
             
-            # Convert to radians
-            azimuth_rad = torch.deg2rad(azimuth_angles)
-            elevation_rad = torch.deg2rad(elevation_angles)
-            
-            # Create antenna positions for linear array
-            antenna_positions = torch.arange(num_antennas, dtype=torch.float32, device=csi.device) * antenna_spacing
-            
-            # Vectorized computation: create all steering vectors at once
-            # Shape: [num_azimuth, num_elevation, num_antennas]
-            az_grid, el_grid, pos_grid = torch.meshgrid(
-                azimuth_rad, elevation_rad, antenna_positions, indexing='ij'
-            )
-            
-            # Compute steering vectors for all combinations
-            # For linear array, steering vector depends on azimuth angle
-            steering_vectors = torch.exp(1j * 2 * torch.pi * pos_grid * torch.cos(az_grid))
-            
-            # Compute Bartlett spectrum: |steering_vector^H * csi|^2
-            # Shape: [num_azimuth, num_elevation]
-            spatial_spectrum = torch.abs(torch.sum(steering_vectors.conj() * csi, dim=-1)) ** 2
-            
-            return spatial_spectrum
-            
-        elif csi.dim() == 2:
-            # 2D case: [num_antennas_1, num_antennas_2]
-            num_antennas_1, num_antennas_2 = csi.shape
-            
-            # Define azimuth and elevation angles (36×5 = 180 angle combinations for optimal performance)
-            azimuth_angles = torch.arange(0, 360, 10, dtype=torch.float32, device=csi.device)  # 0, 10, 20, ..., 350 (36 points)
-            elevation_angles = torch.arange(0, 90, 18, dtype=torch.float32, device=csi.device)  # 0, 18, 36, 54, 72 (5 points)
-            
-            # Convert to radians
-            azimuth_rad = torch.deg2rad(azimuth_angles)
-            elevation_rad = torch.deg2rad(elevation_angles)
-            
-            # Create antenna positions for 2D array (assuming rectangular grid)
-            antenna_positions_1 = torch.arange(num_antennas_1, dtype=torch.float32, device=csi.device) * antenna_spacing
-            antenna_positions_2 = torch.arange(num_antennas_2, dtype=torch.float32, device=csi.device) * antenna_spacing
-            
-            # Vectorized computation: create all steering matrices at once
-            # Shape: [num_azimuth, num_elevation, num_antennas_1, num_antennas_2]
-            az_grid, el_grid, pos1_grid, pos2_grid = torch.meshgrid(
-                azimuth_rad, elevation_rad, antenna_positions_1, antenna_positions_2, indexing='ij'
-            )
-            
-            # Compute steering vectors for both dimensions
-            steering_vector_1 = torch.exp(1j * 2 * torch.pi * pos1_grid * torch.cos(az_grid) * torch.sin(el_grid))
-            steering_vector_2 = torch.exp(1j * 2 * torch.pi * pos2_grid * torch.sin(az_grid) * torch.sin(el_grid))
-            
-            # Create 2D steering matrices
-            steering_matrices = steering_vector_1 * steering_vector_2
-            
-            # Compute Bartlett spectrum: |trace(steering_matrix^H * csi)|^2
-            # Shape: [num_azimuth, num_elevation]
-            spatial_spectrum = torch.abs(torch.sum(steering_matrices.conj() * csi, dim=(-2, -1))) ** 2
-            
-            return spatial_spectrum
-            
-        else:
-            raise ValueError(f"Unsupported CSI dimension for spatial spectrum: {csi.dim()}")
+            process_args.append((
+                pred_csi, target_csi, antenna_type, array_shape, spacing_x, spacing_y,
+                center_freq, subcarrier_spacing, subcarrier_idx, ignore_amplitude, is_2d_array,
+                batch_idx, antenna_idx
+            ))
+        
+        # Use parallel processing if enabled
+        if self.use_parallel:
+            try:
+                max_processes = min(cpu_count(), 32)  # Cap to prevent overload
+                logger.info(f"   Using parallel processing with {max_processes} CPU cores (capped from {cpu_count()})...")
+                logger.info(f"   Starting parallel processing of {len(process_args)} spatial spectrum samples...")
+                
+                with Pool(processes=max_processes) as pool:
+                    # Create partial function with fixed parameters
+                    process_func = partial(self._process_single_spatial_spectrum)
+                    
+                    # Use starmap for better compatibility (no lambda needed)
+                    logger.info("   Pool created successfully, starting computation...")
+                    logger.info(f"   Processing {len(process_args)} samples with {max_processes} workers...")
+                    
+                    # Add timeout and progress tracking
+                    import time
+                    start_time = time.time()
+                    
+                    # Process in chunks for better progress tracking
+                    chunk_size = max(1, len(process_args) // 10)  # Process in 10 chunks
+                    results = []
+                    
+                    for i in range(0, len(process_args), chunk_size):
+                        chunk = process_args[i:i + chunk_size]
+                        logger.info(f"   Processing chunk {i//chunk_size + 1}/10 ({len(chunk)} samples)...")
+                        
+                        chunk_start = time.time()
+                        chunk_results = pool.starmap(process_func, chunk)
+                        chunk_time = time.time() - chunk_start
+                        
+                        results.extend(chunk_results)
+                        logger.info(f"   Chunk {i//chunk_size + 1} completed in {chunk_time:.2f}s")
+                        
+                        # Check for timeout (5 minutes per chunk)
+                        if chunk_time > 300:
+                            logger.warning(f"   Chunk {i//chunk_size + 1} took {chunk_time:.2f}s (longer than expected)")
+                    
+                    total_time = time.time() - start_time
+                    logger.info(f"   Parallel processing completed successfully in {total_time:.2f}s!")
+                    
+            except Exception as e:
+                logger.error(f"Parallel processing failed: {e}. Falling back to sequential...")
+                self.use_parallel = False  # Disable for this run
+        
+        if not self.use_parallel:
+            logger.info("   Using sequential processing...")
+            logger.info(f"   Starting sequential processing of {len(process_args)} spatial spectrum samples...")
+            results = []
+            process_func = partial(self._process_single_spatial_spectrum)
+            total_args = len(process_args)
+            for i, args in enumerate(process_args, 1):
+                results.append(process_func(*args))
+                if i % 10 == 0 or i == total_args:  # Log every 10 items or at completion
+                    logger.info(f"     Sequential progress: {i}/{total_args} ({i/total_args*100:.1f}%)")
+        
+        logger.info(f"   Completed processing of {len(results)} spatial spectra")
+        
+        # Extract similarity values for separate storage
+        cosine_similarity_values = []
+        nmse_values = []
+        ssim_values = []
+        
+        for sample in results:
+            similarity_metrics = sample['similarity_metrics']
+            cosine_similarity_values.append(similarity_metrics['cosine_similarity'])
+            nmse_values.append(similarity_metrics['nmse'])
+            ssim_values.append(similarity_metrics['ssim'])
+        
+        # Randomly select 5 samples for demo
+        logger.info(f"   Selecting 5 random samples for {antenna_type} demo...")
+        np.random.seed(42)  # For reproducibility
+        demo_indices = np.random.choice(len(results), size=min(5, len(results)), replace=False)
+        
+        demo_samples = []
+        for idx in demo_indices:
+            sample = results[idx]
+            demo_samples.append({
+                'sample_idx': int(idx),
+                'batch_idx': sample['batch_idx'],
+                'antenna_idx': sample['antenna_idx'],
+                'subcarrier_idx': sample['subcarrier_idx'],
+                'predicted_spatial_spectrum': sample['predicted_spectrum'],
+                'target_spatial_spectrum': sample['target_spectrum'],
+                'similarity_metrics': sample['similarity_metrics'],
+                'array_shape': array_shape,
+                'is_2d_array': is_2d_array,
+                'wavelength': sample['wavelength'],
+                'subcarrier_frequency': sample['subcarrier_frequency'],
+                'antenna_type': sample['antenna_type']
+            })
+        
+        # Save demo samples to JSON
+        demo_file = self.analysis_dir / f'demo_pas_samples_{antenna_type.lower()}.json'
+        with open(demo_file, 'w') as f:
+            json.dump({
+                'antenna_type': antenna_type,
+                'demo_samples': demo_samples,
+                'num_demo_samples': len(demo_samples),
+                'array_configuration': array_config,
+                'array_shape': array_shape,
+                'is_2d_array': is_2d_array,
+                'timestamp': datetime.now().isoformat()
+            }, f, indent=2)
+        
+        logger.info(f"✅ Demo {antenna_type} spatial spectrum samples saved: {demo_file}")
+        logger.info(f"   Saved {len(demo_samples)} demo samples")
+        
+        # Save detailed similarity analysis to separate file
+        similarity_file = self.analysis_dir / f'detailed_spatial_spectrum_similarity_{antenna_type.lower()}.json'
+        with open(similarity_file, 'w') as f:
+            json.dump({
+                'antenna_type': antenna_type,
+                'array_configuration': array_config,
+                'array_shape': array_shape,
+                'is_2d_array': is_2d_array,
+                'total_samples': len(results),
+                'timestamp': datetime.now().isoformat(),
+                'similarity_metrics': {
+                    'cosine_similarity': cosine_similarity_values,
+                    'nmse': nmse_values,
+                    'ssim': ssim_values
+                }
+            }, f, indent=2)
+        
+        logger.info(f"✅ Detailed {antenna_type} spatial spectrum similarity values saved: {similarity_file}")
+        
+        # Note: Detailed spatial spectrum data is no longer saved separately
+        # All similarity metrics are consolidated in detailed_pas_analysis.json
+        
+        return {
+            'antenna_type': antenna_type,
+            'array_shape': array_shape,
+            'is_2d_array': is_2d_array,
+            'total_samples': len(results),
+            'similarity_file': str(similarity_file)
+        }
     
-    def _compute_single_spatial_spectrum_accuracy(self, args):
-        """
-        Compute spatial spectrum accuracy using NMSE-based method (for parallel processing).
-        
-        This implements the most scientific and professional approach:
-        Accuracy (%) = max(0, (1 - NMSE) × 100)
-        where NMSE = mean(|H_pred - H_gt|²) / mean(|H_gt|²)
-        
-        Args:
-            args: Tuple containing (pred_csi, target_csi, antenna_dim, antenna_type, sample_idx, subcarrier_idx)
-            
-        Returns:
-            Tuple of (accuracy, sample_idx, subcarrier_idx, antenna_type)
-        """
-        pred_csi, target_csi, antenna_dim, antenna_type, sample_idx, subcarrier_idx = args
-        
+    def _parse_array_configuration(self, config_str: str) -> tuple:
+        """Parse antenna array configuration string (e.g., '8x8', '2x2', '1x4')"""
         try:
-            # Compute spatial spectrum using Bartlett algorithm
-            pred_spectrum = self._compute_bartlett_spatial_spectrum(pred_csi)
-            target_spectrum = self._compute_bartlett_spatial_spectrum(target_csi)
-            
-            # Convert to numpy for computation
-            pred_spectrum_np = pred_spectrum.detach().cpu().numpy()
-            target_spectrum_np = target_spectrum.detach().cpu().numpy()
-            
-            # Compute NMSE-based accuracy
-            # NMSE = mean(|H_pred - H_gt|²) / mean(|H_gt|²)
-            error_power = np.mean(np.abs(pred_spectrum_np - target_spectrum_np) ** 2)
-            signal_power = np.mean(np.abs(target_spectrum_np) ** 2)
-            
-            # Avoid division by zero
-            if signal_power < 1e-12:
-                nmse = 1.0  # Maximum error when signal power is negligible
+            parts = config_str.split('x')
+            if len(parts) == 2:
+                return (int(parts[0]), int(parts[1]))
+            elif len(parts) == 1:
+                return (int(parts[0]), 1)  # Linear array
             else:
-                nmse = error_power / signal_power
-            
-            # Convert NMSE to accuracy percentage
-            # Accuracy (%) = max(0, (1 - NMSE) × 100)
-            accuracy = max(0.0, (1.0 - nmse) * 100.0)
-            
-            return (accuracy, sample_idx, subcarrier_idx, antenna_type)
-            
-        except Exception as e:
-            logger.warning(f"Accuracy computation failed for {antenna_type} batch {sample_idx}, subcarrier {subcarrier_idx}: {e}")
-            return (0.0, sample_idx, subcarrier_idx, antenna_type)  # Return 0% accuracy for failed cases
+                raise ValueError(f"Invalid array configuration: {config_str}")
+        except (ValueError, IndexError) as e:
+            raise ValueError(f"Failed to parse array configuration '{config_str}': {e}")
     
-    def _analyze_random_csi_samples(self):
-        """Analyze random CSI samples with random BS and UE antenna combinations"""
-        logger.info("📊 Analyzing random CSI samples with random antenna combinations...")
+    def _process_single_spatial_spectrum(self, pred_csi: torch.Tensor, target_csi: torch.Tensor,
+                                        antenna_type: str, array_shape: tuple, spacing_x: float, spacing_y: float,
+                                        center_freq: float, subcarrier_spacing: float, subcarrier_idx: int,
+                                        ignore_amplitude: bool, is_2d_array: bool,
+                                        batch_idx: int, antenna_idx: int) -> dict:
+        """Process a single spatial spectrum computation for parallel processing"""
+        # Compute spatial spectrum for this sample
+        sample_result = self._compute_single_spatial_spectrum(
+            pred_csi, target_csi, antenna_type, array_shape, spacing_x, spacing_y,
+            center_freq, subcarrier_spacing, subcarrier_idx, ignore_amplitude, is_2d_array
+        )
         
-        # Convert to complex tensors if needed
-        if not self.predictions.is_complex():
-            self.predictions = self.predictions + 1j * torch.zeros_like(self.predictions)
-        if not self.targets.is_complex():
-            self.targets = self.targets + 1j * torch.zeros_like(self.targets)
+        sample_result['batch_idx'] = batch_idx
+        sample_result['antenna_idx'] = antenna_idx
+        sample_result['subcarrier_idx'] = subcarrier_idx
         
-        # Get data dimensions - only support 4D CSI data
-        if len(self.predictions.shape) != 4:
-            raise ValueError(f"Only 4D CSI data is supported. Current shape: {self.predictions.shape}. Expected: [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]")
+        return sample_result
+
+    def _compute_single_spatial_spectrum(self, pred_csi: torch.Tensor, target_csi: torch.Tensor,
+                                         antenna_type: str, array_shape: tuple, spacing_x: float, spacing_y: float,
+                                         center_freq: float, subcarrier_spacing: float, subcarrier_idx: int,
+                                         ignore_amplitude: bool, is_2d_array: bool) -> dict:
+        """Compute spatial spectrum for a single CSI sample - single spectrum for one antenna pair"""
         
-        batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers = self.predictions.shape
+        # Calculate wavelength for this subcarrier
+        subcarrier_freq = center_freq + (subcarrier_idx - pred_csi.shape[-1]//2) * subcarrier_spacing
+        wavelength = 3e8 / subcarrier_freq  # Speed of light / frequency
         
-        # Randomly select one sample (different each time)
-        sample_idx = np.random.choice(batch_size)
+        # Apply amplitude handling
+        if ignore_amplitude:
+            pred_csi = torch.exp(1j * torch.angle(pred_csi))
+            target_csi = torch.exp(1j * torch.angle(target_csi))
         
-        # Randomly select 10 BS antenna and UE antenna combinations (completely random each time)
-        bs_antenna_indices = np.random.choice(num_bs_antennas, size=10, replace=True)
-        ue_antenna_indices = np.random.choice(num_ue_antennas, size=10, replace=True)
+        # Compute spatial spectrum for this single antenna pair
+        if is_2d_array:
+            pred_spectrum = self._compute_2d_spatial_spectrum(
+                pred_csi, array_shape, spacing_x, spacing_y, wavelength
+            )
+            target_spectrum = self._compute_2d_spatial_spectrum(
+                target_csi, array_shape, spacing_x, spacing_y, wavelength
+            )
+        else:
+            pred_spectrum = self._compute_1d_spatial_spectrum(
+                pred_csi, array_shape, spacing_x, wavelength
+            )
+            target_spectrum = self._compute_1d_spatial_spectrum(
+                target_csi, array_shape, spacing_x, wavelength
+            )
         
-        # Log the random selections
-        combinations = list(zip(bs_antenna_indices, ue_antenna_indices))
-        unique_combinations = list(set(combinations))
-        logger.info(f"   Unique antenna combinations: {len(unique_combinations)} out of 10")
+        # Compute similarity metrics
+        similarity_metrics = self._compute_spatial_spectrum_similarity(pred_spectrum, target_spectrum)
         
-        logger.info(f"   Selected sample: {sample_idx}")
-        logger.info(f"   Selected BS antennas: {bs_antenna_indices}")
-        logger.info(f"   Selected UE antennas: {ue_antenna_indices}")
-        
-        # Create CSI comparison plots (separate amplitude and phase)
-        self._plot_random_antenna_amplitude_comparison(sample_idx, bs_antenna_indices, ue_antenna_indices, num_subcarriers)
-        self._plot_random_antenna_phase_comparison(sample_idx, bs_antenna_indices, ue_antenna_indices, num_subcarriers)
-        
-        logger.info("✅ Random CSI samples analysis completed")
+        return {
+            'subcarrier_frequency': float(subcarrier_freq),
+            'wavelength': float(wavelength),
+            'predicted_spectrum': pred_spectrum.tolist(),
+            'target_spectrum': target_spectrum.tolist(),
+            'antenna_type': antenna_type,
+            'similarity_metrics': similarity_metrics
+        }
     
-    def _plot_random_antenna_amplitude_comparison(self, sample_idx, bs_antenna_indices, ue_antenna_indices, num_subcarriers):
-        """Plot amplitude comparison for random antenna combinations"""
-        logger.info("📊 Creating random antenna amplitude comparison plots...")
+    def _compute_1d_spatial_spectrum(self, csi: torch.Tensor, array_shape: tuple, 
+                                   spacing: float, wavelength: float) -> torch.Tensor:
+        """Compute 1D spatial spectrum for linear array using 1D CSI vector"""
+        num_antennas = array_shape[0]
         
-        # Create subplots: 10 rows, 1 column for 10 plots
-        fig, axes = plt.subplots(10, 1, figsize=(12, 25))
-        fig.suptitle(f'Random CSI Amplitude Comparison - Sample {sample_idx} (Random BS & UE Antenna Combinations)',
-                    fontsize=16, fontweight='bold')
+        # Ensure csi is 1D vector
+        if csi.dim() != 1:
+            raise ValueError(f"Expected 1D CSI vector, got shape {csi.shape}")
         
-        subcarrier_indices = np.arange(num_subcarriers)
+        # Create angle grid for 1D (azimuth only)
+        azimuth_angles = torch.linspace(0, 180, 180, dtype=torch.float32, device=csi.device)  # 0-180 degrees
         
-        for i in range(10):
-            ax = axes[i]
-            
-            bs_idx = bs_antenna_indices[i]
-            ue_idx = ue_antenna_indices[i]
-            
-            # Get CSI data for this specific antenna combination
-            pred_csi = self.predictions[sample_idx, bs_idx, ue_idx, :].numpy()
-            target_csi = self.targets[sample_idx, bs_idx, ue_idx, :].numpy()
-            
-            # Plot amplitude
-            ax.plot(subcarrier_indices, np.abs(pred_csi), 'r-', linewidth=2, label='Predicted', alpha=0.8)
-            ax.plot(subcarrier_indices, np.abs(target_csi), 'b-', linewidth=2, label='Target', alpha=0.8)
-            
-            # Calculate error metrics
-            amp_error = np.mean(np.abs(np.abs(pred_csi) - np.abs(target_csi)))
-            
-            # Set title and labels
-            ax.set_title(f'BS{bs_idx}-UE{ue_idx} - Amplitude (MAE: {amp_error:.4f})', fontsize=12, fontweight='bold')
-            ax.set_ylabel('Amplitude', fontsize=10)
-            ax.legend(fontsize=8)
-            ax.grid(True, alpha=0.3)
-            
-            # Set y-axis limits for better visualization
-            max_amp = max(np.abs(pred_csi).max(), np.abs(target_csi).max())
-            ax.set_ylim(0, max_amp * 1.1)
-            
-            # Add MAE value to the plot
-            ax.text(0.02, 0.95, f'MAE: {amp_error:.4f}', transform=ax.transAxes, 
-                   bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.7),
-                   fontsize=8, verticalalignment='top')
+        # Initialize spatial spectrum
+        spatial_spectrum = torch.zeros(len(azimuth_angles), device=csi.device)
         
-        # Set x-axis label for the bottom plot
-        axes[-1].set_xlabel('Subcarrier Index', fontsize=10)
+        # Compute Bartlett beamformer for each angle
+        for i, az in enumerate(azimuth_angles):
+            # Create steering vector for linear array
+            steering_vector = self._create_1d_steering_vector(az, num_antennas, spacing, wavelength, csi.device)
+            
+            # Compute Bartlett beamformer output for 1D vectors
+            # csi: [num_antennas], steering_vector: [num_antennas]
+            response = torch.sum(csi * torch.conj(steering_vector))
+            spatial_spectrum[i] = torch.abs(response) ** 2
         
-        plt.tight_layout()
-        plot_path = self.output_dir / 'random_antenna_amplitude_comparison.png'
-        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        logger.info(f"✅ Random antenna amplitude comparison saved: {plot_path}")
+        return spatial_spectrum
     
-    def _plot_random_antenna_phase_comparison(self, sample_idx, bs_antenna_indices, ue_antenna_indices, num_subcarriers):
-        """Plot phase comparison for random antenna combinations with cosine-based MAE calculation"""
-        logger.info("📊 Creating random antenna phase comparison plots...")
+    def _compute_2d_spatial_spectrum(self, csi: torch.Tensor, array_shape: tuple,
+                                   spacing_x: float, spacing_y: float, wavelength: float) -> torch.Tensor:
+        """Compute 2D spatial spectrum for planar array using 1D CSI vector"""
+        num_antennas_x, num_antennas_y = array_shape
         
-        # Create subplots: 10 rows, 1 column for 10 plots
-        fig, axes = plt.subplots(10, 1, figsize=(12, 25))
-        fig.suptitle(f'Random CSI Phase Comparison with Cosine-based MAE - Sample {sample_idx} (Random BS & UE Antenna Combinations)',
-                    fontsize=16, fontweight='bold')
+        # Ensure csi is 1D vector
+        if csi.dim() != 1:
+            raise ValueError(f"Expected 1D CSI vector, got shape {csi.shape}")
         
-        subcarrier_indices = np.arange(num_subcarriers)
+        # Create angle grid for 2D (azimuth and elevation)
+        azimuth_angles = torch.linspace(0, 360, 181, dtype=torch.float32, device=csi.device)  # 0-360 degrees, 2-degree steps
+        elevation_angles = torch.linspace(0, 90, 46, dtype=torch.float32, device=csi.device)  # 0-90 degrees, 2-degree steps
         
-        for i in range(10):
-            ax = axes[i]
-            
-            bs_idx = bs_antenna_indices[i]
-            ue_idx = ue_antenna_indices[i]
-            
-            # Get CSI data for this specific antenna combination
-            pred_csi = self.predictions[sample_idx, bs_idx, ue_idx, :].numpy()
-            target_csi = self.targets[sample_idx, bs_idx, ue_idx, :].numpy()
-            
-            # Extract phases
-            pred_phase = np.angle(pred_csi)
-            target_phase = np.angle(target_csi)
-            
-            # Apply wrapping to predicted phase based on distance to target
-            # For each predicted phase, choose the wrapped version closest to target
-            pred_phase_wrapped = np.zeros_like(pred_phase)
-            
-            for i in range(len(pred_phase)):
-                target_val = target_phase[i]
-                pred_val = pred_phase[i]
+        # Initialize spatial spectrum
+        spatial_spectrum = torch.zeros(len(azimuth_angles), len(elevation_angles), device=csi.device)
+        
+        # Compute Bartlett beamformer for each angle pair
+        for i, az in enumerate(azimuth_angles):
+            for j, el in enumerate(elevation_angles):
+                # Create steering vector for planar array
+                steering_vector = self._create_2d_steering_vector(
+                    az, el, num_antennas_x, num_antennas_y, spacing_x, spacing_y, wavelength, csi.device
+                )
                 
-                # Calculate all possible wrapped versions of predicted phase
-                pred_0 = pred_val  # No wrapping
-                pred_plus_2pi = pred_val + 2*np.pi  # Add 2π
-                pred_minus_2pi = pred_val - 2*np.pi  # Subtract 2π
-                
-                # Find the wrapped version closest to target
-                wrapped_versions = [pred_0, pred_plus_2pi, pred_minus_2pi]
-                distances = [abs(wrapped - target_val) for wrapped in wrapped_versions]
-                min_idx = np.argmin(distances)
-                
-                pred_phase_wrapped[i] = wrapped_versions[min_idx]
-            
-            # Calculate phase error using cosine-based method to avoid wrapping issues
-            # Convert phases to unit vectors and compute angular distance
-            pred_cos = np.cos(pred_phase_wrapped)
-            pred_sin = np.sin(pred_phase_wrapped)
-            target_cos = np.cos(target_phase)
-            target_sin = np.sin(target_phase)
-            
-            # Compute cosine of angular difference
-            cos_diff = pred_cos * target_cos + pred_sin * target_sin
-            
-            # Clamp to avoid numerical issues
-            cos_diff = np.clip(cos_diff, -1.0, 1.0)
-            
-            # Compute angular distance using arccos
-            angular_distance = np.arccos(cos_diff)
-            
-            # Plot phases with wrapped predicted phase
-            ax.plot(subcarrier_indices, pred_phase_wrapped, 'r-', linewidth=2, label='Predicted (Wrapped)', alpha=0.8)
-            ax.plot(subcarrier_indices, target_phase, 'b-', linewidth=2, label='Target', alpha=0.8)
-            
-            # Calculate phase error metrics using angular distance
-            phase_error = np.mean(angular_distance)
-            
-            # Set title and labels
-            ax.set_title(f'BS{bs_idx}-UE{ue_idx} - Phase Comparison with Cosine-based MAE (MAE: {phase_error:.4f})', fontsize=12, fontweight='bold')
-            ax.set_ylabel('Phase (rad)', fontsize=10)
-            ax.legend(fontsize=8)
-            ax.grid(True, alpha=0.3)
-            
-            # Add MAE value to the plot
-            ax.text(0.02, 0.95, f'MAE: {phase_error:.4f}', transform=ax.transAxes, 
-                   bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.7),
-                   fontsize=8, verticalalignment='top')
+                # Compute Bartlett beamformer output for 1D vectors
+                # csi: [num_antennas], steering_vector: [num_antennas]
+                response = torch.sum(csi * torch.conj(steering_vector))
+                spatial_spectrum[i, j] = torch.abs(response) ** 2
         
-        # Set x-axis label for the bottom plot
-        axes[-1].set_xlabel('Subcarrier Index', fontsize=10)
-        
-        plt.tight_layout()
-        plot_path = self.output_dir / 'random_antenna_phase_comparison.png'
-        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        logger.info(f"✅ Random antenna phase comparison saved: {plot_path}")
+        return spatial_spectrum
     
-    def _plot_amplitude_comparison(self, selected_indices, num_bs_antennas, num_ue_antennas, num_subcarriers):
-        """Plot amplitude comparison for selected samples"""
-        logger.info("📊 Creating amplitude comparison plot...")
+    def _create_1d_steering_vector(self, azimuth: float, num_antennas: int, 
+                                  spacing: float, wavelength: float, device: torch.device) -> torch.Tensor:
+        """Create steering vector for 1D linear array"""
+        # Convert angle to radians
+        az_rad = (azimuth * torch.pi / 180.0).to(device)
         
-        # Create figure with subplots (10 rows, 1 column)
-        fig, axes = plt.subplots(10, 1, figsize=(12, 25))
-        fig.suptitle('CSI Amplitude Comparison: 10 Random Samples', fontsize=16, fontweight='bold')
+        # Create antenna positions (linear array along x-axis)
+        antenna_positions = torch.arange(num_antennas, dtype=torch.float32, device=device) * spacing
         
-        for i, sample_idx in enumerate(selected_indices):
-            # 4D format: [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
-            # Average across BS and UE antennas for this sample
-            pred_amp = torch.abs(self.predictions[sample_idx]).mean(dim=(0, 1)).cpu().numpy()
-            target_amp = torch.abs(self.targets[sample_idx]).mean(dim=(0, 1)).cpu().numpy()
-            
-            # Subcarrier indices
-            subcarrier_indices = np.arange(len(pred_amp))
-            
-            # Plot amplitude comparison
-            axes[i].plot(subcarrier_indices, pred_amp, 'b-', label='Predicted', linewidth=2)
-            axes[i].plot(subcarrier_indices, target_amp, 'r--', label='Ground Truth', linewidth=2)
-            axes[i].set_title(f'Sample {sample_idx}', fontsize=12, fontweight='bold')
-            axes[i].set_ylabel('Amplitude', fontsize=10)
-            axes[i].grid(True, alpha=0.3)
-            axes[i].legend(fontsize=8)
-            
-            # Add MAE value to the plot
-            mae = np.mean(np.abs(pred_amp - target_amp))
-            axes[i].text(0.02, 0.95, f'MAE: {mae:.4f}', transform=axes[i].transAxes, 
-                        bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.7),
-                        fontsize=8, verticalalignment='top')
+        # Compute phase progression
+        phase_progression = 2 * torch.pi * antenna_positions * torch.cos(az_rad) / wavelength
         
-        # Set x-axis label for the bottom plot
-        axes[-1].set_xlabel('Subcarrier Index', fontsize=10)
+        # Create steering vector
+        steering_vector = torch.exp(1j * phase_progression)
         
-        plt.tight_layout()
-        
-        # Save plot
-        plot_path = self.output_dir / 'random_csi_amplitude_comparison.png'
-        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        logger.info(f"✅ Amplitude comparison plot saved: {plot_path}")
+        return steering_vector
     
-    def _plot_phase_comparison(self, selected_indices, num_bs_antennas, num_ue_antennas, num_subcarriers):
-        """Plot phase comparison for selected samples"""
-        logger.info("📊 Creating phase comparison plot...")
+    def _create_2d_steering_vector(self, azimuth: float, elevation: float, 
+                                 num_antennas_x: int, num_antennas_y: int,
+                                 spacing_x: float, spacing_y: float, wavelength: float,
+                                 device: torch.device) -> torch.Tensor:
+        """Create steering vector for 2D planar array"""
+        # Convert angles to radians
+        az_rad = (azimuth * torch.pi / 180.0).to(device)
+        el_rad = (elevation * torch.pi / 180.0).to(device)
         
-        # Create figure with subplots (10 rows, 1 column)
-        fig, axes = plt.subplots(10, 1, figsize=(12, 25))
-        fig.suptitle('CSI Phase Comparison: 10 Random Samples', fontsize=16, fontweight='bold')
+        # Create antenna positions (planar array)
+        antenna_positions_x = torch.arange(num_antennas_x, dtype=torch.float32, device=device) * spacing_x
+        antenna_positions_y = torch.arange(num_antennas_y, dtype=torch.float32, device=device) * spacing_y
         
-        for i, sample_idx in enumerate(selected_indices):
-            # 4D format: [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
-            # Average across BS and UE antennas for this sample
-            pred_phase = torch.angle(self.predictions[sample_idx]).mean(dim=(0, 1)).cpu().numpy()
-            target_phase = torch.angle(self.targets[sample_idx]).mean(dim=(0, 1)).cpu().numpy()
+        # Create meshgrid for 2D positions
+        pos_x, pos_y = torch.meshgrid(antenna_positions_x, antenna_positions_y, indexing='ij')
+        
+        # Compute phase progression
+        phase_progression = 2 * torch.pi * (
+            pos_x * torch.sin(el_rad) * torch.cos(az_rad) + 
+            pos_y * torch.sin(el_rad) * torch.sin(az_rad)
+        ) / wavelength
+        
+        # Flatten to 1D for steering vector
+        steering_vector = torch.exp(1j * phase_progression.flatten())
+        
+        return steering_vector
+    
+    def _compute_spatial_spectrum_similarity_batch(self, pred_spectra: torch.Tensor, 
+                                                 target_spectra: torch.Tensor) -> dict:
+        """Compute similarity metrics between predicted and target spatial spectra for multiple spectra"""
+        
+        # pred_spectra and target_spectra shape: [num_spectra, azimuth_angles, elevation_angles] for 2D
+        # or [num_spectra, azimuth_angles] for 1D
+        
+        cosine_similarities = []
+        nmse_values = []
+        ssim_values = []
+        
+        for i in range(pred_spectra.shape[0]):
+            pred_spectrum = pred_spectra[i]
+            target_spectrum = target_spectra[i]
             
-            # Subcarrier indices
-            subcarrier_indices = np.arange(len(pred_phase))
+            # Flatten spectra for computation
+            pred_flat = pred_spectrum.flatten()
+            target_flat = target_spectrum.flatten()
             
-            # Plot phase comparison
-            axes[i].plot(subcarrier_indices, pred_phase, 'b-', label='Predicted', linewidth=2)
-            axes[i].plot(subcarrier_indices, target_phase, 'r--', label='Ground Truth', linewidth=2)
-            axes[i].set_title(f'Sample {sample_idx}', fontsize=12, fontweight='bold')
-            axes[i].set_ylabel('Phase (rad)', fontsize=10)
-            axes[i].grid(True, alpha=0.3)
-            axes[i].legend(fontsize=8)
-            axes[i].set_ylim([-np.pi, np.pi])
+            # Normalize spectra
+            pred_norm = pred_flat / (torch.sum(pred_flat) + 1e-12)
+            target_norm = target_flat / (torch.sum(target_flat) + 1e-12)
             
-            # Add phase MAE value to the plot (with wrapping)
-            phase_diff = pred_phase - target_phase
-            phase_diff_wrapped = np.arctan2(np.sin(phase_diff), np.cos(phase_diff))
-            phase_mae = np.mean(np.abs(phase_diff_wrapped))
-            axes[i].text(0.02, 0.95, f'Phase MAE: {phase_mae:.4f}', transform=axes[i].transAxes, 
-                        bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.7),
-                        fontsize=8, verticalalignment='top')
+            # 1. Cosine similarity
+            cosine_sim = torch.sum(pred_norm * target_norm) / (
+                torch.sqrt(torch.sum(pred_norm ** 2)) * torch.sqrt(torch.sum(target_norm ** 2)) + 1e-12
+            )
+            cosine_similarities.append(float(cosine_sim))
+            
+            # 2. Normalized Mean Squared Error (NMSE)
+            mse = torch.mean((pred_norm - target_norm) ** 2)
+            signal_power = torch.mean(target_norm ** 2)
+            nmse = mse / (signal_power + 1e-12)
+            nmse_values.append(float(nmse))
+            
+            # 3. Structural Similarity Index (SSIM) - corrected version
+            mu_pred = torch.mean(pred_norm)
+            mu_target = torch.mean(target_norm)
+            sigma_pred = torch.std(pred_norm)
+            sigma_target = torch.std(target_norm)
+            sigma_pred_target = torch.mean((pred_norm - mu_pred) * (target_norm - mu_target))
+            
+            c1, c2 = 0.01, 0.03  # SSIM constants
+            # Correct SSIM formula: numerator and denominator should be separate terms
+            numerator = (2 * mu_pred * mu_target + c1) * (2 * sigma_pred_target + c2)
+            denominator = (mu_pred ** 2 + mu_target ** 2 + c1) * (sigma_pred ** 2 + sigma_target ** 2 + c2)
+            ssim = numerator / (denominator + 1e-12)  # Add small epsilon to avoid division by zero
+            ssim_values.append(float(ssim))
         
-        # Set x-axis label for the bottom plot
-        axes[-1].set_xlabel('Subcarrier Index', fontsize=10)
+        # Return average similarity metrics
+        return {
+            'cosine_similarity': float(np.mean(cosine_similarities)),
+            'nmse': float(np.mean(nmse_values)),
+            'ssim': float(np.mean(ssim_values)),
+            'cosine_similarity_std': float(np.std(cosine_similarities)),
+            'nmse_std': float(np.std(nmse_values)),
+            'ssim_std': float(np.std(ssim_values)),
+            'individual_cosine_similarities': cosine_similarities,
+            'individual_nmse_values': nmse_values,
+            'individual_ssim_values': ssim_values
+        }
+
+    def _compute_ssim_2d(self, pred: torch.Tensor, target: torch.Tensor, window_size: int = 11, sigma: float = 1.5) -> float:
+        """
+        Compute 2D Structural Similarity Index (SSIM) between two 2D tensors.
         
-        plt.tight_layout()
+        This uses Gaussian-weighted local means and variances to preserve spatial structure.
+        Assumes pred and target are 2D tensors of shape [height, width] (e.g., [azimuth, elevation]).
+        """
+        # Ensure same shape
+        if pred.shape != target.shape:
+            raise ValueError(f"Shape mismatch: {pred.shape} vs {target.shape}")
         
-        # Save plot
-        plot_path = self.output_dir / 'random_csi_phase_comparison.png'
-        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
+        # Normalize to [0, 1] range for SSIM
+        pred = (pred - pred.min()) / (pred.max() - pred.min() + 1e-8)
+        target = (target - target.min()) / (target.max() - target.min() + 1e-8)
         
-        logger.info(f"✅ Phase comparison plot saved: {plot_path}")
+        # Create Gaussian window
+        window = torch.outer(
+            torch.exp(-torch.arange(-window_size//2 + 1, window_size//2 + 1)**2 / (2 * sigma**2)),
+            torch.exp(-torch.arange(-window_size//2 + 1, window_size//2 + 1)**2 / (2 * sigma**2))
+        ).to(pred.device)
+        window = window / window.sum()
+        
+        # Function to compute local stats via convolution
+        def conv2d(x: torch.Tensor) -> torch.Tensor:
+            return torch.nn.functional.conv2d(x.unsqueeze(0).unsqueeze(0), window.unsqueeze(0).unsqueeze(0), padding=window_size//2)
+        
+        # Compute local means
+        mu_pred = conv2d(pred)
+        mu_target = conv2d(target)
+        
+        # Compute local variances and covariance
+        mu_pred_sq = mu_pred ** 2
+        mu_target_sq = mu_target ** 2
+        mu_pred_target = mu_pred * mu_target
+        
+        sigma_pred_sq = conv2d(pred ** 2) - mu_pred_sq
+        sigma_target_sq = conv2d(target ** 2) - mu_target_sq
+        sigma_pred_target = conv2d(pred * target) - mu_pred_target
+        
+        # SSIM formula constants
+        c1 = 0.01 ** 2
+        c2 = 0.03 ** 2
+        
+        # Compute SSIM map
+        ssim_map = ((2 * mu_pred_target + c1) * (2 * sigma_pred_target + c2)) / ((mu_pred_sq + mu_target_sq + c1) * (sigma_pred_sq + sigma_target_sq + c2))
+        
+        # Return mean SSIM
+        return float(ssim_map.mean())
+
+    def _compute_spatial_spectrum_similarity(self, pred_spectrum: torch.Tensor, 
+                                           target_spectrum: torch.Tensor) -> dict:
+        """Compute similarity metrics between predicted and target spatial spectra"""
+        
+        # Flatten spectra for computation
+        pred_flat = pred_spectrum.flatten()
+        target_flat = target_spectrum.flatten()
+        
+        # Normalize spectra
+        pred_norm = pred_flat / (torch.sum(pred_flat) + 1e-12)
+        target_norm = target_flat / (torch.sum(target_flat) + 1e-12)
+        
+        # Compute various similarity metrics
+        # 1. Cosine similarity
+        cosine_sim = torch.sum(pred_norm * target_norm) / (
+            torch.sqrt(torch.sum(pred_norm ** 2)) * torch.sqrt(torch.sum(target_norm ** 2)) + 1e-12
+        )
+        
+        # 2. Normalized Mean Squared Error (NMSE)
+        mse = torch.mean((pred_norm - target_norm) ** 2)
+        signal_power = torch.mean(target_norm ** 2)
+        nmse = mse / (signal_power + 1e-12)
+        
+        # 3. Structural Similarity Index (SSIM) - use 2D version if spectrum is 2D
+        if pred_spectrum.dim() == 2 and target_spectrum.dim() == 2:
+            ssim = self._compute_ssim_2d(pred_spectrum, target_spectrum)
+        else:
+            # Fallback to original 1D calculation
+            mu_pred = torch.mean(pred_norm)
+            mu_target = torch.mean(target_norm)
+            sigma_pred = torch.std(pred_norm)
+            sigma_target = torch.std(target_norm)
+            sigma_pred_target = torch.mean((pred_norm - mu_pred) * (target_norm - mu_target))
+            
+            c1, c2 = 0.01, 0.03  # SSIM constants
+            # Correct SSIM formula: numerator and denominator should be separate terms
+            numerator = (2 * mu_pred * mu_target + c1) * (2 * sigma_pred_target + c2)
+            denominator = (mu_pred ** 2 + mu_target ** 2 + c1) * (sigma_pred ** 2 + sigma_target ** 2 + c2)
+            ssim = numerator / (denominator + 1e-12)  # Add small epsilon to avoid division by zero
+        
+        return {
+            'cosine_similarity': float(cosine_sim),
+            'nmse': float(nmse),
+            'ssim': float(ssim)
+        }
     
     def _compute_pdp(self, csi: np.ndarray, fft_size: int) -> np.ndarray:
-        """
-        Compute Power Delay Profile from CSI using IFFT
-        
-        Args:
-            csi: Complex CSI values
-            fft_size: FFT size for IFFT computation
-            
-        Returns:
-            PDP values
-        """
-        # Pad or truncate CSI to match FFT size
+        """Compute Power Delay Profile (PDP) from CSI using IFFT"""
+        # Pad CSI to fft_size
         if len(csi) < fft_size:
-            # Zero-pad
             padded_csi = np.zeros(fft_size, dtype=complex)
             padded_csi[:len(csi)] = csi
         else:
-            # Truncate
             padded_csi = csi[:fft_size]
         
-        # Compute IFFT
-        impulse_response = np.fft.ifft(padded_csi)
+        # Compute IFFT to get time domain
+        time_domain = np.fft.ifft(padded_csi)
         
-        # Compute PDP (power of impulse response)
-        pdp = np.abs(impulse_response) ** 2
+        # Compute power delay profile
+        pdp = np.abs(time_domain) ** 2
+        
+        # Energy normalization: divide by sum
+        total_energy = np.sum(pdp)
+        if total_energy < 1e-8:
+            return pdp
+        pdp = pdp / total_energy
         
         return pdp
     
-    def _compute_global_similarity_metrics(self, pred_pdp_all: np.ndarray, target_pdp_all: np.ndarray) -> dict:
-        """
-        Compute global similarity metrics for PDP comparison.
-        
-        This implements the most scientific and professional approach for global PDP similarity:
-        - MSE (Mean Squared Error): Direct error measurement
-        - RMSE (Root Mean Squared Error): MSE square root, same units as original data
-        - NMSE (Normalized Mean Squared Error): Normalized by signal power, dimensionless
-        - Cosine Similarity: Shape similarity independent of magnitude
-        
-        Args:
-            pred_pdp_all: Predicted PDP arrays [N_samples, FFT_size]
-            target_pdp_all: Ground truth PDP arrays [N_samples, FFT_size]
-            
-        Returns:
-            Dictionary containing all global similarity metrics
-        """
-        logger.info("     Computing MSE, RMSE, NMSE, and Cosine Similarity...")
-        
+    def _compute_global_similarity_metrics(self, pred_pdp_all: np.ndarray, target_pdp_all: np.ndarray) -> tuple:
+        """Compute global similarity metrics for PDP comparison"""
         mse_values = []
         rmse_values = []
         nmse_values = []
         cosine_sim_values = []
         
-        total_samples = len(pred_pdp_all)
-        
-        for i in range(total_samples):
+        for i in range(len(pred_pdp_all)):
             pred_pdp = pred_pdp_all[i]
             target_pdp = target_pdp_all[i]
             
-            # MSE: Mean Squared Error
+            # MSE
             mse = np.mean((pred_pdp - target_pdp) ** 2)
             mse_values.append(mse)
             
-            # RMSE: Root Mean Squared Error
+            # RMSE
             rmse = np.sqrt(mse)
             rmse_values.append(rmse)
             
-            # NMSE: Normalized Mean Squared Error
+            # NMSE
             signal_power = np.mean(target_pdp ** 2)
             if signal_power < 1e-12:
-                nmse = 1.0  # Avoid division by zero
+                nmse = 0.0
             else:
                 nmse = mse / signal_power
             nmse_values.append(nmse)
             
-            # Cosine Similarity: Shape similarity independent of magnitude
-            pred_norm = np.sqrt(np.sum(pred_pdp ** 2))
-            target_norm = np.sqrt(np.sum(target_pdp ** 2))
+            # Cosine similarity
+            pred_flat = pred_pdp.flatten()
+            target_flat = target_pdp.flatten()
+            
+            dot_product = np.sum(pred_flat * target_flat)
+            pred_norm = np.sqrt(np.sum(pred_flat ** 2))
+            target_norm = np.sqrt(np.sum(target_flat ** 2))
             
             if pred_norm < 1e-12 or target_norm < 1e-12:
-                cosine_sim = 0.0  # Avoid division by zero
+                cosine_sim = 0.0
             else:
-                cosine_sim = np.sum(pred_pdp * target_pdp) / (pred_norm * target_norm)
+                cosine_sim = dot_product / (pred_norm * target_norm)
+                cosine_sim = np.clip(cosine_sim, -1.0, 1.0)
+            
             cosine_sim_values.append(cosine_sim)
-        
-        # Convert to numpy arrays
-        mse_values = np.array(mse_values)
-        rmse_values = np.array(rmse_values)
-        nmse_values = np.array(nmse_values)
-        cosine_sim_values = np.array(cosine_sim_values)
         
         # Compute statistics
         global_metrics = {
@@ -1624,19 +1456,16 @@ Cosine Sim: {global_metrics['cosine_sim_mean']:.6f} ± {global_metrics['cosine_s
             'mse_median': float(np.median(mse_values)),
             'mse_min': float(np.min(mse_values)),
             'mse_max': float(np.max(mse_values)),
-            
             'rmse_mean': float(np.mean(rmse_values)),
             'rmse_std': float(np.std(rmse_values)),
             'rmse_median': float(np.median(rmse_values)),
             'rmse_min': float(np.min(rmse_values)),
             'rmse_max': float(np.max(rmse_values)),
-            
             'nmse_mean': float(np.mean(nmse_values)),
             'nmse_std': float(np.std(nmse_values)),
             'nmse_median': float(np.median(nmse_values)),
             'nmse_min': float(np.min(nmse_values)),
             'nmse_max': float(np.max(nmse_values)),
-            
             'cosine_sim_mean': float(np.mean(cosine_sim_values)),
             'cosine_sim_std': float(np.std(cosine_sim_values)),
             'cosine_sim_median': float(np.median(cosine_sim_values)),
@@ -1644,282 +1473,14 @@ Cosine Sim: {global_metrics['cosine_sim_mean']:.6f} ± {global_metrics['cosine_s
             'cosine_sim_max': float(np.max(cosine_sim_values))
         }
         
-        logger.info(f"     MSE: {global_metrics['mse_mean']:.6f} ± {global_metrics['mse_std']:.6f}")
-        logger.info(f"     RMSE: {global_metrics['rmse_mean']:.6f} ± {global_metrics['rmse_std']:.6f}")
-        logger.info(f"     NMSE: {global_metrics['nmse_mean']:.6f} ± {global_metrics['nmse_std']:.6f}")
-        logger.info(f"     Cosine Similarity: {global_metrics['cosine_sim_mean']:.6f} ± {global_metrics['cosine_sim_std']:.6f}")
-        
-        # Return both statistics and raw data for CDF computation
         global_metrics_raw = {
-            'mse_values': mse_values,
-            'rmse_values': rmse_values,
-            'nmse_values': nmse_values,
-            'cosine_sim_values': cosine_sim_values
+            'mse_values': np.array(mse_values),
+            'rmse_values': np.array(rmse_values),
+            'nmse_values': np.array(nmse_values),
+            'cosine_sim_values': np.array(cosine_sim_values)
         }
         
         return global_metrics, global_metrics_raw
-    
-    def _plot_random_pdp_comparison(self, pred_pdp_all: np.ndarray, target_pdp_all: np.ndarray, 
-                                   batch_size: int, num_bs_antennas: int, num_ue_antennas: int):
-        """Plot random PDP comparison for 10 CSI samples"""
-        logger.info("📊 Creating random PDP comparison plots...")
-        
-        # Randomly select 10 samples
-        np.random.seed(42)  # For reproducibility
-        total_samples = len(pred_pdp_all)
-        selected_indices = np.random.choice(total_samples, size=min(10, total_samples), replace=False)
-        
-        logger.info(f"   Selected PDP samples: {selected_indices}")
-        
-        # Create subplots: 10 rows, 1 column for 10 plots
-        fig, axes = plt.subplots(10, 1, figsize=(12, 25))
-        fig.suptitle(f'Random PDP Comparison: Predicted vs Ground Truth (FFT Size: {self.fft_size})',
-                    fontsize=16, fontweight='bold')
-        
-        # Delay indices (time domain)
-        delay_indices = np.arange(self.fft_size)
-        
-        for i, sample_idx in enumerate(selected_indices):
-            ax = axes[i]
-            
-            # Get PDP data for this sample
-            pred_pdp = pred_pdp_all[sample_idx]
-            target_pdp = target_pdp_all[sample_idx]
-            
-            # Plot PDP comparison
-            ax.plot(delay_indices, pred_pdp, 'r-', linewidth=2, label='Predicted PDP', alpha=0.8)
-            ax.plot(delay_indices, target_pdp, 'b-', linewidth=2, label='Target PDP', alpha=0.8)
-            
-            # Calculate PDP MAE for this sample
-            pdp_mae = np.mean(np.abs(pred_pdp - target_pdp))
-            
-            # Set title and labels
-            ax.set_title(f'Sample {sample_idx} - PDP Comparison (MAE: {pdp_mae:.6f})', fontsize=12, fontweight='bold')
-            ax.set_ylabel('Power', fontsize=10)
-            ax.legend(fontsize=8)
-            ax.grid(True, alpha=0.3)
-            
-            # Set y-axis limits for better visualization
-            max_power = max(pred_pdp.max(), target_pdp.max())
-            ax.set_ylim(0, max_power * 1.1)
-            
-            # Add MAE value to the plot
-            ax.text(0.02, 0.95, f'MAE: {pdp_mae:.6f}', transform=ax.transAxes, 
-                   bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.7),
-                   fontsize=8, verticalalignment='top')
-            
-            # Only show x-axis label on the bottom plot
-            if i == 9:  # Last row
-                ax.set_xlabel('Delay Index', fontsize=10)
-        
-        plt.tight_layout()
-        
-        # Save plot
-        plot_path = self.output_dir / 'pdp_random_comparison.png'
-        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        logger.info(f"✅ Random PDP comparison saved: {plot_path}")
-    
-    def _analyze_spectrum(self):
-        """Analyze frequency spectrum of CSI data"""
-        logger.info("📊 Analyzing frequency spectrum...")
-        
-        # Convert to complex tensors if needed
-        if not self.predictions.is_complex():
-            self.predictions = self.predictions + 1j * torch.zeros_like(self.predictions)
-        if not self.targets.is_complex():
-            self.targets = self.targets + 1j * torch.zeros_like(self.targets)
-        
-        batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers = self.predictions.shape
-        
-        # Compute spectrum for all samples and antennas
-        pred_spectrum_all = []
-        target_spectrum_all = []
-        
-        logger.info(f"   Computing spectrum for {batch_size} samples × {num_bs_antennas * num_ue_antennas} antennas...")
-        
-        processed_count = 0
-        total_spectrum_computations = batch_size * num_bs_antennas * num_ue_antennas
-        
-        for sample_idx in range(batch_size):
-            for bs_idx in range(num_bs_antennas):
-                for ue_idx in range(num_ue_antennas):
-                    # Get CSI for this sample, BS antenna, and UE antenna
-                    pred_csi = self.predictions[sample_idx, bs_idx, ue_idx, :].numpy()
-                    target_csi = self.targets[sample_idx, bs_idx, ue_idx, :].numpy()
-                    
-                    # Compute spectrum using FFT
-                    pred_spectrum = self._compute_spectrum(pred_csi)
-                    target_spectrum = self._compute_spectrum(target_csi)
-                    
-                    pred_spectrum_all.append(pred_spectrum)
-                    target_spectrum_all.append(target_spectrum)
-                    
-                    processed_count += 1
-                    if processed_count % 50 == 0:  # Progress update every 50 spectrum computations
-                        logger.info(f"     Spectrum computation progress: {processed_count}/{total_spectrum_computations} ({processed_count/total_spectrum_computations*100:.1f}%)")
-        
-        # Convert to numpy arrays
-        pred_spectrum_all = np.array(pred_spectrum_all)
-        target_spectrum_all = np.array(target_spectrum_all)
-        
-        logger.info(f"   Spectrum computed: {pred_spectrum_all.shape}")
-        
-        # Compute spectrum MAE
-        spectrum_mae = np.mean(np.abs(pred_spectrum_all - target_spectrum_all), axis=0)
-        
-        # Create spectrum visualization
-        self._plot_spectrum_analysis(pred_spectrum_all, target_spectrum_all, spectrum_mae)
-        
-        # Create random spectrum comparison
-        self._plot_random_spectrum_comparison(pred_spectrum_all, target_spectrum_all, batch_size, num_bs_antennas, num_ue_antennas)
-        
-        logger.info("✅ Spectrum analysis completed!")
-    
-    def _compute_spectrum(self, csi: np.ndarray) -> np.ndarray:
-        """
-        Compute frequency spectrum from CSI using FFT
-        
-        Args:
-            csi: Complex CSI values
-            
-        Returns:
-            Spectrum values (magnitude)
-        """
-        # Compute FFT
-        spectrum = np.fft.fft(csi)
-        
-        # Return magnitude spectrum
-        return np.abs(spectrum)
-    
-    def _plot_spectrum_analysis(self, pred_spectrum_all: np.ndarray, target_spectrum_all: np.ndarray, spectrum_mae: np.ndarray):
-        """Plot spectrum analysis with MAE distribution"""
-        logger.info("📊 Creating spectrum analysis plots...")
-        
-        # Compute CDFs
-        spectrum_mae_cdf = self._compute_empirical_cdf(spectrum_mae)
-        
-        # Create visualization
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
-        fig.suptitle('Frequency Spectrum Analysis', fontsize=16, fontweight='bold')
-        
-        # Spectrum MAE CDF
-        ax1.plot(spectrum_mae_cdf[0], spectrum_mae_cdf[1], 'g-', linewidth=2, label='Spectrum MAE')
-        ax1.set_xlabel('Spectrum MAE')
-        ax1.set_ylabel('Cumulative Probability')
-        ax1.set_title('Spectrum MAE CDF')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        ax1.set_ylim(0, 1)
-        
-        # Spectrum MAE Histogram
-        ax2.hist(spectrum_mae, bins=50, alpha=0.7, color='green', edgecolor='black', density=True)
-        ax2.set_xlabel('Spectrum MAE')
-        ax2.set_ylabel('Density')
-        ax2.set_title(f'Spectrum MAE Distribution (Mean: {np.mean(spectrum_mae):.4f})')
-        ax2.grid(True, alpha=0.3)
-        
-        # Average spectrum comparison
-        avg_pred_spectrum = np.mean(pred_spectrum_all, axis=0)
-        avg_target_spectrum = np.mean(target_spectrum_all, axis=0)
-        
-        subcarrier_indices = np.arange(len(avg_pred_spectrum))
-        ax3.plot(subcarrier_indices, avg_pred_spectrum, 'r-', linewidth=2, label='Average Predicted Spectrum')
-        ax3.plot(subcarrier_indices, avg_target_spectrum, 'b-', linewidth=2, label='Average Target Spectrum')
-        ax3.set_xlabel('Subcarrier Index')
-        ax3.set_ylabel('Spectrum Magnitude')
-        ax3.set_title('Average Frequency Spectrum Comparison')
-        ax3.legend()
-        ax3.grid(True, alpha=0.3)
-        
-        # Spectrum error per subcarrier
-        ax4.plot(subcarrier_indices, spectrum_mae, 'purple', linewidth=2, label='Spectrum MAE per Subcarrier')
-        ax4.set_xlabel('Subcarrier Index')
-        ax4.set_ylabel('MAE')
-        ax4.set_title('Spectrum MAE per Subcarrier')
-        ax4.legend()
-        ax4.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        
-        # Save plot
-        plot_path = self.output_dir / 'spectrum_analysis.png'
-        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        logger.info(f"✅ Spectrum analysis saved: {plot_path}")
-    
-    def _plot_random_spectrum_comparison(self, pred_spectrum_all: np.ndarray, target_spectrum_all: np.ndarray,
-                                        batch_size: int, num_bs_antennas: int, num_ue_antennas: int):
-        """Plot random spectrum comparison for 10 CSI samples"""
-        logger.info("📊 Creating random spectrum comparison plots...")
-        
-        # Randomly select 10 samples
-        np.random.seed(42)  # For reproducibility
-        total_samples = len(pred_spectrum_all)
-        selected_indices = np.random.choice(total_samples, size=min(10, total_samples), replace=False)
-        
-        logger.info(f"   Selected spectrum samples: {selected_indices}")
-        
-        # Create subplots: 10 rows, 1 column for 10 plots
-        fig, axes = plt.subplots(10, 1, figsize=(12, 25))
-        fig.suptitle('Random Spectrum Comparison: Predicted vs Ground Truth',
-                    fontsize=16, fontweight='bold')
-        
-        # Subcarrier indices
-        subcarrier_indices = np.arange(pred_spectrum_all.shape[1])
-        
-        for i, sample_idx in enumerate(selected_indices):
-            ax = axes[i]
-            
-            # Get spectrum data for this sample
-            pred_spectrum = pred_spectrum_all[sample_idx]
-            target_spectrum = target_spectrum_all[sample_idx]
-            
-            # Plot spectrum comparison
-            ax.plot(subcarrier_indices, pred_spectrum, 'r-', linewidth=2, label='Predicted Spectrum', alpha=0.8)
-            ax.plot(subcarrier_indices, target_spectrum, 'b-', linewidth=2, label='Target Spectrum', alpha=0.8)
-            
-            # Calculate spectrum MAE for this sample
-            spectrum_mae = np.mean(np.abs(pred_spectrum - target_spectrum))
-            
-            # Set title and labels
-            ax.set_title(f'Sample {sample_idx} - Spectrum Comparison (MAE: {spectrum_mae:.4f})', fontsize=12, fontweight='bold')
-            ax.set_ylabel('Spectrum Magnitude', fontsize=10)
-            ax.legend(fontsize=8)
-            ax.grid(True, alpha=0.3)
-            
-            # Set y-axis limits for better visualization
-            max_spectrum = max(pred_spectrum.max(), target_spectrum.max())
-            ax.set_ylim(0, max_spectrum * 1.1)
-            
-            # Add MAE value to the plot
-            ax.text(0.02, 0.95, f'MAE: {spectrum_mae:.4f}', transform=ax.transAxes, 
-                   bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.7),
-                   fontsize=8, verticalalignment='top')
-            
-            # Only show x-axis label on the bottom plot
-            if i == 9:  # Last row
-                ax.set_xlabel('Subcarrier Index', fontsize=10)
-        
-        plt.tight_layout()
-        
-        # Save plot
-        plot_path = self.output_dir / 'spectrum_random_comparison.png'
-        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        logger.info(f"✅ Random spectrum comparison saved: {plot_path}")
-    
-    def _compute_empirical_cdf(self, data: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Compute empirical cumulative distribution function (CDF) for given data"""
-        # Sort data and compute CDF
-        sorted_data = np.sort(data)
-        n = len(sorted_data)
-        cdf_values = np.arange(1, n + 1) / n
-        
-        return sorted_data, cdf_values
     
     def _generate_summary_report(self):
         """Generate comprehensive summary report"""
@@ -1941,7 +1502,7 @@ Cosine Sim: {global_metrics['cosine_sim_mean']:.6f} ± {global_metrics['cosine_s
         }
         
         # Save summary to JSON
-        summary_file = self.output_dir / 'metrics' / 'analysis_summary.json'
+        summary_file = self.analysis_dir / 'analysis_summary.json'
         with open(summary_file, 'w') as f:
             json.dump(summary, f, indent=2)
         
@@ -1986,14 +1547,10 @@ Cosine Sim: {global_metrics['cosine_sim_mean']:.6f} ± {global_metrics['cosine_s
             print(f"\n⏰ PDP Statistics (FFT Size: {stats['fft_size']}):")
             print(f"   PDP MAE:         Mean={stats['pdp_mae_mean']:.6f}, Std={stats['pdp_mae_std']:.6f}")
             
-            # Global similarity metrics
-            if 'global_similarity' in stats:
-                gs = stats['global_similarity']
-                print(f"   Global Similarity Metrics:")
-                print(f"     MSE:           Mean={gs['mse_mean']:.6f}, Std={gs['mse_std']:.6f}")
-                print(f"     RMSE:          Mean={gs['rmse_mean']:.6f}, Std={gs['rmse_std']:.6f}")
-                print(f"     NMSE:          Mean={gs['nmse_mean']:.6f}, Std={gs['nmse_std']:.6f}")
-                print(f"     Cosine Sim:    Mean={gs['cosine_sim_mean']:.6f}, Std={gs['cosine_sim_std']:.6f}")
+            # PDP similarity metrics - show summary info
+            if 'total_pdp_samples' in stats:
+                print(f"   Total PDP samples analyzed: {stats['total_pdp_samples']}")
+                print(f"   Detailed similarity values saved to: detailed_pdp_analysis.json")
         
         # Spatial spectrum stats
         if 'spatial_spectrum_stats' in summary and summary['spatial_spectrum_stats']:
@@ -2012,6 +1569,86 @@ Cosine Sim: {global_metrics['cosine_sim_mean']:.6f} ± {global_metrics['cosine_s
         print(f"✅ Analysis completed successfully!")
         print(f"📁 Results saved to: {self.output_dir}")
         print(f"{'='*80}")
+
+
+def _compute_empirical_cdf(data: np.ndarray) -> tuple:
+    """Compute empirical CDF for given data"""
+    sorted_data = np.sort(data)
+    n = len(sorted_data)
+    y = np.arange(1, n + 1) / n
+    return sorted_data, y
+
+
+def _compute_spectral_correlation_coefficient(pred_pdp: np.ndarray, target_pdp: np.ndarray) -> float:
+    """Compute Spectral Correlation Coefficient (SCC) between two PDPs"""
+    pred_flat = pred_pdp.flatten()
+    target_flat = target_pdp.flatten()
+    
+    # Compute correlation coefficient
+    correlation = np.corrcoef(pred_flat, target_flat)[0, 1]
+    
+    # Handle NaN case
+    if np.isnan(correlation):
+        return 0.0
+    
+    # Map from [-1, 1] to [0, 1] where 1 is most similar
+    return (correlation + 1.0) / 2.0
+
+
+def _compute_log_spectral_distance(pred_pdp: np.ndarray, target_pdp: np.ndarray) -> float:
+    """Compute Log Spectral Distance (LSD) between two PDPs"""
+    pred_flat = pred_pdp.flatten()
+    target_flat = target_pdp.flatten()
+    
+    # Add small epsilon to avoid log(0)
+    epsilon = 1e-10
+    pred_log = np.log(pred_flat + epsilon)
+    target_log = np.log(target_flat + epsilon)
+    
+    # Compute LSD
+    lsd = np.sqrt(np.mean((pred_log - target_log) ** 2))
+    
+    # Map to [0, 1] where 1 is most similar (using exponential decay)
+    return np.exp(-lsd)
+
+
+def _compute_bhattacharyya_coefficient(pred_pdp: np.ndarray, target_pdp: np.ndarray) -> float:
+    """Compute Bhattacharyya Coefficient (BC) between two PDPs"""
+    pred_flat = pred_pdp.flatten()
+    target_flat = target_pdp.flatten()
+    
+    # Normalize to make them probability distributions
+    pred_norm = pred_flat / (np.sum(pred_flat) + 1e-10)
+    target_norm = target_flat / (np.sum(target_flat) + 1e-10)
+    
+    # Compute Bhattacharyya coefficient
+    bc = np.sum(np.sqrt(pred_norm * target_norm))
+    
+    # BC is already in [0, 1] where 1 is most similar
+    return bc
+
+
+def _compute_jensen_shannon_divergence(pred_pdp: np.ndarray, target_pdp: np.ndarray) -> float:
+    """Compute Jensen-Shannon Divergence (JSD) between two PDPs"""
+    pred_flat = pred_pdp.flatten()
+    target_flat = target_pdp.flatten()
+    
+    # Normalize to make them probability distributions
+    pred_norm = pred_flat / (np.sum(pred_flat) + 1e-10)
+    target_norm = target_flat / (np.sum(target_flat) + 1e-10)
+    
+    # Compute average distribution
+    avg_dist = (pred_norm + target_norm) / 2.0
+    
+    # Compute KL divergences
+    kl_pred = np.sum(pred_norm * np.log((pred_norm + 1e-10) / (avg_dist + 1e-10)))
+    kl_target = np.sum(target_norm * np.log((target_norm + 1e-10) / (avg_dist + 1e-10)))
+    
+    # Compute JSD
+    jsd = (kl_pred + kl_target) / 2.0
+    
+    # Map to [0, 1] where 1 is most similar (using exponential decay)
+    return np.exp(-jsd)
 
 
 def main():
@@ -2033,9 +1670,6 @@ Examples:
   # Analyze with explicit results path (override auto-detection)
   python analyze.py --config configs/sionna.yml --results path/to/custom_results.npz
   
-  # Analyze with parallel processing disabled (for debugging)
-  python analyze.py --config configs/sionna.yml --no-parallel
-  
   # Analyze with custom number of parallel workers
   python analyze.py --config configs/sionna.yml --num-workers 8
   
@@ -2047,7 +1681,6 @@ Examples:
     parser.add_argument('--results', help='Path to test results (.npz file) - optional, will auto-detect from config')
     parser.add_argument('--output', help='Output directory for analysis results (optional)')
     parser.add_argument('--fft-size', type=int, default=2048, help='FFT size for PDP computation (default: 2048)')
-    parser.add_argument('--no-parallel', action='store_true', help='Disable parallel processing for spatial spectrum computation')
     parser.add_argument('--num-workers', type=int, help='Number of parallel workers (default: CPU count - 1)')
     
     args = parser.parse_args()
@@ -2055,12 +1688,50 @@ Examples:
     try:
         print(f"🚀 Starting CSI analysis with config: {args.config}")
         
+        # 显示数据文件读取位置信息
+        print(f"\n📁 数据文件读取位置信息:")
+        print(f"{'='*60}")
+        
+        # 创建临时配置加载器来获取路径信息
+        temp_config_loader = ModernConfigLoader(args.config)
+        output_paths = temp_config_loader.get_output_paths()
+        
+        # 显示预测结果文件路径
+        if args.results:
+            results_file = Path(args.results)
+            print(f"📄 手动指定的预测结果文件: {results_file}")
+        else:
+            # 自动检测路径
+            predictions_dir = output_paths['predictions_dir']
+            results_file = Path(predictions_dir) / 'test_results.npz'
+            print(f"📄 自动检测的预测结果文件: {results_file}")
+        
+        # 显示输出目录
+        if args.output:
+            output_dir = Path(args.output)
+            print(f"📂 手动指定的输出目录: {output_dir}")
+        else:
+            plots_dir = output_paths['plots_dir']
+            output_dir = Path(plots_dir)
+            print(f"📂 自动检测的输出目录: {output_dir}")
+        
+        # 显示分析目录
+        analysis_dir = output_dir.parent / 'analysis'
+        print(f"📂 分析结果目录: {analysis_dir}")
+        
+        print(f"📊 文件格式: .npz (NumPy压缩格式)")
+        print(f"📊 文件内容: predictions, targets, test_ue_positions, test_bs_positions")
+        print(f"🔧 分析功能: CSI误差分析、PDP分析、空间谱分析")
+        print(f"{'='*60}")
+        print(f"💡 提示: 此文件由test.py脚本生成并保存")
+        print(f"   test.py → {results_file} → analyze.py")
+        print(f"{'='*60}\n")
+        
         analyzer = CSIAnalyzer(
             config_path=args.config,
             results_path=args.results,
             output_dir=args.output,
             fft_size=args.fft_size,
-            use_parallel=not args.no_parallel,
             num_workers=args.num_workers
         )
         

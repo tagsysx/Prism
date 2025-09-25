@@ -219,6 +219,10 @@ class PrismTrainer(BaseRunner):
                     'sampling_ratio': self.data_config['sampling_ratio'],
                     'sampling_method': self.data_config['sampling_method'],
                     'antenna_consistent': self.data_config['antenna_consistent']
+                },
+                'calibration': {
+                    'enabled': self.data_config['calibration']['enabled'],
+                    'reference_subcarrier_index': self.data_config['calibration']['reference_subcarrier_index']
                 }
             }
         }
@@ -668,6 +672,48 @@ class PrismTrainer(BaseRunner):
                     
                     total_loss += loss.item()
                     
+                    # ========================================
+                    # CSI Amplitude Statistics for validation batch
+                    # ========================================
+                    # Calculate amplitude statistics for predictions and targets
+                    pred_amplitude = torch.abs(predictions)
+                    target_amplitude = torch.abs(target_csi)
+                    
+                    # Filter out zero values for meaningful statistics
+                    pred_nonzero = pred_amplitude[pred_amplitude > 1e-8]
+                    target_nonzero = target_amplitude[target_amplitude > 1e-8]
+                    
+                    if len(pred_nonzero) > 0 and len(target_nonzero) > 0:
+                        pred_stats = {
+                            'min': pred_nonzero.min().item(),
+                            'max': pred_nonzero.max().item(),
+                            'mean': pred_nonzero.mean().item(),
+                            'std': pred_nonzero.std().item()
+                        }
+                        target_stats = {
+                            'min': target_nonzero.min().item(),
+                            'max': target_nonzero.max().item(),
+                            'mean': target_nonzero.mean().item(),
+                            'std': target_nonzero.std().item()
+                        }
+                        
+                        # Log amplitude statistics
+                        self.logger.info(f"📊 Validation Batch {batch_idx + 1} CSI Amplitude Statistics:")
+                        self.logger.info(f"   Predictions: min={pred_stats['min']:.6f}, max={pred_stats['max']:.6f}, mean={pred_stats['mean']:.6f}, std={pred_stats['std']:.6f}")
+                        self.logger.info(f"   Targets:     min={target_stats['min']:.6f}, max={target_stats['max']:.6f}, mean={target_stats['mean']:.6f}, std={target_stats['std']:.6f}")
+                        
+                        # Calculate amplitude ratio (how close predictions are to targets)
+                        amplitude_ratio = pred_stats['mean'] / target_stats['mean'] if target_stats['mean'] > 0 else 0
+                        self.logger.info(f"   Amplitude Ratio (pred/target): {amplitude_ratio:.4f}")
+                        
+                        # Log range coverage
+                        pred_range = pred_stats['max'] - pred_stats['min']
+                        target_range = target_stats['max'] - target_stats['min']
+                        range_coverage = pred_range / target_range if target_range > 0 else 0
+                        self.logger.info(f"   Range Coverage (pred/target): {range_coverage:.4f}")
+                    else:
+                        self.logger.warning(f"⚠️ Validation Batch {batch_idx + 1}: No valid amplitude data found")
+                    
                 except Exception as e:
                     self.logger.warning(f"⚠️  Validation error in batch {batch_idx}: {e}")
                     continue
@@ -678,6 +724,78 @@ class PrismTrainer(BaseRunner):
         print()  # Move to next line after progress display
         
         return avg_loss
+    
+    def _log_training_time_statistics(self, total_time: float):
+        """Log detailed training time statistics."""
+        # Calculate time components
+        hours = int(total_time // 3600)
+        minutes = int((total_time % 3600) // 60)
+        seconds = int(total_time % 60)
+        
+        # Format time strings
+        if hours > 0:
+            time_str = f"{hours}h {minutes}m {seconds}s"
+        elif minutes > 0:
+            time_str = f"{minutes}m {seconds}s"
+        else:
+            time_str = f"{seconds}s"
+        
+        # Calculate additional statistics
+        num_epochs = self.training_config.get('num_epochs', 0)
+        avg_epoch_time = total_time / num_epochs if num_epochs > 0 else 0
+        
+        # Log detailed statistics
+        self.logger.info("=" * 80)
+        self.logger.info("🏁 TRAINING COMPLETED - TIME STATISTICS")
+        self.logger.info("=" * 80)
+        self.logger.info(f"⏱️  Total Training Time: {time_str} ({total_time:.1f} seconds)")
+        self.logger.info(f"📊 Total Epochs: {num_epochs}")
+        self.logger.info(f"⚡ Average Time per Epoch: {avg_epoch_time:.1f}s")
+        self.logger.info(f"🎯 Best Validation Loss: {self.best_loss:.6f}")
+        
+        # Log start and end times
+        start_time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.training_start_time))
+        end_time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+        self.logger.info(f"🕐 Training Started: {start_time_str}")
+        self.logger.info(f"🕐 Training Ended: {end_time_str}")
+        
+        # Log efficiency metrics
+        if hasattr(self, 'train_loader') and self.train_loader:
+            total_batches = len(self.train_loader) * num_epochs
+            avg_batch_time = total_time / total_batches if total_batches > 0 else 0
+            self.logger.info(f"📈 Total Batches Processed: {total_batches}")
+            self.logger.info(f"⚡ Average Time per Batch: {avg_batch_time:.3f}s")
+        
+        # Log GPU memory usage if available
+        if torch.cuda.is_available():
+            gpu_memory_allocated = torch.cuda.memory_allocated() / 1024**3
+            gpu_memory_reserved = torch.cuda.memory_reserved() / 1024**3
+            self.logger.info(f"🎮 GPU Memory Allocated: {gpu_memory_allocated:.2f} GB")
+            self.logger.info(f"🎮 GPU Memory Reserved: {gpu_memory_reserved:.2f} GB")
+        
+        self.logger.info("=" * 80)
+        
+        # Also print to console for immediate visibility
+        print("\n" + "=" * 80)
+        print("🏁 TRAINING COMPLETED - TIME STATISTICS")
+        print("=" * 80)
+        print(f"⏱️  Total Training Time: {time_str} ({total_time:.1f} seconds)")
+        print(f"📊 Total Epochs: {num_epochs}")
+        print(f"⚡ Average Time per Epoch: {avg_epoch_time:.1f}s")
+        print(f"🎯 Best Validation Loss: {self.best_loss:.6f}")
+        print(f"🕐 Training Started: {start_time_str}")
+        print(f"🕐 Training Ended: {end_time_str}")
+        if hasattr(self, 'train_loader') and self.train_loader:
+            total_batches = len(self.train_loader) * num_epochs
+            avg_batch_time = total_time / total_batches if total_batches > 0 else 0
+            print(f"📈 Total Batches Processed: {total_batches}")
+            print(f"⚡ Average Time per Batch: {avg_batch_time:.3f}s")
+        if torch.cuda.is_available():
+            gpu_memory_allocated = torch.cuda.memory_allocated() / 1024**3
+            gpu_memory_reserved = torch.cuda.memory_reserved() / 1024**3
+            print(f"🎮 GPU Memory Allocated: {gpu_memory_allocated:.2f} GB")
+            print(f"🎮 GPU Memory Reserved: {gpu_memory_reserved:.2f} GB")
+        print("=" * 80)
         
     def train(self):
         """Main training loop."""
@@ -756,9 +874,11 @@ class PrismTrainer(BaseRunner):
             self.logger.error(traceback.format_exc())
             raise
         finally:
-            # Final cleanup
+            # Final cleanup and training time statistics
             total_time = time.time() - self.training_start_time
-            self.logger.info(f"🏁 Training completed in {total_time:.1f}s ({total_time/3600:.2f}h)")
+            
+            # Detailed training time statistics
+            self._log_training_time_statistics(total_time)
             
             # Save final model
             final_model_path = os.path.join(self.output_paths['models_dir'], 'final_model.pt')

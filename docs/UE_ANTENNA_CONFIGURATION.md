@@ -15,13 +15,11 @@ The system now supports dynamic configuration of UE antenna usage through the `u
 
 ```yaml
 input:
-  ue_antenna_index: 0        # Which UE antenna to use when ue_antenna_count=1
   ue_antenna_count: 1        # Number of UE antennas to use
 ```
 
 ### Parameters Explained
 
-- **`ue_antenna_index`**: When `ue_antenna_count=1`, specifies which UE antenna to use (0-indexed)
 - **`ue_antenna_count`**: 
   - `1`: Use single UE antenna (original behavior)
   - `>1`: Use multiple UE antennas as subcarriers
@@ -32,7 +30,6 @@ input:
 
 ```yaml
 input:
-  ue_antenna_index: 0
   ue_antenna_count: 1
 ```
 
@@ -42,7 +39,6 @@ input:
 
 ```yaml
 input:
-  ue_antenna_index: 0
   ue_antenna_count: 4
 ```
 

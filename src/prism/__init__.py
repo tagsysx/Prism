@@ -31,7 +31,6 @@ from .loss import (
     LossFunction,
     CSILoss,
     PDPLoss,
-    SSLoss,
     DEFAULT_LOSS_CONFIG
 )
 
@@ -74,7 +73,6 @@ __all__ = [
     'LossFunction',
     'CSILoss',
     'PDPLoss',
-    'SSLoss',
     'DEFAULT_LOSS_CONFIG',
     
     # Neural networks

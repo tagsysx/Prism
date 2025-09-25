@@ -54,13 +54,17 @@ class PDPLoss(nn.Module):
         
         Args:
             predicted_csi: Predicted CSI tensor (complex)
-                          Shape: (N,) - selected subcarriers
+                          Shape: [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
             target_csi: Target CSI tensor (complex)
-                       Shape: (N,) - selected subcarriers
+                       Shape: [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
         
         Returns:
             loss: Computed PDP loss value (scalar tensor)
         """
+        # Validate input shapes
+        if predicted_csi.shape != target_csi.shape:
+            raise ValueError(f"Shape mismatch: predicted {predicted_csi.shape} vs target {target_csi.shape}")
+        
         # Ensure complex tensors with simplified conversion
         if not predicted_csi.is_complex():
             predicted_csi = torch.view_as_complex(
@@ -71,16 +75,94 @@ class PDPLoss(nn.Module):
             target_csi = torch.view_as_complex(
                 torch.stack([target_csi, torch.zeros_like(target_csi)], dim=-1)
             )
+        
+        # Handle 4D input: [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
+        if predicted_csi.dim() == 4:
+            batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers = predicted_csi.shape
             
-        # Compute PDPs
-        pdp_pred = self._compute_pdp(predicted_csi)
-        pdp_target = self._compute_pdp(target_csi)
+            # Compute PDP loss for each antenna pair and average
+            total_loss = 0.0
+            total_pairs = 0
+            
+            for bs_idx in range(num_bs_antennas):
+                for ue_idx in range(num_ue_antennas):
+                    # Extract CSI for this antenna pair: [batch_size, num_subcarriers]
+                    antenna_pred = predicted_csi[:, bs_idx, ue_idx, :]  # [batch_size, num_subcarriers]
+                    antenna_target = target_csi[:, bs_idx, ue_idx, :]    # [batch_size, num_subcarriers]
+                    
+                    # Compute PDP loss for this antenna pair across all samples
+                    antenna_loss = self._compute_antenna_pair_pdp_loss(antenna_pred, antenna_target)
+                    total_loss += antenna_loss
+                    total_pairs += 1
+            
+            # Average loss across all antenna pairs
+            avg_loss = total_loss / total_pairs if total_pairs > 0 else torch.tensor(0.0, device=predicted_csi.device)
+            return avg_loss
         
-        # Normalize PDPs if required
-        if self.normalize_pdp:
-            pdp_pred = self._normalize_pdp(pdp_pred)
-            pdp_target = self._normalize_pdp(pdp_target)
+        # Handle 1D input (legacy support): [num_subcarriers]
+        elif predicted_csi.dim() == 1:
+            # Compute PDPs
+            pdp_pred = self._compute_pdp(predicted_csi)
+            pdp_target = self._compute_pdp(target_csi)
+            
+            # Normalize PDPs if required
+            if self.normalize_pdp:
+                pdp_pred = self._normalize_pdp(pdp_pred)
+                pdp_target = self._normalize_pdp(pdp_target)
+            
+            # Compute loss using the extracted method
+            loss = self._compute_loss_from_pdps(pdp_pred, pdp_target)
+            return loss
+        else:
+            raise ValueError(f"Unsupported input dimension: {predicted_csi.dim()}D. Expected 1D or 4D tensors.")
+    
+    def _compute_antenna_pair_pdp_loss(self, antenna_pred: torch.Tensor, antenna_target: torch.Tensor) -> torch.Tensor:
+        """
+        Compute PDP loss for a single antenna pair across all samples in the batch
         
+        Args:
+            antenna_pred: Predicted CSI for antenna pair [batch_size, num_subcarriers]
+            antenna_target: Target CSI for antenna pair [batch_size, num_subcarriers]
+        
+        Returns:
+            loss: Average PDP loss across all samples in the batch
+        """
+        batch_size = antenna_pred.shape[0]
+        total_loss = 0.0
+        
+        for sample_idx in range(batch_size):
+            # Extract CSI for this sample: [num_subcarriers]
+            sample_pred = antenna_pred[sample_idx, :]
+            sample_target = antenna_target[sample_idx, :]
+            
+            # Compute PDPs for this sample
+            pdp_pred = self._compute_pdp(sample_pred)
+            pdp_target = self._compute_pdp(sample_target)
+            
+            # Normalize PDPs if required
+            if self.normalize_pdp:
+                pdp_pred = self._normalize_pdp(pdp_pred)
+                pdp_target = self._normalize_pdp(pdp_target)
+            
+            # Compute loss for this sample
+            sample_loss = self._compute_loss_from_pdps(pdp_pred, pdp_target)
+            total_loss += sample_loss
+        
+        # Average loss across all samples
+        avg_loss = total_loss / batch_size if batch_size > 0 else torch.tensor(0.0, device=antenna_pred.device)
+        return avg_loss
+    
+    def _compute_loss_from_pdps(self, pdp_pred: torch.Tensor, pdp_target: torch.Tensor) -> torch.Tensor:
+        """
+        Compute loss from PDP tensors
+        
+        Args:
+            pdp_pred: Predicted PDP tensor
+            pdp_target: Target PDP tensor
+        
+        Returns:
+            loss: Computed loss value
+        """
         if self.loss_type == 'mse':
             # PDP MSE Loss
             loss = F.mse_loss(pdp_pred, pdp_target)
@@ -138,12 +220,12 @@ class PDPLoss(nn.Module):
     
     def _normalize_pdp(self, pdp: torch.Tensor) -> torch.Tensor:
         """
-        Normalize PDP (peak normalization)
+        Normalize PDP (energy normalization)
         """
-        max_val = torch.max(pdp)
-        if max_val < 1e-8:
+        total_energy = torch.sum(pdp)
+        if total_energy < 1e-8:
             return pdp
-        return pdp / max_val
+        return pdp / total_energy
     
     # _compute_pdp_correlation_loss method removed - was incorrectly implemented
     # (mixed all delay bins together)

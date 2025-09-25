@@ -27,11 +27,10 @@ input:
     sampling_method: uniform
     sampling_ratio: 1
   train_ratio: 0.8
-  ue_antenna_index: 0  # Use first UE antenna (index 0) for Chrissy
-  # Phase calibration configuration
-  phase_calibration:
+  # Calibration configuration
+  calibration:
     enabled: true
-    reference_subcarrier_index: 0  # Use first subcarrier (index 0) as reference for Chrissy
+    reference_subcarrier_index: 204  # Use second subcarrier (index 1) as reference for PolyU
 
 neural_networks:
   antenna_codebook:
@@ -48,17 +47,15 @@ neural_networks:
     output_dim: 32
     use_shortcuts: true
   csi_network:
-    enabled: false  # Disable CSI network to reduce memory usage
     d_model: 64  # Reduced from 256
     n_layers: 2  # Reduced from 4
     n_heads: 4   # Reduced from 16
     d_ff: 256    # Reduced from 1024
     dropout_rate: 0.05
-    # Add smoothing regularization
-    smoothing_weight: 0.001
-    # Add magnitude constraint
-    magnitude_constraint: true
     max_magnitude: 100.0
+    # Add frequency domain smoothing for better phase prediction
+    smoothing_weight: 0.05  # Moderate smoothing for Chrissy dataset
+    smoothing_type: "phase_preserve"  # Preserve magnitude, smooth phase only
   frequency_codebook:
     basis_dim: 32
     initialization: complex_normal
@@ -66,8 +63,8 @@ neural_networks:
     normalize: false
   prism_network:
     antenna_embedding_dim: 32
-    azimuth_divisions: 18
-    elevation_divisions: 6
+    azimuth_divisions: 36
+    elevation_divisions: 9
   radiance_network:
     activation: relu
     antenna_embedding_dim: 32
@@ -105,15 +102,16 @@ training:
     csi_loss:
       enabled: true
       magnitude_weight: 1.0
-      phase_weight: 1.0
+      phase_weight: 3.0
       normalize_weights: true
+      max_magnitude: 100.0  # Maximum magnitude for numerical stability
     csi_weight: 1.0
     pdp_loss:
       enabled: false
       fft_size: 512  # Adjusted for 408 subcarriers
       normalize_pdp: true
       type: hybrid
-    pdp_weight: 0.0
+    pdp_weight: 0.5
     regularization_loss:
       enabled: false
     regularization_weight: 0.0
@@ -130,6 +128,7 @@ training:
       ssim_k1: 0.01
       ssim_k2: 0.03
       ssim_window_size: 11
+      ssim_dimension: 1d  # Use 1D SSIM instead of 2D SSIM
       theta_range:
       - 0
       - 5.0
@@ -149,3 +148,10 @@ user_equipment:
   antenna_array:
     configuration: "1x4"  # Chrissy-u4 UE antenna array: 1x4 antennas
   ue_antenna_count: 4  # Number of UE antennas to use (4=antennas 0, 1, 2, and 3)
+
+analysis:
+  pas:
+    ignore_amplitude: false  # Whether to ignore amplitude and only use phase for spatial spectrum computation
+    count: 500  # Maximum number of spatial spectrum samples to analyze (randomly selected from all samples)
+    enabled: true  # Enable PAS analysis
+    use_parallel: false  # Enable parallel processing for PAS analysis

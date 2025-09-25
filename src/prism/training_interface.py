@@ -19,6 +19,7 @@ import time
 from typing import Dict, Optional, List, Tuple, Any, Union
 import contextlib
 from pathlib import Path
+import numpy as np
 
 from .networks.prism_network import PrismNetwork
 from .tracers import LowRankRayTracer
@@ -81,6 +82,10 @@ class PrismTrainingInterface(nn.Module):
         # LowRankTransformer configuration
         self.transformer_config = config.get('transformer', {})
         self.use_transformer_enhancement = self.transformer_config.get('use_enhancement', False)
+        
+        # CSI correction configuration
+        calibration_config = self.data_config.get('calibration', {})
+        self.reference_subcarrier_index = calibration_config.get('reference_subcarrier_index', 0)
         
         # Validate required configurations
         self._validate_config()
@@ -293,6 +298,10 @@ class PrismTrainingInterface(nn.Module):
         # All samples use all subcarriers (no selection), so subcarrier_selection is None
         combined_selection = None
         
+        # Apply CSI calibration (phase and amplitude normalization)
+        combined_csi = self._csi_calibration(combined_csi)
+        logger.debug("Applied CSI calibration (phase and amplitude normalization)")
+        
         # Prepare final outputs
         outputs = {
             'csi': combined_csi,
@@ -323,95 +332,52 @@ class PrismTrainingInterface(nn.Module):
         
         return outputs
     
-    def _apply_phase_differential_per_ue_antenna(self, csi: torch.Tensor) -> torch.Tensor:
+    def _csi_calibration(self, csi: torch.Tensor) -> torch.Tensor:
         """
-        Apply phase differential processing per UE antenna.
-        
-        This method applies phase differential calibration to CSI data for a single UE antenna,
-        ensuring that each UE antenna's CSI is processed independently.
-        
+        Apply full CSI correction (both phase and amplitude normalization).
+
+        This method applies both phase and amplitude correction by dividing all subcarriers
+        by the reference subcarrier for each CSI independently. This aligns both phase and 
+        amplitude to the reference subcarrier.
+
         Args:
-            csi: CSI tensor for a single UE antenna [subcarriers_per_ue]
+            csi: CSI tensor [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
             
         Returns:
-            calibrated_csi: Phase-differential calibrated CSI [subcarriers_per_ue]
+            corrected_csi: Corrected CSI tensor with same shape as input
         """
-        # Get phase calibration configuration
-        phase_calibration_config = self.data_config.get('phase_calibration', {})
-        if not phase_calibration_config.get('enabled', True):
-            return csi
-        
-        # Get reference subcarrier index (default: first subcarrier)
-        reference_subcarrier_index = phase_calibration_config.get('reference_subcarrier_index', 0)
-        
         # Ensure reference index is within bounds
-        if reference_subcarrier_index >= csi.shape[0]:
-            reference_subcarrier_index = 0
+        reference_idx = self.reference_subcarrier_index
+        if reference_idx >= csi.shape[-1]:
+            reference_idx = 0
         
-        # Get reference phase from the reference subcarrier
-        reference_phase = torch.angle(csi[reference_subcarrier_index])
-        
-        # Apply phase differential calibration
-        # Remove the reference phase from all subcarriers
-        calibrated_csi = csi * torch.exp(-1j * reference_phase)
-        
-        logger.debug(f"🔧 Applied phase differential calibration for UE antenna")
-        logger.debug(f"   Reference subcarrier: {reference_subcarrier_index}")
-        logger.debug(f"   Reference phase: {reference_phase:.6f}")
-        logger.debug(f"   CSI shape: {csi.shape}")
-        
-        return calibrated_csi
-    
-    def _apply_phase_calibration_to_batch(self, csi_batch: torch.Tensor) -> torch.Tensor:
-        """
-        Apply phase differential calibration to a batch of CSI data.
-        
-        This method applies phase differential calibration to both predictions and targets
-        before loss computation, ensuring consistent phase reference.
-        
-        Args:
-            csi_batch: CSI batch tensor [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
-            
-        Returns:
-            calibrated_csi_batch: Phase-differential calibrated CSI batch
-        """
-        # Get phase calibration configuration
-        phase_calibration_config = self.data_config.get('phase_calibration', {})
-        if not phase_calibration_config.get('enabled', True):
-            return csi_batch
-        
-        # Get reference subcarrier index (default: first subcarrier)
-        reference_subcarrier_index = phase_calibration_config.get('reference_subcarrier_index', 0)
-        
-        # Ensure reference index is within bounds
-        if reference_subcarrier_index >= csi_batch.shape[-1]:
-            reference_subcarrier_index = 0
-        
-        # Apply phase calibration per UE antenna
-        calibrated_csi_batch = csi_batch.clone()
-        
-        batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers = csi_batch.shape
+        # Apply correction per CSI independently
+        corrected_csi = csi.clone()
+        batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers = csi.shape
         
         for batch_idx in range(batch_size):
             for bs_idx in range(num_bs_antennas):
                 for ue_idx in range(num_ue_antennas):
-                    # Get CSI for this specific UE antenna
-                    ue_csi = csi_batch[batch_idx, bs_idx, ue_idx, :]  # [num_subcarriers]
+                    # Get CSI for this specific antenna pair
+                    antenna_csi = csi[batch_idx, bs_idx, ue_idx, :]  # [num_subcarriers]
                     
-                    # Get reference phase from the reference subcarrier
-                    reference_phase = torch.angle(ue_csi[reference_subcarrier_index])
+                    # Get reference subcarrier value
+                    reference_value = antenna_csi[reference_idx]
                     
-                    # Apply phase differential calibration
-                    calibrated_ue_csi = ue_csi * torch.exp(-1j * reference_phase)
-                    
-                    # Store calibrated CSI
-                    calibrated_csi_batch[batch_idx, bs_idx, ue_idx, :] = calibrated_ue_csi
+                    # Avoid division by zero
+                    if torch.abs(reference_value) < 1e-12:
+                        # If reference is too small, use identity correction
+                        corrected_csi[batch_idx, bs_idx, ue_idx, :] = antenna_csi
+                    else:
+                        # Apply full correction: CSI / reference
+                        # This normalizes both phase and amplitude
+                        corrected_csi[batch_idx, bs_idx, ue_idx, :] = antenna_csi / reference_value
         
-        logger.debug(f"🔧 Applied phase differential calibration to batch")
-        logger.debug(f"   Batch shape: {csi_batch.shape}")
-        logger.debug(f"   Reference subcarrier: {reference_subcarrier_index}")
+        logger.debug(f"🔧 Applied full CSI calibration (phase and amplitude)")
+        logger.debug(f"   Reference subcarrier index: {reference_idx}")
+        logger.debug(f"   CSI shape: {csi.shape}")
         
-        return calibrated_csi_batch
+        return corrected_csi
     
     def _process_single_sample(
         self, 
@@ -799,19 +765,69 @@ class PrismTrainingInterface(nn.Module):
         num_subcarriers = predictions.shape[3]
         device = predictions.device
         
-        # Check for invalid values and raise detailed exception for debugging
-        if torch.isnan(predictions).any() or torch.isinf(predictions).any():
+        # ========================================
+        # STEP 1: Check for zero targets and create valid mask
+        # ========================================
+        # Create mask for non-zero targets (valid CSI samples)
+        if torch.is_complex(targets):
+            # For complex tensors, check if magnitude is non-zero
+            target_magnitude = torch.abs(targets)
+            valid_mask = target_magnitude > 1e-12  # Threshold for "non-zero"
+        else:
+            # For real tensors, check if absolute value is non-zero
+            valid_mask = torch.abs(targets) > 1e-12
+        
+        # Count valid and invalid samples
+        total_samples = targets.numel()
+        valid_samples = valid_mask.sum().item()
+        invalid_samples = total_samples - valid_samples
+        
+        logger.info(f"🔍 Target validation: {valid_samples:,} valid samples, {invalid_samples:,} zero/invalid samples")
+        logger.info(f"📊 Valid sample ratio: {valid_samples/total_samples*100:.2f}%")
+        
+        # Check if we have any valid samples to compute loss on
+        if valid_samples == 0:
+            logger.warning("⚠️ All target CSI values are zero - skipping loss computation")
+            # Return a small positive loss to prevent training crash
+            return torch.tensor(1e-6, requires_grad=True, device=device)
+        
+        # If we have some invalid samples, log detailed information
+        if invalid_samples > 0:
+            logger.warning(f"⚠️ Found {invalid_samples:,} zero/invalid target samples ({invalid_samples/total_samples*100:.2f}%)")
+            logger.warning("   These samples will be excluded from loss computation")
+            
+            # Log which dimensions have zero targets for debugging
+            zero_batch_count = (target_magnitude.sum(dim=(1,2,3)) == 0).sum().item() if torch.is_complex(targets) else (torch.abs(targets).sum(dim=(1,2,3)) == 0).sum().item()
+            zero_bs_count = (target_magnitude.sum(dim=(0,2,3)) == 0).sum().item() if torch.is_complex(targets) else (torch.abs(targets).sum(dim=(0,2,3)) == 0).sum().item()
+            zero_ue_count = (target_magnitude.sum(dim=(0,1,3)) == 0).sum().item() if torch.is_complex(targets) else (torch.abs(targets).sum(dim=(0,1,3)) == 0).sum().item()
+            
+            logger.info(f"🔍 Zero target analysis:")
+            logger.info(f"   Zero batches: {zero_batch_count}/{batch_size}")
+            logger.info(f"   Zero BS antennas: {zero_bs_count}/{num_bs_antennas}")
+            logger.info(f"   Zero UE antennas: {zero_ue_count}/{num_ue_antennas}")
+        
+        # Apply valid mask to both predictions and targets
+        valid_predictions = predictions[valid_mask]
+        valid_targets = targets[valid_mask]
+        
+        logger.info(f"📊 Computing loss on {valid_samples:,} valid samples (filtered from {total_samples:,} total)")
+        
+        # ========================================
+        # STEP 2: Check for invalid values in valid samples only
+        # ========================================
+        # Check for invalid values in the filtered valid samples
+        if torch.isnan(valid_predictions).any() or torch.isinf(valid_predictions).any():
             # Detailed analysis for debugging
-            nan_count = torch.isnan(predictions).sum().item()
-            inf_count = torch.isinf(predictions).sum().item()
-            finite_count = torch.isfinite(predictions).sum().item()
-            total_elements = predictions.numel()
+            nan_count = torch.isnan(valid_predictions).sum().item()
+            inf_count = torch.isinf(valid_predictions).sum().item()
+            finite_count = torch.isfinite(valid_predictions).sum().item()
+            total_valid_elements = valid_predictions.numel()
             
             # Get statistics of finite values
-            finite_mask = torch.isfinite(predictions)
+            finite_mask = torch.isfinite(valid_predictions)
             if finite_mask.any():
-                finite_values = predictions[finite_mask]
-                if torch.is_complex(predictions):
+                finite_values = valid_predictions[finite_mask]
+                if torch.is_complex(valid_predictions):
                     finite_real = finite_values.real
                     finite_imag = finite_values.imag
                     stats_msg = (f"Finite values stats - Real: min={finite_real.min():.6f}, max={finite_real.max():.6f}, "
@@ -824,12 +840,12 @@ class PrismTrainingInterface(nn.Module):
                 stats_msg = "No finite values found!"
             
             error_msg = (
-                f"❌ Invalid values detected in predictions tensor!\n"
-                f"   Shape: {predictions.shape}, Dtype: {predictions.dtype}\n"
-                f"   Total elements: {total_elements:,}\n"
-                f"   NaN count: {nan_count:,} ({nan_count/total_elements*100:.2f}%)\n"
-                f"   Inf count: {inf_count:,} ({inf_count/total_elements*100:.2f}%)\n"
-                f"   Finite count: {finite_count:,} ({finite_count/total_elements*100:.2f}%)\n"
+                f"❌ Invalid values detected in valid predictions tensor!\n"
+                f"   Valid samples: {valid_samples:,} out of {total_samples:,} total\n"
+                f"   Valid elements: {total_valid_elements:,}\n"
+                f"   NaN count: {nan_count:,} ({nan_count/total_valid_elements*100:.2f}%)\n"
+                f"   Inf count: {inf_count:,} ({inf_count/total_valid_elements*100:.2f}%)\n"
+                f"   Finite count: {finite_count:,} ({finite_count/total_valid_elements*100:.2f}%)\n"
                 f"   {stats_msg}\n"
                 f"   This indicates a serious numerical issue in the model forward pass.\n"
                 f"   Check for: 1) Gradient explosion, 2) Division by zero, 3) Log of negative numbers,\n"
@@ -839,32 +855,55 @@ class PrismTrainingInterface(nn.Module):
             logger.error(error_msg)
             raise ValueError(error_msg)
         
-        
-        # Compute loss
+        # ========================================
+        # STEP 3: Compute loss on valid samples only
+        # ========================================
         try:
-            # Use original 3D predictions directly - preserve amplitude and spatial structure
-            logger.info(f"📊 Using 4D CSI format [batch, bs_antennas, ue_antennas, subcarriers] for loss calculation")
+            # Create filtered tensors with same shape as original for loss function compatibility
+            # We need to maintain the original 4D structure for the loss function
+            filtered_predictions = predictions.clone()
+            filtered_targets = targets.clone()
+            
+            # Set invalid samples to zero (they won't contribute to loss)
+            filtered_predictions[~valid_mask] = 0
+            filtered_targets[~valid_mask] = 0
+            
+            logger.info(f"📊 Using filtered 4D CSI format [batch, bs_antennas, ue_antennas, subcarriers] for loss calculation")
+            logger.info(f"📊 Computing loss on {valid_samples:,} valid samples out of {total_samples:,} total")
                 
-            # Apply phase calibration to both predictions and targets before loss computation
-            predictions_calibrated = self._apply_phase_calibration_to_batch(predictions)
-            targets_calibrated = self._apply_phase_calibration_to_batch(targets)
+            # Apply CSI calibration to filtered predictions and targets
+            predictions_calibrated = self._csi_calibration(filtered_predictions)
+            targets_calibrated = self._csi_calibration(filtered_targets)
             
             # Prepare dictionary format for LossFunction
             # All losses now use phase-calibrated tensors to preserve spatial structure
             predictions_dict = {
-                'csi': predictions_calibrated  # Phase-calibrated predictions
+                'csi': predictions_calibrated  # Phase-calibrated predictions (with zeros for invalid samples)
             }
             targets_dict = {
-                'csi': targets_calibrated  # Phase-calibrated targets
+                'csi': targets_calibrated  # Phase-calibrated targets (with zeros for invalid samples)
             }
             
             # Call loss function and get detailed components
             loss, loss_components = loss_function(predictions_dict, targets_dict)
             
+            # Log loss computation details
+            logger.info(f"📊 Loss computed on {valid_samples:,} valid samples")
+            if hasattr(loss_function, 'get_loss_components') and loss_components:
+                logger.info(f"📊 Loss components: {loss_components}")
+                
+            # Log PDP loss status
+            if hasattr(loss_function, 'pdp_enabled') and loss_function.pdp_enabled:
+                logger.info(f"📊 PDP loss enabled with weight: {loss_function.pdp_weight}")
+                if 'pdp_loss' in loss_components:
+                    logger.info(f"📊 PDP loss value: {loss_components['pdp_loss']:.6f}")
+            else:
+                logger.info(f"📊 PDP loss disabled")
                 
         except Exception as e:
             logger.error(f"Loss computation failed: {e}")
             logger.error(f"Exception type: {type(e)}")
+            logger.error(f"Valid samples: {valid_samples:,} out of {total_samples:,} total")
             logger.error(f"Predictions dict keys: {list(predictions_dict.keys())}")
             logger.error(f"Targets dict keys: {list(targets_dict.keys())}")
             import traceback
@@ -872,6 +911,9 @@ class PrismTrainingInterface(nn.Module):
             # Return a small positive loss to prevent training crash
             loss = torch.tensor(1e-6, requires_grad=True, device=device)
             
+        # ========================================
+        # STEP 4: Validate loss and return
+        # ========================================
         # Validate loss
         if not isinstance(loss, torch.Tensor):
             raise ValueError(f"Loss function must return a torch.Tensor, got {type(loss)}")
@@ -883,7 +925,13 @@ class PrismTrainingInterface(nn.Module):
             logger.error(f"Invalid loss value: {loss}")
             loss = torch.tensor(1e-6, requires_grad=True, device=device)
         
-        logger.debug(f"Loss computed: {loss.item():.6f} on {predictions.numel()} total samples")
+        # Final logging with valid sample information
+        logger.info(f"✅ Loss computed: {loss.item():.6f}")
+        logger.info(f"📊 Loss computed on {valid_samples:,} valid samples out of {total_samples:,} total ({valid_samples/total_samples*100:.2f}%)")
+        
+        # Clean up temporary variables
+        del valid_predictions, valid_targets, filtered_predictions, filtered_targets
+        
         return loss
     
     def save_checkpoint(
@@ -951,6 +999,7 @@ class PrismTrainingInterface(nn.Module):
         
         logger.info(f"💾 Checkpoint saved: {checkpoint_path}")
         logger.info(f"📊 State: epoch={self.current_epoch}, batch={self.current_batch}, best_loss={self.best_loss:.6f}")
+    
     
     def load_checkpoint(
         self, 

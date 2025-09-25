@@ -54,8 +54,7 @@ class PrismNetwork(nn.Module):
         attenuation_network_config: dict = None,
         frequency_codebook_config: dict = None,
         radiance_network_config: dict = None,
-        # CSI network configuration
-        use_csi_network: bool = False,
+        # CSI network configuration (always enabled)
         csi_network_config: dict = None,
         **kwargs
     ):
@@ -90,8 +89,7 @@ class PrismNetwork(nn.Module):
         self.radiance_network_config = radiance_network_config or {}
         
         
-        # CSI network configuration
-        self.use_csi_network = use_csi_network
+        # CSI network configuration (always enabled)
         self.csi_network_config = csi_network_config or {}
         
         # Initialize positional encoders
@@ -136,7 +134,7 @@ class PrismNetwork(nn.Module):
         
         # 2. FrequencyCodebook: Learnable frequency basis vectors
         self.frequency_codebook = FrequencyCodebook(
-            num_subcarriers=self.num_subcarriers,
+            num_subcarriers=self.num_virtual_subcarriers,  # Use virtual subcarriers (1632)
             basis_dim=self.frequency_codebook_config.get('basis_dim', 32),  # R-dimensional
             initialization=self.frequency_codebook_config.get('initialization', 'complex_normal'),
             std=self.frequency_codebook_config.get('std', 0.1),
@@ -164,23 +162,18 @@ class PrismNetwork(nn.Module):
         
         # 5. LowRankTransformer has been removed
         
-        # 6. CSINetwork: Enhance CSI using Transformer
-        if self.use_csi_network:
-            self.csi_network = CSINetwork(
-                d_model=self.csi_network_config.get('d_model', 128),
-                n_layers=self.csi_network_config.get('n_layers', 2),
-                n_heads=self.csi_network_config.get('n_heads', 8),
-                d_ff=self.csi_network_config.get('d_ff', 512),
-                dropout_rate=self.csi_network_config.get('dropout_rate', 0.1),
-                smoothing_weight=self.csi_network_config.get('smoothing_weight', 0.1),
-                magnitude_constraint=self.csi_network_config.get('magnitude_constraint', True),
-                max_magnitude=self.csi_network_config.get('max_magnitude', 5.0)
-            )
-            logger.info("🔧 CSINetwork initialized and enabled")
-        else:
-            self.csi_network = None
-            logger.info("🔧 CSINetwork disabled")
-        
+        # 6. CSINetwork: Enhance CSI using Transformer (always enabled)
+        # Use num_subcarriers from CSI network config (real subcarriers: 408)
+        self.csi_network = CSINetwork(
+            d_model=self.csi_network_config.get('d_model', 128),
+            n_layers=self.csi_network_config.get('n_layers', 2),
+            n_heads=self.csi_network_config.get('n_heads', 8),
+            d_ff=self.csi_network_config.get('d_ff', 512),
+            dropout_rate=self.csi_network_config.get('dropout_rate', 0.1),
+            num_subcarriers=self.csi_network_config.get('num_subcarriers', 64),
+            smoothing_weight=self.csi_network_config.get('smoothing_weight', 0.0),
+            smoothing_type=self.csi_network_config.get('smoothing_type', 'phase_preserve')
+        )        
         # Initialize network weights for better training
         self._init_weights()
         
@@ -581,7 +574,7 @@ class PrismNetwork(nn.Module):
     
     def enhance_csi(self, csi: torch.Tensor) -> torch.Tensor:
         """
-        Enhance CSI using CSINetwork if enabled.
+        Enhance CSI using CSINetwork (always enabled).
         
         Args:
             csi: Input CSI tensor [batch_size, bs_antennas, ue_antennas, num_subcarriers] (4D)
@@ -589,14 +582,11 @@ class PrismNetwork(nn.Module):
         Returns:
             enhanced_csi: Enhanced CSI tensor [batch_size, bs_antennas, ue_antennas, num_subcarriers] (4D)
         """
-        if self.use_csi_network and self.csi_network is not None:
-            logger.debug(f"🔧 Applying CSI enhancement: {csi.shape}")
-            enhanced_csi = self.csi_network(csi)
-            logger.debug(f"✅ CSI enhancement completed: {enhanced_csi.shape}")
-            return enhanced_csi
-        else:
-            logger.debug("🔧 CSI enhancement disabled, returning original CSI")
-            return csi
+        logger.debug(f"🔧 Applying CSI enhancement: {csi.shape}")
+        max_magnitude = self.csi_network_config.get('max_magnitude', 100.0)
+        enhanced_csi = self.csi_network(csi, max_magnitude)
+        logger.debug(f"✅ CSI enhancement completed: {enhanced_csi.shape}")
+        return enhanced_csi
     
     def get_network_info(self) -> Dict[str, Any]:
         """Get information about the network architecture."""
@@ -611,7 +601,7 @@ class PrismNetwork(nn.Module):
             'max_ray_length': self.max_ray_length,
             'num_sampling_points': self.num_sampling_points,
             'use_ipe_encoding': self.use_ipe_encoding,
-            'use_csi_network': self.use_csi_network,
+            'use_csi_network': True,  # Always enabled
             'total_parameters': sum(p.numel() for p in self.parameters()),
             'trainable_parameters': sum(p.numel() for p in self.parameters() if p.requires_grad)
         }
@@ -630,7 +620,7 @@ class PrismNetwork(nn.Module):
             'num_sampling_points': self.num_sampling_points,
             'use_ipe_encoding': self.use_ipe_encoding,
             'use_mixed_precision': self.use_mixed_precision,
-            'use_csi_network': self.use_csi_network
+            'use_csi_network': True  # Always enabled
         }
 
 
