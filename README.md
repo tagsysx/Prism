@@ -20,10 +20,13 @@ Prism implements an efficient voxel-based ray tracing approach that combines dis
 - **📐 Spatial Spectrum Analysis**: Bartlett beamformer-based DOA estimation and validation
 - **⚖️ Multi-Objective Training**: Configurable loss weights for different validation aspects
 
-### Latest Features (2025)
+### Latest Features (V3.0.0 - 2025)
+- **🚀 GPU-Accelerated Analysis**: CUDA support with automatic device detection and fallback
+- **⚡ Vectorized Spatial Spectrum**: GPU batch processing with 512-sample chunks for optimal performance
+- **🎨 Comprehensive Plotting**: Dedicated plotting script with 6 types of analysis visualizations
+- **📊 Enhanced PAS Analysis**: Increased sample count from 5 to 10 for better statistical analysis
 - **🔄 Automatic GPU Selection**: No manual GPU configuration needed
 - **📈 Enhanced Training Interface**: Comprehensive training pipeline with real-time monitoring
-- **🎨 Visualization Support**: Automatic generation of spatial spectrum and CSI comparison plots
 - **⚙️ Template Configuration**: Dynamic path resolution and flexible configuration system
 - **🔧 Comprehensive Testing**: Complete testing pipeline with performance analysis
 
@@ -73,15 +76,31 @@ python scripts/test_prism.py \
 
 **3. Analyzing Results:**
 ```bash
-# Basic analysis
-python scripts/analyze.py --results results/sionna/testing/results.npz
+# Basic analysis with GPU acceleration (recommended)
+python scripts/analyze.py --config configs/sionna.yml --device cuda
 
-# Advanced analysis with parallel processing
+# Analysis with explicit results path
 python scripts/analyze.py \
     --results results/sionna/testing/results.npz \
     --output_dir results/sionna/analysis \
-    --use_parallel \
-    --num_workers 8
+    --device cuda
+
+# CPU analysis (for debugging)
+python scripts/analyze.py --config configs/sionna.yml --device cpu
+```
+
+**4. Generating Plots:**
+```bash
+# Generate all analysis plots using config file
+python scripts/plot.py --config configs/sionna.yml
+
+# Generate plots with explicit analysis directory
+python scripts/plot.py --analysis-dir results/sionna/testing/analysis
+
+# Generate plots with custom output directory
+python scripts/plot.py \
+    --config configs/sionna.yml \
+    --output-dir custom/plots
 ```
 
 ### Generating Synthesized Dataset
@@ -152,9 +171,9 @@ python scripts/test_prism.py \
 
 ### Analyzing Results
 
-**Most concise analysis command:**
+**Most concise analysis command (GPU-accelerated):**
 ```bash
-python scripts/analyze.py --results results/sionna/testing/results.npz
+python scripts/analyze.py --config configs/sionna.yml --device cuda
 ```
 
 **Analyze with custom parameters:**
@@ -162,19 +181,79 @@ python scripts/analyze.py --results results/sionna/testing/results.npz
 python scripts/analyze.py \
     --results results/sionna/testing/results.npz \
     --output_dir results/sionna/analysis \
-    --num_samples 100 \
-    --use_parallel
+    --device cuda \
+    --fft-size 2048
 ```
 
 **Analyze with specific configuration:**
 ```bash
 python scripts/analyze.py \
-    --results results/sionna/testing/results.npz \
     --config configs/sionna.yml \
     --output_dir results/sionna/analysis \
-    --no-parallel \
-    --num_workers 4
+    --device auto
 ```
+
+### 🎨 Plotting and Visualization
+
+Prism includes a comprehensive plotting system that generates high-quality visualizations for CSI analysis results. The plotting functionality is separated into a dedicated script for better organization and performance.
+
+#### Available Plot Types
+
+1. **CSI MAE CDF Plots**: Amplitude and phase distribution analysis
+2. **Demo CSI Samples**: Individual sample comparisons (amplitude, phase, cos(phase))
+3. **Demo PAS Samples**: Spatial spectrum comparisons (BS and UE antennas)
+4. **Demo PDP Samples**: Power delay profile comparisons
+5. **PDP Similarity CDF**: Similarity metrics distribution (cosine, NMSE, SSIM)
+6. **PAS Similarity CDF**: Spatial spectrum similarity analysis
+
+#### Plot Generation Commands
+
+**Generate all plots using config file:**
+```bash
+python scripts/plot.py --config configs/sionna.yml
+```
+
+**Generate plots with explicit analysis directory:**
+```bash
+python scripts/plot.py --analysis-dir results/sionna/testing/analysis
+```
+
+**Generate plots with custom output directory:**
+```bash
+python scripts/plot.py \
+    --config configs/sionna.yml \
+    --output-dir custom/plots
+```
+
+#### Plot Output Structure
+
+```
+results/sionna/testing/plots/
+├── csi_mae_cdf.png              # CSI amplitude/phase analysis
+├── pdp_similarity_cdf.png       # PDP similarity metrics
+├── pas_similarity_cdf.png       # PAS similarity metrics
+├── csi_samples/                 # Individual CSI sample plots
+│   ├── csi_sample_0.png
+│   ├── csi_sample_1.png
+│   └── ...
+├── pas/                         # PAS spatial spectrum plots
+│   ├── bs_spatial_spectrum_sample_0_batch_0_subcarrier_50.png
+│   ├── ue_spatial_spectrum_sample_0_batch_0_subcarrier_50.png
+│   └── ...
+└── pdp/                         # PDP comparison plots
+    ├── pdp_sample_0_bs_0_ue_0.png
+    ├── pdp_sample_1_bs_0_ue_0.png
+    └── ...
+```
+
+#### Plot Features
+
+- **High-Quality Output**: 300 DPI PNG files with professional formatting
+- **Comprehensive Metrics**: Cosine similarity, NMSE, SSIM analysis
+- **Statistical Analysis**: CDF plots for distribution analysis
+- **Sample Visualization**: Individual sample comparisons for detailed inspection
+- **Spatial Spectrum**: 2D spatial spectrum visualization for antenna analysis
+- **Automatic Organization**: Structured output directories for easy navigation
 
 ### Python API Usage
 
@@ -285,13 +364,23 @@ Options:
 python scripts/analyze.py [OPTIONS]
 
 Options:
-  --results RESULTS_FILE   Path to results.npz file (required)
-  --config CONFIG_FILE     Path to configuration file
+  --config CONFIG_FILE     Path to configuration file (required)
+  --results RESULTS_FILE   Path to results.npz file (optional, auto-detect from config)
   --output_dir DIR         Output directory for analysis
-  --num_samples N         Number of samples to analyze
-  --use_parallel          Enable parallel processing
-  --no-parallel           Disable parallel processing
-  --num_workers N         Number of parallel workers
+  --device DEVICE          Device to use (cuda/cpu/auto, default: auto)
+  --fft-size N            FFT size for PDP computation (default: 2048)
+  --num-workers N         Number of parallel workers (deprecated, kept for compatibility)
+```
+
+### Plotting Script (`scripts/plot.py`)
+
+```bash
+python scripts/plot.py [OPTIONS]
+
+Options:
+  --config CONFIG_FILE     Path to configuration file (required if --analysis-dir not used)
+  --analysis-dir DIR       Path to analysis directory containing JSON files
+  --output-dir DIR         Path to save plots (defaults to config-based or analysis-dir parent/plots)
 ```
 
 ## ⚙️ Configuration
@@ -349,11 +438,16 @@ python scripts/test_prism.py \
     --checkpoint results/experiment_1/training/models/best_model.pt \
     --output_dir results/experiment_1/testing
 
-# 4. Analyze results
+# 4. Analyze results with GPU acceleration
 python scripts/analyze.py \
-    --results results/experiment_1/testing/results.npz \
+    --config configs/sionna.yml \
     --output_dir results/experiment_1/analysis \
-    --use_parallel
+    --device cuda
+
+# 5. Generate comprehensive plots
+python scripts/plot.py \
+    --config configs/sionna.yml \
+    --output-dir results/experiment_1/plots
 ```
 
 ### Example 2: Using Different Datasets
@@ -374,18 +468,21 @@ python scripts/test_prism.py \
 ### Example 3: Performance Analysis
 
 ```bash
-# Analyze with parallel processing for large datasets
+# Analyze with GPU acceleration for large datasets
 python scripts/analyze.py \
-    --results results/sionna/testing/results.npz \
-    --use_parallel \
-    --num_workers 16 \
-    --num_samples 10000
+    --config configs/sionna.yml \
+    --device cuda \
+    --fft-size 2048
 
-# Analyze without parallel processing (for debugging)
+# Generate comprehensive plots for analysis
+python scripts/plot.py \
+    --config configs/sionna.yml \
+    --output-dir results/sionna/plots
+
+# CPU analysis (for debugging or systems without GPU)
 python scripts/analyze.py \
-    --results results/sionna/testing/results.npz \
-    --no-parallel \
-    --num_samples 100
+    --config configs/sionna.yml \
+    --device cpu
 ```
 
 ## 📚 Documentation
@@ -436,6 +533,9 @@ If you use Prism in your research, please cite:
 - **Training Speed**: ~2-3 minutes/epoch on RTX 4090 (100 positions)
 - **Memory Usage**: ~8-12GB GPU memory during training
 - **Inference Speed**: ~50ms per position prediction
+- **GPU Analysis**: ~10x speedup on NVIDIA A100 with vectorized spatial spectrum computation
+- **Batch Processing**: 512-sample chunks for optimal GPU memory utilization
+- **Plot Generation**: High-quality 300 DPI plots with comprehensive metrics
 
 ## 🆘 Support & Community
 
