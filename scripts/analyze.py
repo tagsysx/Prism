@@ -18,10 +18,12 @@ Features:
 - Detailed visualizations and statistical analysis
 - Export results to JSON and plots
 - Automatic path resolution from config files
-- Parallel processing for spatial spectrum computation (significant speedup)
-- Vectorized Bartlett algorithm implementation for improved performance
+- **GPU-accelerated spatial spectrum computation with significant speedup**
+- **Vectorized Bartlett algorithm implementation optimized for GPU**
+- **Memory-efficient batch processing to handle large datasets**
 - NMSE-based accuracy calculation (most scientific and professional approach)
 - Signal fidelity percentage measurement: Accuracy (%) = max(0, (1 - NMSE) × 100)
+- Automatic device detection with fallback to CPU
 """
 
 import os
@@ -36,10 +38,8 @@ import json
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 import h5py
-from multiprocessing import Pool, cpu_count
-from functools import partial
 import warnings
-# Note: SSIM implementation will be added inline to avoid dependency issues
+from pytorch_msssim import ssim
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -69,7 +69,7 @@ class CSIAnalyzer:
     """
     
     def __init__(self, config_path: str, results_path: str = None, output_dir: str = None, fft_size: int = 2048, 
-                 num_workers: int = None):
+                 num_workers: int = None, device: str = None):
         """
         Initialize CSI analyzer
         
@@ -78,14 +78,23 @@ class CSIAnalyzer:
             results_path: Path to test results (.npz file) - optional, will auto-detect from config
             output_dir: Output directory for analysis results
             fft_size: FFT size for PDP computation
-            num_workers: Number of parallel workers (default: CPU count - 1)
+            num_workers: Number of parallel workers (deprecated, kept for compatibility)
+            device: Device to use for computation ('cuda', 'cpu', or None for auto-detect)
         """
         self.config_path = Path(config_path)
         self.fft_size = fft_size
-        self.num_workers = num_workers if num_workers is not None else max(1, cpu_count() - 1)
         
-        # Load configuration
+        # Load configuration first
         self.config_loader = ModernConfigLoader(self.config_path)
+        
+        # Setup device for GPU computation
+        if device is None:
+            # Auto-detect device from config or use CUDA if available
+            self.device = self._setup_device()
+        else:
+            self.device = torch.device(device)
+        
+        logger.info(f"🔧 Using device: {self.device}")
         
         # Load spatial spectrum configuration
         testing_config = self.config_loader._processed_config.get('testing', {})
@@ -93,16 +102,15 @@ class CSIAnalyzer:
         self.ignore_amplitude = ss_error_config.get('ignore_amplitude', False)  # Default to False
         self.ss_sample_count = ss_error_config.get('count', 500)  # Default to 500 samples
         
-        # Load analysis configuration for parallel processing
+        # Load analysis configuration
         analysis_config = self.config_loader._processed_config.get('analysis', {})
         pas_config = analysis_config.get('pas', {})
-        self.use_parallel = pas_config.get('use_parallel', True)  # Default to True
         self.pas_enabled = pas_config.get('enabled', True)  # Default to True
         
         logger.info(f"📋 Ignore amplitude for spatial spectrum: {self.ignore_amplitude}")
         logger.info(f"📋 Spatial spectrum sample count: {self.ss_sample_count}")
         logger.info(f"📋 PAS analysis enabled: {self.pas_enabled}")
-        logger.info(f"📋 Use parallel processing: {self.use_parallel}")
+        logger.info(f"📋 Using GPU for spatial spectrum computation")
         
         # Determine results path
         if results_path:
@@ -136,8 +144,26 @@ class CSIAnalyzer:
         logger.info(f"   Results path: {self.results_path}")
         logger.info(f"   Output directory: {self.output_dir}")
         logger.info(f"   FFT size for PDP: {self.fft_size}")
-        logger.info(f"   Parallel processing: {self.use_parallel}")
+        logger.info(f"   Device: {self.device}")
         logger.info(f"   Data shape: {self.predictions.shape}")
+    
+    def _setup_device(self) -> torch.device:
+        """Setup computation device based on availability and configuration"""
+        # Check if CUDA is available
+        if torch.cuda.is_available():
+            # Get device from config if available
+            system_config = self.config_loader._processed_config.get('system', {})
+            device_name = system_config.get('device', 'cuda')
+            
+            if device_name == 'cuda':
+                device = torch.device('cuda')
+                logger.info(f"🚀 CUDA available, using GPU: {torch.cuda.get_device_name()}")
+                logger.info(f"   GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+                return device
+        
+        # Fallback to CPU
+        logger.info("💻 Using CPU for computation")
+        return torch.device('cpu')
     
     def _is_target_csi_zero(self, target_csi: torch.Tensor, threshold: float = 1e-12) -> bool:
         """
@@ -201,14 +227,18 @@ class CSIAnalyzer:
             elif self.targets.dtype == torch.float64:
                 self.targets = self.targets.to(torch.complex128)
         
+        # Move data to device
+        self.predictions = self.predictions.to(self.device)
+        self.targets = self.targets.to(self.device)
+        
         # Extract position data (optional)
         if 'test_ue_positions' in data:
-            self.ue_positions = torch.from_numpy(data['test_ue_positions']).float()
+            self.ue_positions = torch.from_numpy(data['test_ue_positions']).float().to(self.device)
         else:
             self.ue_positions = None
             
         if 'test_bs_positions' in data:
-            self.bs_positions = torch.from_numpy(data['test_bs_positions']).float()
+            self.bs_positions = torch.from_numpy(data['test_bs_positions']).float().to(self.device)
         else:
             self.bs_positions = None
         
@@ -800,7 +830,7 @@ class CSIAnalyzer:
         self._create_demo_pas_samples()
     
     def _create_demo_pas_samples(self):
-        """Create demo PAS samples file with 5 BS and 5 UE samples"""
+        """Create demo PAS samples file with 10 BS and 10 UE samples"""
         logger.info("📊 Creating demo PAS samples file...")
         
         demo_data = {
@@ -818,7 +848,7 @@ class CSIAnalyzer:
         if bs_demo_file.exists():
             with open(bs_demo_file, 'r') as f:
                 bs_demo_data = json.load(f)
-                demo_data['bs_samples'] = bs_demo_data['demo_samples'][:5]  # Take first 5 samples
+                demo_data['bs_samples'] = bs_demo_data['demo_samples'][:10]  # Take first 10 samples
                 demo_data['demo_info']['bs_samples'] = len(demo_data['bs_samples'])
         
         # Load UE demo samples
@@ -826,7 +856,7 @@ class CSIAnalyzer:
         if ue_demo_file.exists():
             with open(ue_demo_file, 'r') as f:
                 ue_demo_data = json.load(f)
-                demo_data['ue_samples'] = ue_demo_data['demo_samples'][:5]  # Take first 5 samples
+                demo_data['ue_samples'] = ue_demo_data['demo_samples'][:10]  # Take first 10 samples
                 demo_data['demo_info']['ue_samples'] = len(demo_data['ue_samples'])
         
         # Save unified demo file
@@ -885,9 +915,15 @@ class CSIAnalyzer:
             all_samples = [all_samples[i] for i in selected_samples]
             logger.info(f"   Randomly selected {max_samples} samples from {batch_size * num_antennas * num_subcarriers} total samples")
         
-        # Process samples with parallel computation
-        # Prepare arguments for parallel processing
-        process_args = []
+        # Process samples with GPU batch computation
+        logger.info(f"   🚀 Starting GPU batch processing of spatial spectrum samples...")
+        
+        # Prepare batch data
+        valid_samples = []
+        pred_csi_list = []
+        target_csi_list = []
+        subcarrier_indices_list = []
+        
         for batch_idx, antenna_idx, subcarrier_idx in all_samples:
             # Extract CSI for this sample
             if antenna_type == "BS":
@@ -906,67 +942,107 @@ class CSIAnalyzer:
                 logger.warning(f"Skipping spatial spectrum analysis for sample {batch_idx}, antenna {antenna_idx}, subcarrier {subcarrier_idx}, {antenna_type} antennas - target CSI is zero (no ground truth)")
                 continue
             
-            process_args.append((
-                pred_csi, target_csi, antenna_type, array_shape, spacing_x, spacing_y,
-                center_freq, subcarrier_spacing, subcarrier_idx, ignore_amplitude, is_2d_array,
-                batch_idx, antenna_idx
-            ))
+            valid_samples.append((batch_idx, antenna_idx, subcarrier_idx))
+            pred_csi_list.append(pred_csi)
+            target_csi_list.append(target_csi)
+            subcarrier_indices_list.append(subcarrier_idx)
         
-        # Use parallel processing if enabled
-        if self.use_parallel:
-            try:
-                max_processes = min(cpu_count(), 32)  # Cap to prevent overload
-                logger.info(f"   Using parallel processing with {max_processes} CPU cores (capped from {cpu_count()})...")
-                logger.info(f"   Starting parallel processing of {len(process_args)} spatial spectrum samples...")
-                
-                with Pool(processes=max_processes) as pool:
-                    # Create partial function with fixed parameters
-                    process_func = partial(self._process_single_spatial_spectrum)
-                    
-                    # Use starmap for better compatibility (no lambda needed)
-                    logger.info("   Pool created successfully, starting computation...")
-                    logger.info(f"   Processing {len(process_args)} samples with {max_processes} workers...")
-                    
-                    # Add timeout and progress tracking
-                    import time
-                    start_time = time.time()
-                    
-                    # Process in chunks for better progress tracking
-                    chunk_size = max(1, len(process_args) // 10)  # Process in 10 chunks
-                    results = []
-                    
-                    for i in range(0, len(process_args), chunk_size):
-                        chunk = process_args[i:i + chunk_size]
-                        logger.info(f"   Processing chunk {i//chunk_size + 1}/10 ({len(chunk)} samples)...")
-                        
-                        chunk_start = time.time()
-                        chunk_results = pool.starmap(process_func, chunk)
-                        chunk_time = time.time() - chunk_start
-                        
-                        results.extend(chunk_results)
-                        logger.info(f"   Chunk {i//chunk_size + 1} completed in {chunk_time:.2f}s")
-                        
-                        # Check for timeout (5 minutes per chunk)
-                        if chunk_time > 300:
-                            logger.warning(f"   Chunk {i//chunk_size + 1} took {chunk_time:.2f}s (longer than expected)")
-                    
-                    total_time = time.time() - start_time
-                    logger.info(f"   Parallel processing completed successfully in {total_time:.2f}s!")
-                    
-            except Exception as e:
-                logger.error(f"Parallel processing failed: {e}. Falling back to sequential...")
-                self.use_parallel = False  # Disable for this run
+        if not pred_csi_list:
+            logger.warning(f"   No valid samples found for {antenna_type} spatial spectrum analysis!")
+            return {
+                'antenna_type': antenna_type,
+                'array_shape': array_shape,
+                'is_2d_array': is_2d_array,
+                'total_samples': 0,
+                'similarity_file': None
+            }
         
-        if not self.use_parallel:
-            logger.info("   Using sequential processing...")
-            logger.info(f"   Starting sequential processing of {len(process_args)} spatial spectrum samples...")
-            results = []
-            process_func = partial(self._process_single_spatial_spectrum)
-            total_args = len(process_args)
-            for i, args in enumerate(process_args, 1):
-                results.append(process_func(*args))
-                if i % 10 == 0 or i == total_args:  # Log every 10 items or at completion
-                    logger.info(f"     Sequential progress: {i}/{total_args} ({i/total_args*100:.1f}%)")
+        # Process in chunks to manage GPU memory
+        chunk_size = 512  # Process 512 samples at a time to avoid GPU OOM
+        total_samples = len(pred_csi_list)
+        
+        logger.info(f"   Processing {total_samples} valid samples in GPU batches of {chunk_size}...")
+        
+        # Initialize result storage
+        pred_spatial_spectra_list = []
+        target_spatial_spectra_list = []
+        
+        import time
+        start_time = time.time()
+        
+        # Process in chunks
+        for chunk_start in range(0, total_samples, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, total_samples)
+            chunk_indices = slice(chunk_start, chunk_end)
+            
+            logger.info(f"     Processing chunk {chunk_start//chunk_size + 1}/{(total_samples-1)//chunk_size + 1}: samples {chunk_start}-{chunk_end-1}")
+            
+            # Stack CSI data for this chunk
+            pred_csi_chunk = torch.stack(pred_csi_list[chunk_indices], dim=0)  # [chunk_size, num_antennas]
+            target_csi_chunk = torch.stack(target_csi_list[chunk_indices], dim=0)  # [chunk_size, num_antennas]
+            subcarrier_indices_chunk = torch.tensor(subcarrier_indices_list[chunk_indices], device=self.device)  # [chunk_size]
+            
+            # Compute spatial spectra for this chunk
+            pred_chunk_spectra = self._compute_spatial_spectrum_batch(
+                pred_csi_chunk, antenna_type, array_shape, spacing_x, spacing_y,
+                center_freq, subcarrier_spacing, subcarrier_indices_chunk, ignore_amplitude, is_2d_array
+            )
+            
+            target_chunk_spectra = self._compute_spatial_spectrum_batch(
+                target_csi_chunk, antenna_type, array_shape, spacing_x, spacing_y,
+                center_freq, subcarrier_spacing, subcarrier_indices_chunk, ignore_amplitude, is_2d_array
+            )
+            
+            # Store results
+            pred_spatial_spectra_list.append(pred_chunk_spectra)
+            target_spatial_spectra_list.append(target_chunk_spectra)
+            
+            # Clear GPU cache to free memory
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        
+        # Concatenate all chunks
+        pred_spatial_spectra = torch.cat(pred_spatial_spectra_list, dim=0)
+        target_spatial_spectra = torch.cat(target_spatial_spectra_list, dim=0)
+        
+        computation_time = time.time() - start_time
+        logger.info(f"   ✅ GPU batch computation completed in {computation_time:.2f}s!")
+        
+        # Report GPU memory usage if available
+        if torch.cuda.is_available():
+            memory_allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+            memory_reserved = torch.cuda.memory_reserved() / 1024**3  # GB
+            logger.info(f"   📊 GPU Memory: {memory_allocated:.2f}GB allocated, {memory_reserved:.2f}GB reserved")
+        
+        # Compute similarity metrics for all samples
+        logger.info(f"   Computing similarity metrics for {len(pred_csi_list)} samples...")
+        
+        results = []
+        for i in range(len(pred_csi_list)):
+            batch_idx, antenna_idx, subcarrier_idx = valid_samples[i]
+            
+            # Get spatial spectra for this sample
+            pred_spectrum = pred_spatial_spectra[i]  # [azimuth] or [azimuth, elevation]
+            target_spectrum = target_spatial_spectra[i]  # [azimuth] or [azimuth, elevation]
+            
+            # Compute similarity metrics
+            similarity_metrics = self._compute_spatial_spectrum_similarity_gpu(pred_spectrum, target_spectrum)
+            
+            # Calculate wavelength for this sample
+            subcarrier_freq = center_freq + (subcarrier_idx - pred_csi_batch.shape[-1]//2) * subcarrier_spacing
+            wavelength = 3e8 / subcarrier_freq
+            
+            results.append({
+                'batch_idx': batch_idx,
+                'antenna_idx': antenna_idx,
+                'subcarrier_idx': subcarrier_idx,
+                'predicted_spectrum': pred_spectrum.cpu().numpy().tolist(),
+                'target_spectrum': target_spectrum.cpu().numpy().tolist(),
+                'similarity_metrics': similarity_metrics,
+                'subcarrier_frequency': float(subcarrier_freq),
+                'wavelength': float(wavelength),
+                'antenna_type': antenna_type
+            })
         
         logger.info(f"   Completed processing of {len(results)} spatial spectra")
         
@@ -984,7 +1060,7 @@ class CSIAnalyzer:
         # Randomly select 5 samples for demo
         logger.info(f"   Selecting 5 random samples for {antenna_type} demo...")
         np.random.seed(42)  # For reproducibility
-        demo_indices = np.random.choice(len(results), size=min(5, len(results)), replace=False)
+        demo_indices = np.random.choice(len(results), size=min(20, len(results)), replace=False)
         
         demo_samples = []
         for idx in demo_indices:
@@ -1063,66 +1139,11 @@ class CSIAnalyzer:
         except (ValueError, IndexError) as e:
             raise ValueError(f"Failed to parse array configuration '{config_str}': {e}")
     
-    def _process_single_spatial_spectrum(self, pred_csi: torch.Tensor, target_csi: torch.Tensor,
-                                        antenna_type: str, array_shape: tuple, spacing_x: float, spacing_y: float,
-                                        center_freq: float, subcarrier_spacing: float, subcarrier_idx: int,
-                                        ignore_amplitude: bool, is_2d_array: bool,
-                                        batch_idx: int, antenna_idx: int) -> dict:
-        """Process a single spatial spectrum computation for parallel processing"""
-        # Compute spatial spectrum for this sample
-        sample_result = self._compute_single_spatial_spectrum(
-            pred_csi, target_csi, antenna_type, array_shape, spacing_x, spacing_y,
-            center_freq, subcarrier_spacing, subcarrier_idx, ignore_amplitude, is_2d_array
-        )
-        
-        sample_result['batch_idx'] = batch_idx
-        sample_result['antenna_idx'] = antenna_idx
-        sample_result['subcarrier_idx'] = subcarrier_idx
-        
-        return sample_result
+    # NOTE: Legacy single sample processing functions removed - replaced with GPU batch processing
+    # def _process_single_spatial_spectrum(...) - removed
+    # def _compute_single_spatial_spectrum(...) - removed
 
-    def _compute_single_spatial_spectrum(self, pred_csi: torch.Tensor, target_csi: torch.Tensor,
-                                         antenna_type: str, array_shape: tuple, spacing_x: float, spacing_y: float,
-                                         center_freq: float, subcarrier_spacing: float, subcarrier_idx: int,
-                                         ignore_amplitude: bool, is_2d_array: bool) -> dict:
-        """Compute spatial spectrum for a single CSI sample - single spectrum for one antenna pair"""
-        
-        # Calculate wavelength for this subcarrier
-        subcarrier_freq = center_freq + (subcarrier_idx - pred_csi.shape[-1]//2) * subcarrier_spacing
-        wavelength = 3e8 / subcarrier_freq  # Speed of light / frequency
-        
-        # Apply amplitude handling
-        if ignore_amplitude:
-            pred_csi = torch.exp(1j * torch.angle(pred_csi))
-            target_csi = torch.exp(1j * torch.angle(target_csi))
-        
-        # Compute spatial spectrum for this single antenna pair
-        if is_2d_array:
-            pred_spectrum = self._compute_2d_spatial_spectrum(
-                pred_csi, array_shape, spacing_x, spacing_y, wavelength
-            )
-            target_spectrum = self._compute_2d_spatial_spectrum(
-                target_csi, array_shape, spacing_x, spacing_y, wavelength
-            )
-        else:
-            pred_spectrum = self._compute_1d_spatial_spectrum(
-                pred_csi, array_shape, spacing_x, wavelength
-            )
-            target_spectrum = self._compute_1d_spatial_spectrum(
-                target_csi, array_shape, spacing_x, wavelength
-            )
-        
-        # Compute similarity metrics
-        similarity_metrics = self._compute_spatial_spectrum_similarity(pred_spectrum, target_spectrum)
-        
-        return {
-            'subcarrier_frequency': float(subcarrier_freq),
-            'wavelength': float(wavelength),
-            'predicted_spectrum': pred_spectrum.tolist(),
-            'target_spectrum': target_spectrum.tolist(),
-            'antenna_type': antenna_type,
-            'similarity_metrics': similarity_metrics
-        }
+    # NOTE: _compute_single_spatial_spectrum function removed - replaced with GPU batch processing
     
     def _compute_1d_spatial_spectrum(self, csi: torch.Tensor, array_shape: tuple, 
                                    spacing: float, wavelength: float) -> torch.Tensor:
@@ -1136,18 +1157,37 @@ class CSIAnalyzer:
         # Create angle grid for 1D (azimuth only)
         azimuth_angles = torch.linspace(0, 180, 180, dtype=torch.float32, device=csi.device)  # 0-180 degrees
         
-        # Initialize spatial spectrum
-        spatial_spectrum = torch.zeros(len(azimuth_angles), device=csi.device)
+        # Vectorized computation for all angles at once
+        spatial_spectrum = self._compute_1d_spatial_spectrum_vectorized(
+            csi, num_antennas, spacing, wavelength, azimuth_angles
+        )
         
-        # Compute Bartlett beamformer for each angle
-        for i, az in enumerate(azimuth_angles):
-            # Create steering vector for linear array
-            steering_vector = self._create_1d_steering_vector(az, num_antennas, spacing, wavelength, csi.device)
-            
-            # Compute Bartlett beamformer output for 1D vectors
-            # csi: [num_antennas], steering_vector: [num_antennas]
-            response = torch.sum(csi * torch.conj(steering_vector))
-            spatial_spectrum[i] = torch.abs(response) ** 2
+        return spatial_spectrum
+    
+    def _compute_1d_spatial_spectrum_vectorized(self, csi: torch.Tensor, num_antennas: int,
+                                              spacing: float, wavelength: float, 
+                                              azimuth_angles: torch.Tensor) -> torch.Tensor:
+        """Vectorized 1D spatial spectrum computation for GPU"""
+        # Convert angles to radians
+        az_rad = azimuth_angles * torch.pi / 180.0  # [num_angles]
+        
+        # Create antenna positions (linear array along x-axis)
+        antenna_positions = torch.arange(num_antennas, dtype=torch.float32, device=csi.device) * spacing  # [num_antennas]
+        
+        # Compute phase progression for all angles at once
+        # az_rad: [num_angles], antenna_positions: [num_antennas]
+        # Result: [num_angles, num_antennas]
+        phase_progression = 2 * torch.pi * antenna_positions.unsqueeze(0) * torch.cos(az_rad).unsqueeze(1) / wavelength
+        
+        # Create steering vectors for all angles
+        steering_vectors = torch.exp(1j * phase_progression)  # [num_angles, num_antennas]
+        
+        # Compute Bartlett beamformer output for all angles
+        # csi: [num_antennas], steering_vectors: [num_angles, num_antennas]
+        responses = torch.sum(csi.unsqueeze(0) * torch.conj(steering_vectors), dim=1)  # [num_angles]
+        
+        # Compute power spectrum
+        spatial_spectrum = torch.abs(responses) ** 2
         
         return spatial_spectrum
     
@@ -1164,23 +1204,216 @@ class CSIAnalyzer:
         azimuth_angles = torch.linspace(0, 360, 181, dtype=torch.float32, device=csi.device)  # 0-360 degrees, 2-degree steps
         elevation_angles = torch.linspace(0, 90, 46, dtype=torch.float32, device=csi.device)  # 0-90 degrees, 2-degree steps
         
-        # Initialize spatial spectrum
-        spatial_spectrum = torch.zeros(len(azimuth_angles), len(elevation_angles), device=csi.device)
-        
-        # Compute Bartlett beamformer for each angle pair
-        for i, az in enumerate(azimuth_angles):
-            for j, el in enumerate(elevation_angles):
-                # Create steering vector for planar array
-                steering_vector = self._create_2d_steering_vector(
-                    az, el, num_antennas_x, num_antennas_y, spacing_x, spacing_y, wavelength, csi.device
-                )
-                
-                # Compute Bartlett beamformer output for 1D vectors
-                # csi: [num_antennas], steering_vector: [num_antennas]
-                response = torch.sum(csi * torch.conj(steering_vector))
-                spatial_spectrum[i, j] = torch.abs(response) ** 2
+        # Vectorized computation for all angle pairs at once
+        spatial_spectrum = self._compute_2d_spatial_spectrum_vectorized(
+            csi, num_antennas_x, num_antennas_y, spacing_x, spacing_y, wavelength, 
+            azimuth_angles, elevation_angles
+        )
         
         return spatial_spectrum
+    
+    def _compute_2d_spatial_spectrum_vectorized(self, csi: torch.Tensor, num_antennas_x: int, num_antennas_y: int,
+                                              spacing_x: float, spacing_y: float, wavelength: float,
+                                              azimuth_angles: torch.Tensor, elevation_angles: torch.Tensor) -> torch.Tensor:
+        """Vectorized 2D spatial spectrum computation for GPU"""
+        # Convert angles to radians
+        az_rad = azimuth_angles * torch.pi / 180.0  # [num_azimuth]
+        el_rad = elevation_angles * torch.pi / 180.0  # [num_elevation]
+        
+        # Create antenna positions (planar array)
+        antenna_positions_x = torch.arange(num_antennas_x, dtype=torch.float32, device=csi.device) * spacing_x  # [num_antennas_x]
+        antenna_positions_y = torch.arange(num_antennas_y, dtype=torch.float32, device=csi.device) * spacing_y  # [num_antennas_y]
+        
+        # Create meshgrid for 2D positions
+        pos_x, pos_y = torch.meshgrid(antenna_positions_x, antenna_positions_y, indexing='ij')  # [num_antennas_x, num_antennas_y]
+        pos_x_flat = pos_x.flatten()  # [num_antennas]
+        pos_y_flat = pos_y.flatten()  # [num_antennas]
+        
+        # Create angle meshgrids
+        az_grid, el_grid = torch.meshgrid(az_rad, el_rad, indexing='ij')  # [num_azimuth, num_elevation]
+        
+        # Compute phase progression for all angle pairs at once
+        # az_grid: [num_azimuth, num_elevation], el_grid: [num_azimuth, num_elevation]
+        # pos_x_flat: [num_antennas], pos_y_flat: [num_antennas]
+        # Result: [num_azimuth, num_elevation, num_antennas]
+        phase_progression = 2 * torch.pi * (
+            pos_x_flat.unsqueeze(0).unsqueeze(0) * torch.sin(el_grid).unsqueeze(2) * torch.cos(az_grid).unsqueeze(2) + 
+            pos_y_flat.unsqueeze(0).unsqueeze(0) * torch.sin(el_grid).unsqueeze(2) * torch.sin(az_grid).unsqueeze(2)
+        ) / wavelength
+        
+        # Create steering vectors for all angle pairs
+        steering_vectors = torch.exp(1j * phase_progression)  # [num_azimuth, num_elevation, num_antennas]
+        
+        # Compute Bartlett beamformer output for all angle pairs
+        # csi: [num_antennas], steering_vectors: [num_azimuth, num_elevation, num_antennas]
+        responses = torch.sum(csi.unsqueeze(0).unsqueeze(0) * torch.conj(steering_vectors), dim=2)  # [num_azimuth, num_elevation]
+        
+        # Compute power spectrum
+        spatial_spectrum = torch.abs(responses) ** 2
+        
+        return spatial_spectrum
+    
+    def _compute_spatial_spectrum_batch(self, csi_batch: torch.Tensor, antenna_type: str, 
+                                      array_shape: tuple, spacing_x: float, spacing_y: float,
+                                      center_freq: float, subcarrier_spacing: float, 
+                                      subcarrier_indices: torch.Tensor, ignore_amplitude: bool,
+                                      is_2d_array: bool) -> torch.Tensor:
+        """
+        Compute spatial spectrum for a batch of CSI samples on GPU
+        
+        Args:
+            csi_batch: CSI tensor of shape [batch_size, num_antennas]
+            antenna_type: "BS" or "UE"
+            array_shape: Antenna array shape tuple
+            spacing_x, spacing_y: Antenna spacing
+            center_freq: Center frequency
+            subcarrier_spacing: Subcarrier spacing
+            subcarrier_indices: Subcarrier indices for each sample [batch_size]
+            ignore_amplitude: Whether to ignore amplitude
+            is_2d_array: Whether array is 2D
+            
+        Returns:
+            spatial_spectra: Tensor of shape [batch_size, azimuth_angles, elevation_angles] or [batch_size, azimuth_angles]
+        """
+        batch_size = csi_batch.shape[0]
+        device = csi_batch.device
+        
+        # Apply amplitude handling if needed
+        if ignore_amplitude:
+            csi_batch = torch.exp(1j * torch.angle(csi_batch))
+        
+        # Calculate wavelengths for each sample
+        subcarrier_freqs = center_freq + (subcarrier_indices - csi_batch.shape[-1]//2) * subcarrier_spacing
+        wavelengths = 3e8 / subcarrier_freqs  # [batch_size]
+        
+        if is_2d_array:
+            # 2D spatial spectrum
+            num_antennas_x, num_antennas_y = array_shape
+            
+            # Create angle grids
+            azimuth_angles = torch.linspace(0, 360, 181, dtype=torch.float32, device=device)
+            elevation_angles = torch.linspace(0, 90, 46, dtype=torch.float32, device=device)
+            
+            # Convert to radians
+            az_rad = azimuth_angles * torch.pi / 180.0
+            el_rad = elevation_angles * torch.pi / 180.0
+            
+            # Create antenna positions
+            antenna_positions_x = torch.arange(num_antennas_x, dtype=torch.float32, device=device) * spacing_x
+            antenna_positions_y = torch.arange(num_antennas_y, dtype=torch.float32, device=device) * spacing_y
+            
+            # Create meshgrids
+            pos_x, pos_y = torch.meshgrid(antenna_positions_x, antenna_positions_y, indexing='ij')
+            pos_x_flat = pos_x.flatten()
+            pos_y_flat = pos_y.flatten()
+            
+            az_grid, el_grid = torch.meshgrid(az_rad, el_rad, indexing='ij')
+            
+            # Initialize output tensor
+            spatial_spectra = torch.zeros(batch_size, len(azimuth_angles), len(elevation_angles), device=device)
+            
+            # Process each sample (can be further vectorized if needed)
+            for i in range(batch_size):
+                wavelength = wavelengths[i]
+                
+                # Compute phase progression for all angle pairs
+                phase_progression = 2 * torch.pi * (
+                    pos_x_flat.unsqueeze(0).unsqueeze(0) * torch.sin(el_grid).unsqueeze(2) * torch.cos(az_grid).unsqueeze(2) + 
+                    pos_y_flat.unsqueeze(0).unsqueeze(0) * torch.sin(el_grid).unsqueeze(2) * torch.sin(az_grid).unsqueeze(2)
+                ) / wavelength
+                
+                # Create steering vectors
+                steering_vectors = torch.exp(1j * phase_progression)  # [num_azimuth, num_elevation, num_antennas]
+                
+                # Compute Bartlett beamformer output
+                responses = torch.sum(csi_batch[i].unsqueeze(0).unsqueeze(0) * torch.conj(steering_vectors), dim=2)
+                
+                # Compute power spectrum
+                spatial_spectra[i] = torch.abs(responses) ** 2
+        else:
+            # 1D spatial spectrum
+            num_antennas = array_shape[0]
+            
+            # Create angle grid
+            azimuth_angles = torch.linspace(0, 180, 180, dtype=torch.float32, device=device)
+            az_rad = azimuth_angles * torch.pi / 180.0
+            
+            # Create antenna positions
+            antenna_positions = torch.arange(num_antennas, dtype=torch.float32, device=device) * spacing_x
+            
+            # Initialize output tensor
+            spatial_spectra = torch.zeros(batch_size, len(azimuth_angles), device=device)
+            
+            # Process each sample
+            for i in range(batch_size):
+                wavelength = wavelengths[i]
+                
+                # Compute phase progression for all angles
+                phase_progression = 2 * torch.pi * antenna_positions.unsqueeze(0) * torch.cos(az_rad).unsqueeze(1) / wavelength
+                
+                # Create steering vectors
+                steering_vectors = torch.exp(1j * phase_progression)  # [num_angles, num_antennas]
+                
+                # Compute Bartlett beamformer output
+                responses = torch.sum(csi_batch[i].unsqueeze(0) * torch.conj(steering_vectors), dim=1)
+                
+                # Compute power spectrum
+                spatial_spectra[i] = torch.abs(responses) ** 2
+        
+        return spatial_spectra
+    
+    def _compute_spatial_spectrum_similarity_gpu(self, pred_spectrum: torch.Tensor, 
+                                               target_spectrum: torch.Tensor) -> dict:
+        """Compute similarity metrics between predicted and target spatial spectra on GPU"""
+        
+        # Flatten spectra for computation
+        pred_flat = pred_spectrum.flatten()
+        target_flat = target_spectrum.flatten()
+        
+        # Normalize spectra
+        pred_norm = pred_flat / (torch.sum(pred_flat) + 1e-12)
+        target_norm = target_flat / (torch.sum(target_flat) + 1e-12)
+        
+        # Compute various similarity metrics
+        # 1. Cosine similarity
+        cosine_sim = torch.sum(pred_norm * target_norm) / (
+            torch.sqrt(torch.sum(pred_norm ** 2)) * torch.sqrt(torch.sum(target_norm ** 2)) + 1e-12
+        )
+        
+        # 2. Normalized Mean Squared Error (NMSE)
+        mse = torch.mean((pred_norm - target_norm) ** 2)
+        signal_power = torch.mean(target_norm ** 2)
+        nmse = mse / (signal_power + 1e-12)
+        
+        # 3. Structural Similarity Index (SSIM) - always use 2D version for spatial spectra
+        if pred_spectrum.dim() == 2 and target_spectrum.dim() == 2:
+            # Use 2D SSIM for 2D spatial spectra (azimuth x elevation)
+            ssim = self._compute_ssim_2d(pred_spectrum, target_spectrum)
+        elif pred_spectrum.dim() == 1 and target_spectrum.dim() == 1:
+            # Convert 1D spectrum to 2D for 2D SSIM calculation
+            # Reshape 1D spectrum to 2D (azimuth x 1) for consistent 2D SSIM computation
+            pred_2d = pred_spectrum.unsqueeze(1)  # [azimuth, 1]
+            target_2d = target_spectrum.unsqueeze(1)  # [azimuth, 1]
+            ssim = self._compute_ssim_2d(pred_2d, target_2d)
+        else:
+            # Fallback to original 1D calculation (should not reach here in normal cases)
+            mu_pred = torch.mean(pred_norm)
+            mu_target = torch.mean(target_norm)
+            sigma_pred = torch.std(pred_norm)
+            sigma_target = torch.std(target_norm)
+            sigma_pred_target = torch.mean((pred_norm - mu_pred) * (target_norm - mu_target))
+            
+            c1, c2 = 0.01, 0.03  # SSIM constants
+            # Correct SSIM formula: numerator and denominator should be separate terms
+            numerator = (2 * mu_pred * mu_target + c1) * (2 * sigma_pred_target + c2)
+            denominator = (mu_pred ** 2 + mu_target ** 2 + c1) * (sigma_pred ** 2 + sigma_target ** 2 + c2)
+            ssim = numerator / (denominator + 1e-12)  # Add small epsilon to avoid division by zero
+        
+        return {
+            'cosine_similarity': float(cosine_sim.cpu().item()),
+            'nmse': float(nmse.cpu().item()),
+            'ssim': float(ssim)
+        }
     
     def _create_1d_steering_vector(self, azimuth: float, num_antennas: int, 
                                   spacing: float, wavelength: float, device: torch.device) -> torch.Tensor:
@@ -1261,18 +1494,29 @@ class CSIAnalyzer:
             nmse = mse / (signal_power + 1e-12)
             nmse_values.append(float(nmse))
             
-            # 3. Structural Similarity Index (SSIM) - corrected version
-            mu_pred = torch.mean(pred_norm)
-            mu_target = torch.mean(target_norm)
-            sigma_pred = torch.std(pred_norm)
-            sigma_target = torch.std(target_norm)
-            sigma_pred_target = torch.mean((pred_norm - mu_pred) * (target_norm - mu_target))
-            
-            c1, c2 = 0.01, 0.03  # SSIM constants
-            # Correct SSIM formula: numerator and denominator should be separate terms
-            numerator = (2 * mu_pred * mu_target + c1) * (2 * sigma_pred_target + c2)
-            denominator = (mu_pred ** 2 + mu_target ** 2 + c1) * (sigma_pred ** 2 + sigma_target ** 2 + c2)
-            ssim = numerator / (denominator + 1e-12)  # Add small epsilon to avoid division by zero
+            # 3. Structural Similarity Index (SSIM) - always use 2D version for spatial spectra
+            if pred_spectrum.dim() == 2 and target_spectrum.dim() == 2:
+                # Use 2D SSIM for 2D spatial spectra (azimuth x elevation)
+                ssim = self._compute_ssim_2d(pred_spectrum, target_spectrum)
+            elif pred_spectrum.dim() == 1 and target_spectrum.dim() == 1:
+                # Convert 1D spectrum to 2D for 2D SSIM calculation
+                # Reshape 1D spectrum to 2D (azimuth x 1) for consistent 2D SSIM computation
+                pred_2d = pred_spectrum.unsqueeze(1)  # [azimuth, 1]
+                target_2d = target_spectrum.unsqueeze(1)  # [azimuth, 1]
+                ssim = self._compute_ssim_2d(pred_2d, target_2d)
+            else:
+                # Fallback to original 1D calculation (should not reach here in normal cases)
+                mu_pred = torch.mean(pred_norm)
+                mu_target = torch.mean(target_norm)
+                sigma_pred = torch.std(pred_norm)
+                sigma_target = torch.std(target_norm)
+                sigma_pred_target = torch.mean((pred_norm - mu_pred) * (target_norm - mu_target))
+                
+                c1, c2 = 0.01, 0.03  # SSIM constants
+                # Correct SSIM formula: numerator and denominator should be separate terms
+                numerator = (2 * mu_pred * mu_target + c1) * (2 * sigma_pred_target + c2)
+                denominator = (mu_pred ** 2 + mu_target ** 2 + c1) * (sigma_pred ** 2 + sigma_target ** 2 + c2)
+                ssim = numerator / (denominator + 1e-12)  # Add small epsilon to avoid division by zero
             ssim_values.append(float(ssim))
         
         # Return average similarity metrics
@@ -1290,52 +1534,39 @@ class CSIAnalyzer:
 
     def _compute_ssim_2d(self, pred: torch.Tensor, target: torch.Tensor, window_size: int = 11, sigma: float = 1.5) -> float:
         """
-        Compute 2D Structural Similarity Index (SSIM) between two 2D tensors.
+        Compute 2D Structural Similarity Index (SSIM) between two 2D tensors using pytorch-msssim library.
         
-        This uses Gaussian-weighted local means and variances to preserve spatial structure.
+        This uses the pytorch-msssim library for efficient and accurate SSIM computation.
         Assumes pred and target are 2D tensors of shape [height, width] (e.g., [azimuth, elevation]).
+        
+        Args:
+            pred: Predicted 2D tensor
+            target: Target 2D tensor  
+            window_size: Window size for SSIM computation (default: 11)
+            sigma: Gaussian window sigma parameter (default: 1.5) - not used in pytorch-msssim
+            
+        Returns:
+            SSIM value as float
         """
         # Ensure same shape
         if pred.shape != target.shape:
             raise ValueError(f"Shape mismatch: {pred.shape} vs {target.shape}")
         
         # Normalize to [0, 1] range for SSIM
-        pred = (pred - pred.min()) / (pred.max() - pred.min() + 1e-8)
-        target = (target - target.min()) / (target.max() - target.min() + 1e-8)
+        pred_norm = (pred - pred.min()) / (pred.max() - pred.min() + 1e-8)
+        target_norm = (target - target.min()) / (target.max() - target.min() + 1e-8)
         
-        # Create Gaussian window
-        window = torch.outer(
-            torch.exp(-torch.arange(-window_size//2 + 1, window_size//2 + 1)**2 / (2 * sigma**2)),
-            torch.exp(-torch.arange(-window_size//2 + 1, window_size//2 + 1)**2 / (2 * sigma**2))
-        ).to(pred.device)
-        window = window / window.sum()
+        # Reshape to [batch_size, channels, height, width] format required by pytorch-msssim
+        # Add batch and channel dimensions
+        pred_batch = pred_norm.unsqueeze(0).unsqueeze(0)  # [1, 1, height, width]
+        target_batch = target_norm.unsqueeze(0).unsqueeze(0)  # [1, 1, height, width]
         
-        # Function to compute local stats via convolution
-        def conv2d(x: torch.Tensor) -> torch.Tensor:
-            return torch.nn.functional.conv2d(x.unsqueeze(0).unsqueeze(0), window.unsqueeze(0).unsqueeze(0), padding=window_size//2)
+        # Compute SSIM using pytorch-msssim
+        # Note: pytorch-msssim uses fixed window size (11) and doesn't expose sigma parameter
+        ssim_value = ssim(pred_batch, target_batch, data_range=1.0, size_average=True)
         
-        # Compute local means
-        mu_pred = conv2d(pred)
-        mu_target = conv2d(target)
-        
-        # Compute local variances and covariance
-        mu_pred_sq = mu_pred ** 2
-        mu_target_sq = mu_target ** 2
-        mu_pred_target = mu_pred * mu_target
-        
-        sigma_pred_sq = conv2d(pred ** 2) - mu_pred_sq
-        sigma_target_sq = conv2d(target ** 2) - mu_target_sq
-        sigma_pred_target = conv2d(pred * target) - mu_pred_target
-        
-        # SSIM formula constants
-        c1 = 0.01 ** 2
-        c2 = 0.03 ** 2
-        
-        # Compute SSIM map
-        ssim_map = ((2 * mu_pred_target + c1) * (2 * sigma_pred_target + c2)) / ((mu_pred_sq + mu_target_sq + c1) * (sigma_pred_sq + sigma_target_sq + c2))
-        
-        # Return mean SSIM
-        return float(ssim_map.mean())
+        # Return as float
+        return float(ssim_value.item())
 
     def _compute_spatial_spectrum_similarity(self, pred_spectrum: torch.Tensor, 
                                            target_spectrum: torch.Tensor) -> dict:
@@ -1360,11 +1591,18 @@ class CSIAnalyzer:
         signal_power = torch.mean(target_norm ** 2)
         nmse = mse / (signal_power + 1e-12)
         
-        # 3. Structural Similarity Index (SSIM) - use 2D version if spectrum is 2D
+        # 3. Structural Similarity Index (SSIM) - always use 2D version for spatial spectra
         if pred_spectrum.dim() == 2 and target_spectrum.dim() == 2:
+            # Use 2D SSIM for 2D spatial spectra (azimuth x elevation)
             ssim = self._compute_ssim_2d(pred_spectrum, target_spectrum)
+        elif pred_spectrum.dim() == 1 and target_spectrum.dim() == 1:
+            # Convert 1D spectrum to 2D for 2D SSIM calculation
+            # Reshape 1D spectrum to 2D (azimuth x 1) for consistent 2D SSIM computation
+            pred_2d = pred_spectrum.unsqueeze(1)  # [azimuth, 1]
+            target_2d = target_spectrum.unsqueeze(1)  # [azimuth, 1]
+            ssim = self._compute_ssim_2d(pred_2d, target_2d)
         else:
-            # Fallback to original 1D calculation
+            # Fallback to original 1D calculation (should not reach here in normal cases)
             mu_pred = torch.mean(pred_norm)
             mu_target = torch.mean(target_norm)
             sigma_pred = torch.std(pred_norm)
@@ -1661,6 +1899,12 @@ Examples:
   # Analyze test results using config file (auto-detect results path)
   python analyze.py --config configs/sionna.yml
   
+  # Analyze with GPU acceleration (default auto-detect)
+  python analyze.py --config configs/sionna.yml --device cuda
+  
+  # Force CPU computation (useful for debugging)
+  python analyze.py --config configs/sionna.yml --device cpu
+  
   # Analyze with custom FFT size
   python analyze.py --config configs/sionna.yml --fft-size 2048
   
@@ -1670,18 +1914,16 @@ Examples:
   # Analyze with explicit results path (override auto-detection)
   python analyze.py --config configs/sionna.yml --results path/to/custom_results.npz
   
-  # Analyze with custom number of parallel workers
-  python analyze.py --config configs/sionna.yml --num-workers 8
-  
-  # Analyze PolyU results
-  python analyze.py --config configs/polyu.yml
+  # Analyze PolyU results with GPU acceleration
+  python analyze.py --config configs/polyu.yml --device cuda
         """
     )
     parser.add_argument('--config', required=True, help='Path to configuration file (e.g., configs/sionna.yml)')
     parser.add_argument('--results', help='Path to test results (.npz file) - optional, will auto-detect from config')
     parser.add_argument('--output', help='Output directory for analysis results (optional)')
     parser.add_argument('--fft-size', type=int, default=2048, help='FFT size for PDP computation (default: 2048)')
-    parser.add_argument('--num-workers', type=int, help='Number of parallel workers (default: CPU count - 1)')
+    parser.add_argument('--num-workers', type=int, help='Number of parallel workers (deprecated, kept for compatibility)')
+    parser.add_argument('--device', choices=['cuda', 'cpu', 'auto'], default='auto', help='Device to use for computation (default: auto)')
     
     args = parser.parse_args()
     
@@ -1727,12 +1969,14 @@ Examples:
         print(f"   test.py → {results_file} → analyze.py")
         print(f"{'='*60}\n")
         
+        device = None if args.device == 'auto' else args.device
         analyzer = CSIAnalyzer(
             config_path=args.config,
             results_path=args.results,
             output_dir=args.output,
             fft_size=args.fft_size,
-            num_workers=args.num_workers
+            num_workers=args.num_workers,
+            device=device
         )
         
         # Run analysis

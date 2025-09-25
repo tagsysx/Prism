@@ -116,7 +116,7 @@ class LowRankRayTracer(nn.Module):
                 actual_ray_count = ray_end - ray_start
                 second_order_chunk = torch.zeros(actual_ray_count, num_virtual_subcarriers, dtype=torch.complex64, device=device)
                 
-                if False:  # num_points > 1:  # DISABLED: Skip second-order term to avoid OOM
+                if num_points > 1:
                     # Memory-optimized computation: avoid creating large 5D tensor us_outer_hat
                     # Instead of: us_outer_hat = torch.einsum('rki,rkj,rkl->rkijl', ...)
                     # We compute the einsum directly without storing the intermediate tensor
@@ -143,21 +143,21 @@ class LowRankRayTracer(nn.Module):
                         
                         # Process more points at a time for higher GPU utilization
                         point_chunk_size = min(8, num_points - 1)  # Process 8 points at a time (increased from 4)
-                        for ray_start in range(0, ray_chunk_size, ray_sub_chunk_size):
-                            ray_end = min(ray_start + ray_sub_chunk_size, ray_chunk_size)
-                            ray_slice = slice(ray_start, ray_end)
+                        for ray_sub_start in range(0, ray_chunk_size, ray_sub_chunk_size):  # Renamed to avoid conflict
+                            ray_sub_end = min(ray_sub_start + ray_sub_chunk_size, ray_chunk_size)
+                            ray_sub_slice = slice(ray_sub_start, ray_sub_end)
                             
                             # Process points in chunks to further reduce memory
-                            ray_contribution = torch.zeros(ray_end - ray_start, freq_end - freq_start, dtype=torch.complex64, device=device)
+                            ray_contribution = torch.zeros(ray_sub_end - ray_sub_start, freq_end - freq_start, dtype=torch.complex64, device=device)
                             
                             for point_start in range(1, num_points, point_chunk_size):  # Start from 1 (skip point 0)
                                 point_end = min(point_start + point_chunk_size, num_points)
                                 point_slice = slice(point_start, point_end)
                                 
                                 # Extract smaller chunk of rays and points
-                                ray_radiation_sub = ray_radiation_chunk[ray_slice, point_slice].conj()  # [sub_chunk_size, point_chunk_size, rank]
-                                ray_attenuation_sub = ray_attenuation_chunk[ray_slice, point_slice].conj()  # [sub_chunk_size, point_chunk_size, rank]
-                                ray_u_hat_rho_sub = ray_u_hat_rho_chunk[ray_slice, point_slice].conj()  # [sub_chunk_size, point_chunk_size, rank]
+                                ray_radiation_sub = ray_radiation_chunk[ray_sub_slice, point_slice].conj()  # [sub_chunk_size, point_chunk_size, rank]
+                                ray_attenuation_sub = ray_attenuation_chunk[ray_sub_slice, point_slice].conj()  # [sub_chunk_size, point_chunk_size, rank]
+                                ray_u_hat_rho_sub = ray_u_hat_rho_chunk[ray_sub_slice, point_slice].conj()  # [sub_chunk_size, point_chunk_size, rank]
                                 
                                 # Compute us_outer_hat for this ray-point sub-chunk: [sub_chunk_size, point_chunk_size, rank, rank, rank]
                                 us_outer_hat_sub = torch.einsum('rki,rkj,rkl->rkijl', 
@@ -165,15 +165,18 @@ class LowRankRayTracer(nn.Module):
                                                                ray_attenuation_sub, 
                                                                ray_u_hat_rho_sub)
                                 
-                                # Compute contribution directly on GPU for higher utilization
-                                sub_chunk_contribution = torch.einsum('rkijl,fijl->rf', us_outer_hat_sub, v_outer_outer_chunk) * delta_t
+                                # Compute contribution: sum over points (k dimension) to match v_outer_outer_chunk
+                                # us_outer_hat_sub: [sub_chunk_size, point_chunk_size, rank, rank, rank]
+                                # v_outer_outer_chunk: [chunk_size, rank, rank, rank]
+                                # Sum over point dimension k, then contract remaining rank dimensions
+                                sub_chunk_contribution = torch.einsum('rijk,fijk->rf', us_outer_hat_sub.sum(dim=1), v_outer_outer_chunk) * delta_t
                                 ray_contribution += sub_chunk_contribution
                                 
                                 # Clear intermediate variables
                                 del us_outer_hat_sub, sub_chunk_contribution, ray_radiation_sub, ray_attenuation_sub, ray_u_hat_rho_sub
                             
-                            # Store the accumulated contribution for this ray
-                            chunk_contribution[ray_slice, :] = ray_contribution
+                            # Store the accumulated contribution for this ray (use local indices)
+                            chunk_contribution[ray_sub_start:ray_sub_end, :] = ray_contribution
                             del ray_contribution
                         
                         # Store the contribution for this frequency chunk
