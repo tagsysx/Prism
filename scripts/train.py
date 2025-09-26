@@ -224,7 +224,9 @@ class PrismTrainer(BaseRunner):
                     'enabled': self.data_config['calibration']['enabled'],
                     'reference_subcarrier_index': self.data_config['calibration']['reference_subcarrier_index']
                 }
-            }
+            },
+            # Add tracing configuration from raw config
+            'tracing': self.config_loader._processed_config.get('tracing', {})
         }
         
         self.training_interface = PrismTrainingInterface(

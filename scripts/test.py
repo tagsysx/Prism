@@ -391,6 +391,8 @@ class PrismTester(BaseRunner):
                     'antenna_codebook': self.config_loader.antenna_codebook.__dict__,
                 },
                 'output': self.config_loader.output.__dict__,
+                # Add tracing configuration from raw config
+                'tracing': self.config_loader._processed_config.get('tracing', {})
             }
             
             # Create training interface
