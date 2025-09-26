@@ -80,6 +80,16 @@ class BaseRunner:
         self.logger.info(f"📊 Dataset configuration:")
         self.logger.info(f"   Path: {dataset_path}")
         
+        # Get subcarrier sampling configuration
+        sampling_ratio = self.data_config.get('sampling_ratio', 1.0)
+        sampling_method = self.data_config.get('sampling_method', 'uniform')
+        antenna_consistent = self.data_config.get('antenna_consistent', True)
+        
+        self.logger.info(f"📊 Subcarrier sampling configuration:")
+        self.logger.info(f"   Sampling ratio: {sampling_ratio}")
+        self.logger.info(f"   Sampling method: {sampling_method}")
+        self.logger.info(f"   Antenna consistent: {antenna_consistent}")
+        
         # Check if the dataset path exists
         if not os.path.exists(dataset_path):
             self.logger.error(f"❌ Dataset not found: {dataset_path}")
@@ -183,6 +193,12 @@ class BaseRunner:
             else:
                 raise ValueError(f"Invalid ue_antenna_count: {ue_antenna_count}. Must be >= 1")
             
+            # 🚀 Apply subcarrier sampling if configured
+            if sampling_ratio < 1.0:
+                csi_data = self._apply_subcarrier_sampling(
+                    csi_data, sampling_ratio, sampling_method, antenna_consistent
+                )
+            
             # Phase differential calibration is handled by the network
             # No additional calibration needed here
             
@@ -281,3 +297,60 @@ class BaseRunner:
             )
         
         self.logger.info(f"✅ Network configuration validation passed")
+    
+    def _apply_subcarrier_sampling(
+        self, 
+        csi_data: torch.Tensor, 
+        sampling_ratio: float, 
+        sampling_method: str, 
+        antenna_consistent: bool
+    ) -> torch.Tensor:
+        """
+        Apply subcarrier sampling to CSI data.
+        
+        Args:
+            csi_data: CSI tensor [batch, bs_antennas, ue_antennas, subcarriers]
+            sampling_ratio: Ratio of subcarriers to sample (0.0 to 1.0)
+            sampling_method: 'uniform' or 'random'
+            antenna_consistent: Use same indices for all antennas
+            
+        Returns:
+            Sampled CSI tensor [batch, bs_antennas, ue_antennas, sampled_subcarriers]
+        """
+        import numpy as np
+        
+        batch_size, bs_antennas, ue_antennas, original_subcarriers = csi_data.shape
+        num_sampled_subcarriers = max(1, int(original_subcarriers * sampling_ratio))
+        
+        # Set random seed for reproducible sampling
+        random_seed = self.data_config.get('random_seed', 42)
+        np.random.seed(random_seed)
+        
+        if sampling_method == 'uniform':
+            # Uniform sampling: evenly spaced subcarriers
+            subcarrier_indices = np.linspace(0, original_subcarriers - 1, 
+                                           num_sampled_subcarriers, dtype=int)
+        elif sampling_method == 'random':
+            # Random sampling: randomly selected subcarriers
+            subcarrier_indices = np.sort(np.random.choice(original_subcarriers, 
+                                                        num_sampled_subcarriers, 
+                                                        replace=False))
+        else:
+            raise ValueError(f"Unsupported sampling_method: {sampling_method}. Use 'uniform' or 'random'")
+        
+        # Apply subcarrier sampling
+        csi_data_sampled = csi_data[:, :, :, subcarrier_indices]
+        
+        # Update internal subcarrier count
+        self.num_subcarriers = num_sampled_subcarriers
+        
+        self.logger.info(f"🔧 Subcarrier sampling applied:")
+        self.logger.info(f"   Method: {sampling_method}")
+        self.logger.info(f"   Sampling ratio: {sampling_ratio}")
+        self.logger.info(f"   Original subcarriers: {original_subcarriers}")
+        self.logger.info(f"   Sampled subcarriers: {num_sampled_subcarriers}")
+        self.logger.info(f"   Selected indices: {subcarrier_indices[:10]}{'...' if len(subcarrier_indices) > 10 else ''}")
+        self.logger.info(f"   Original CSI shape: {csi_data.shape}")
+        self.logger.info(f"   Sampled CSI shape: {csi_data_sampled.shape}")
+        
+        return csi_data_sampled

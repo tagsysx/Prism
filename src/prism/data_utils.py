@@ -18,7 +18,10 @@ def load_and_split_data(
     test_ratio: float = 0.2,
     random_seed: int = 42,
     mode: str = 'train',
-    target_antenna_index: int = 0
+    target_antenna_index: int = 0,
+    sampling_ratio: float = 1.0,
+    sampling_method: str = 'uniform',
+    antenna_consistent: bool = True
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, Any]]:
     """
     Load data from HDF5 file and split into train/test sets.
@@ -30,13 +33,17 @@ def load_and_split_data(
         random_seed: Random seed for reproducible splits
         mode: 'train' or 'test' - which split to return
         target_antenna_index: Which UE antenna to extract (0-based index)
+        sampling_ratio: Ratio of subcarriers to sample (0.0 to 1.0)
+        sampling_method: 'uniform' or 'random' - how to sample subcarriers
+        antenna_consistent: If True, use same subcarrier indices for all UE antennas
         
     Returns:
         Tuple of (ue_positions, csi_data, bs_position, antenna_indices, metadata)
-        Note: csi_data will have shape (samples, subcarriers, 1, bs_antennas) for the selected antenna
+        Note: csi_data will have shape (samples, sampled_subcarriers, 1, bs_antennas) for the selected antenna
         
     Note:
         train_ratio + test_ratio can be < 1.0 to use only a subset of data
+        Subcarrier sampling reduces memory usage and computation time
     """
     logger.info(f"Loading dataset from {dataset_path}")
     logger.info(f"Split configuration: train_ratio={train_ratio}, test_ratio={test_ratio}, seed={random_seed}")
@@ -54,9 +61,9 @@ def load_and_split_data(
     
     with h5py.File(dataset_path, 'r') as f:
         # Load all data
-        ue_positions = f['positions']['ue_positions'][:]
-        csi_data = f['channel_data']['channel_responses'][:]
-        bs_position = f['positions']['bs_position'][:]
+        ue_positions = f['data']['ue_positions'][:]
+        csi_data = f['data']['csi'][:]
+        bs_position = f['data']['bs_positions'][:]
         
         # Load antenna indices if available
         if 'antenna_indices' in f:
@@ -97,6 +104,55 @@ def load_and_split_data(
     # New shape: (samples, subcarriers, 1, bs_antennas)
     csi_data = csi_data[:, :, target_antenna_index:target_antenna_index+1, :]
     logger.info(f"Extracted CSI data shape: {csi_data.shape}")
+    
+    # 🚀 Subcarrier sampling for memory optimization
+    original_num_subcarriers = csi_data.shape[1]
+    if sampling_ratio < 1.0:
+        num_sampled_subcarriers = max(1, int(original_num_subcarriers * sampling_ratio))
+        
+        # Set random seed for reproducible subcarrier sampling
+        np.random.seed(random_seed)
+        
+        if sampling_method == 'uniform':
+            # Uniform sampling: evenly spaced subcarriers
+            subcarrier_indices = np.linspace(0, original_num_subcarriers - 1, 
+                                           num_sampled_subcarriers, dtype=int)
+        elif sampling_method == 'random':
+            # Random sampling: randomly selected subcarriers
+            subcarrier_indices = np.sort(np.random.choice(original_num_subcarriers, 
+                                                        num_sampled_subcarriers, 
+                                                        replace=False))
+        else:
+            raise ValueError(f"Unsupported sampling_method: {sampling_method}. Use 'uniform' or 'random'")
+        
+        # Apply subcarrier sampling
+        csi_data = csi_data[:, subcarrier_indices, :, :]
+        
+        logger.info(f"🔧 Subcarrier sampling applied:")
+        logger.info(f"   Method: {sampling_method}")
+        logger.info(f"   Sampling ratio: {sampling_ratio}")
+        logger.info(f"   Original subcarriers: {original_num_subcarriers}")
+        logger.info(f"   Sampled subcarriers: {num_sampled_subcarriers}")
+        logger.info(f"   Selected indices: {subcarrier_indices[:10]}{'...' if len(subcarrier_indices) > 10 else ''}")
+        logger.info(f"   Final CSI shape: {csi_data.shape}")
+        
+        # Add sampling info to metadata
+        metadata['subcarrier_sampling'] = {
+            'enabled': True,
+            'method': sampling_method,
+            'ratio': sampling_ratio,
+            'original_count': original_num_subcarriers,
+            'sampled_count': num_sampled_subcarriers,
+            'indices': subcarrier_indices.tolist(),
+            'antenna_consistent': antenna_consistent
+        }
+    else:
+        logger.info(f"🔧 No subcarrier sampling (ratio={sampling_ratio})")
+        metadata['subcarrier_sampling'] = {
+            'enabled': False,
+            'original_count': original_num_subcarriers,
+            'sampled_count': original_num_subcarriers
+        }
     
     # Set random seed for reproducible splits
     np.random.seed(random_seed)
