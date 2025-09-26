@@ -52,10 +52,6 @@ class LowRankRayTracer(nn.Module):
         self.ray_sub_chunk_size = tracing_config.get('ray_sub_chunk_size', 8)
         self.point_chunk_size = tracing_config.get('point_chunk_size', 8)
         
-        # Memory optimization options
-        self.enable_second_order = tracing_config.get('enable_second_order', True)  # Can disable for extreme memory saving
-        self.ultra_memory_mode = tracing_config.get('ultra_memory_mode', False)    # Ultra aggressive memory optimization
-        
         # Note: Caching and profiling features removed - simplified implementation
         
         # Note: amplitude_scaling removed - CSI enhancement network handles amplitude control
@@ -66,8 +62,6 @@ class LowRankRayTracer(nn.Module):
         logger.info(f"   - Frequency chunk size: {self.freq_chunk_size}")
         logger.info(f"   - Ray sub-chunk size: {self.ray_sub_chunk_size}")
         logger.info(f"   - Point chunk size: {self.point_chunk_size}")
-        logger.info(f"   - Second-order terms: {'enabled' if self.enable_second_order else 'disabled'}")
-        logger.info(f"   - Ultra memory mode: {'enabled' if self.ultra_memory_mode else 'disabled'}")
         logger.info(f"   - Amplitude control: handled by CSI enhancement network")
     
     
@@ -123,49 +117,12 @@ class LowRankRayTracer(nn.Module):
                 ray_radiation_chunk = radiation_vectors[ray_slice]      # [ray_chunk_size, num_points, rank]
                 ray_u_hat_rho_chunk = u_hat_rho[ray_slice]              # [ray_chunk_size, num_points, rank]
                 
-                # 🚀 MEMORY OPTIMIZATION: Avoid creating large intermediate tensors
-                # Instead of storing us_outer [ray_chunk_size, num_points, rank, rank], compute incrementally
-                
-                # Initialize first_order_chunk for incremental accumulation
-                first_order_chunk = torch.zeros(ray_chunk_size, num_virtual_subcarriers, dtype=torch.complex64, device=device)
-                
-                # Process frequency basis vectors in chunks to avoid large v_outer tensor
-                freq_chunk_size_first = min(self.freq_chunk_size, num_virtual_subcarriers)
-                for freq_start in range(0, num_virtual_subcarriers, freq_chunk_size_first):
-                    freq_end = min(freq_start + freq_chunk_size_first, num_virtual_subcarriers)
-                    freq_chunk = frequency_basis_vectors[freq_start:freq_end]  # [chunk_size, rank]
-                    
-                    # Compute v_outer only for this frequency chunk: [chunk_size, rank, rank]
-                    v_outer_chunk = torch.einsum('fi,fj->fij', freq_chunk, freq_chunk)
-                    
-                    # 🔥 AVOID us_outer: Compute first-order term directly without storing full us_outer
-                    # Original: us_outer = einsum('rki,rkj->rkij', ray_radiation_chunk.conj(), ray_attenuation_chunk.conj())
-                    # Then: first_order = einsum('rkij,fij->rf', us_outer, v_outer_chunk) * delta_t
-                    # Combined: first_order = einsum('rki,rkj,fij->rf', ray_radiation_chunk.conj(), ray_attenuation_chunk.conj(), v_outer_chunk) * delta_t
-                    
-                    # Process points in chunks to further reduce memory
-                    point_chunk_size_first = min(self.point_chunk_size, num_points)
-                    for point_start in range(0, num_points, point_chunk_size_first):
-                        point_end = min(point_start + point_chunk_size_first, num_points)
-                        point_slice = slice(point_start, point_end)
-                        
-                        # Extract point chunk
-                        ray_radiation_point = ray_radiation_chunk[:, point_slice].conj()  # [ray_chunk_size, point_chunk_size, rank]
-                        ray_attenuation_point = ray_attenuation_chunk[:, point_slice].conj()  # [ray_chunk_size, point_chunk_size, rank]
-                        
-                        # Compute first-order contribution for this point chunk without storing us_outer
-                        point_contribution = torch.einsum('rki,rkj,fij->rf', 
-                                                         ray_radiation_point, 
-                                                         ray_attenuation_point, 
-                                                         v_outer_chunk) * delta_t
-                        
-                        first_order_chunk[:, freq_start:freq_end] += point_contribution
-                        
-                        # Clear point chunk tensors
-                        del ray_radiation_point, ray_attenuation_point, point_contribution
-                    
-                    # Clear frequency chunk tensors
-                    del v_outer_chunk
+                # Vectorized computation for all subcarriers and current ray chunk
+                # First-order term: sum over points of (U^S ⊗ U^ρ) · (V ⊗ V) * Δt
+                # Shape: [ray_chunk_size, num_points, rank, rank] -> [ray_chunk_size, num_virtual_subcarriers]
+                us_outer = torch.einsum('rki,rkj->rkij', ray_radiation_chunk.conj(), ray_attenuation_chunk.conj())  # [ray_chunk_size, num_points, rank, rank]
+                v_outer = torch.einsum('fi,fj->fij', frequency_basis_vectors, frequency_basis_vectors)  # [num_virtual_subcarriers, rank, rank]
+                first_order_chunk = torch.einsum('rkij,fij->rf', us_outer, v_outer) * delta_t  # [ray_chunk_size, num_virtual_subcarriers]
                 
                 # Second-order term: sum over points of (U^S ⊗ U^ρ ⊗ Û^ρ) · (V ⊗ V ⊗ V) * Δt
                 # Only for k > 0 (skip first point)
@@ -173,8 +130,7 @@ class LowRankRayTracer(nn.Module):
                 actual_ray_count = ray_end - ray_start
                 second_order_chunk = torch.zeros(actual_ray_count, num_virtual_subcarriers, dtype=torch.complex64, device=device)
                 
-                # 🚀 MEMORY OPTIMIZATION: Make second-order term optional for extreme memory saving
-                if self.enable_second_order and num_points > 1:
+                if num_points > 1:
                     # Memory-optimized computation: avoid creating large 5D tensor us_outer_hat
                     # Instead of: us_outer_hat = torch.einsum('rki,rkj,rkl->rkijl', ...)
                     # We compute the einsum directly without storing the intermediate tensor
@@ -249,7 +205,9 @@ class LowRankRayTracer(nn.Module):
                 csi_accumulator += ray_contribution_chunk.sum(dim=0)  # Sum over rays in chunk
                 
                 # Clear intermediate tensors to free memory
-                del first_order_chunk, second_order_chunk, ray_contribution_chunk
+                del us_outer, v_outer, first_order_chunk
+                del second_order_chunk
+                del ray_contribution_chunk
                 torch.cuda.empty_cache()
         
         # Normalize by the number of directions

@@ -81,9 +81,6 @@ tracing:
   freq_chunk_size: 4           # Frequency processing chunk size (reduced)
   ray_sub_chunk_size: 1        # Ray sub-chunk size (MUST be <= ray_chunk_size)
   point_chunk_size: 1          # Point processing chunk size (MUST be < num_sampling_points)
-  # Memory optimization options for extreme cases
-  enable_second_order: false   # Disable second-order terms for extreme memory saving
-  ultra_memory_mode: true      # Enable ultra aggressive memory optimization
 
 input:
   dataset_path: data/chrissy/chrissy.h5  # Chrissy dataset path with 4 UE antennas
