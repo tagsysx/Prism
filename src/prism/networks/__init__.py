@@ -5,14 +5,12 @@ This module contains all the neural network components for the Prism system:
 1. AttenuationNetwork: Encodes spatial position information
 2. AttenuationDecoder: Converts features to attenuation factors
 3. AntennaEmbeddingCodebook: Provides antenna-specific embeddings
-4. AntennaNetwork: Generates directional importance indicators
-5. RadianceNetwork: Processes inputs for radiation modeling
-6. PrismNetwork: Main integrated network combining all components
+4. RadianceNetwork: Processes inputs for radiation modeling
+5. PrismNetwork: Main integrated network combining all components
 """
 
 from .attenuation_network import AttenuationNetwork, AttenuationNetworkConfig
 from .antenna_codebook import AntennaEmbeddingCodebook, AntennaEmbeddingCodebookConfig
-from .antenna_network import AntennaNetwork, AntennaNetworkConfig
 from .radiance_network import RadianceNetwork, RadianceNetworkConfig
 from .prism_network import PrismNetwork, PrismNetworkConfig
 
@@ -20,7 +18,6 @@ __all__ = [
     # Individual networks
     'AttenuationNetwork',
     'AntennaEmbeddingCodebook',
-    'AntennaNetwork',
     'RadianceNetwork',
     
     # Main integrated network
@@ -29,7 +26,6 @@ __all__ = [
     # Configuration classes
     'AttenuationNetworkConfig',
     'AntennaEmbeddingCodebookConfig',
-    'AntennaNetworkConfig',
     'RadianceNetworkConfig',
     'PrismNetworkConfig'
 ]

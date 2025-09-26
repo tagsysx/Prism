@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 from .attenuation_network import AttenuationNetwork, AttenuationNetworkConfig
 from .frequency_codebook import FrequencyCodebook
 from .antenna_codebook import AntennaEmbeddingCodebook, AntennaEmbeddingCodebookConfig
-from .antenna_network import AntennaNetwork, AntennaNetworkConfig
 from .radiance_network import RadianceNetwork, RadianceNetworkConfig
 from .positional_encoder import PositionalEncoder, create_position_encoder, create_direction_encoder
 from .csi_network import CSINetwork

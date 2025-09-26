@@ -75,6 +75,7 @@ class TrainingConfig:
     weight_decay: float = 1e-4
     num_epochs: int = 6
     batch_size: int = 4
+    antenna_batch_size: int = 8  # Number of BS antennas to process in each batch
     gradient_accumulation_steps: int = 4
     auto_checkpoint: bool = True
     checkpoint_frequency: int = 5

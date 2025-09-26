@@ -108,6 +108,7 @@ output:
 training:
   num_epochs: 50  # Reduced epochs for PolyU dataset
   batch_size: 8
+  antenna_batch_size: 16  # Process 16 BS antennas at a time for PolyU (has more memory)
   checkpoint_frequency: 10
   enable_gradient_checkpointing: true
   epoch_save_interval: 1

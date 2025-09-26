@@ -79,8 +79,8 @@ tracing:
   # Otherwise will cause tensor dimension mismatch errors!
   ray_chunk_size: 8            # Main ray processing chunk size (extreme reduction)
   freq_chunk_size: 4           # Frequency processing chunk size (reduced)
-  ray_sub_chunk_size: 2        # Ray sub-chunk size (MUST be <= ray_chunk_size)
-  point_chunk_size: 2          # Point processing chunk size (MUST be < num_sampling_points)
+  ray_sub_chunk_size: 1        # Ray sub-chunk size (MUST be <= ray_chunk_size)
+  point_chunk_size: 1          # Point processing chunk size (MUST be < num_sampling_points)
 
 input:
   dataset_path: data/chrissy/chrissy.h5  # Chrissy dataset path with 4 UE antennas
@@ -88,7 +88,7 @@ input:
   subcarrier_sampling:
     antenna_consistent: true
     sampling_method: uniform
-    sampling_ratio: 1
+    sampling_ratio: 0.5
   train_ratio: 0.8
   # Calibration configuration
   calibration:
@@ -108,6 +108,7 @@ output:
 training:
   num_epochs: 50
   batch_size: 1  # Minimal batch size to reduce memory usage
+  antenna_batch_size: 1  # Process 4 BS antennas at a time (instead of all 64)
   checkpoint_frequency: 10
   enable_gradient_checkpointing: true
   epoch_save_interval: 1

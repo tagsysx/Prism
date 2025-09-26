@@ -37,12 +37,10 @@ from .loss import (
 from .networks import (
     AttenuationNetwork,
     AntennaEmbeddingCodebook,
-    AntennaNetwork,
     RadianceNetwork,
     PrismNetwork,
     AttenuationNetworkConfig,
     AntennaEmbeddingCodebookConfig,
-    AntennaNetworkConfig,
     RadianceNetworkConfig,
     PrismNetworkConfig
 )
@@ -78,12 +76,10 @@ __all__ = [
     # Neural networks
     'AttenuationNetwork',
     'AntennaEmbeddingCodebook',
-    'AntennaNetwork',
     'RadianceNetwork',
     'PrismNetwork',
     'AttenuationNetworkConfig',
     'AntennaEmbeddingCodebookConfig',
-    'AntennaNetworkConfig',
     'RadianceNetworkConfig',
     'PrismNetworkConfig',
     
