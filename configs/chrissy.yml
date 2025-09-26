@@ -15,11 +15,70 @@ base_station:
     num_subcarriers: 408  # Chrissy has 408 subcarriers
     subcarrier_spacing: 240.0e3  # Chrissy subcarrier spacing: 240 kHz
 
+user_equipment:
+  num_ue_antennas: 4  # Chrissy-u4 has 4 UE antennas
+  antenna_array:
+    configuration: "1x4"  # Chrissy-u4 UE antenna array: 1x4 antennas
+    spacing_x: 0.0405  # Antenna spacing in x direction (half wavelength at 3.7 GHz)
+    spacing_y: 0.0405  # Antenna spacing in y direction (half wavelength at 3.7 GHz)
+  ue_antenna_count: 4  # Number of UE antennas to use (4=antennas 0, 1, 2, and 3)
+
+neural_networks:
+  antenna_codebook:
+    embedding_dim: 32
+    initialization: normal
+    normalize: false
+    std: 0.1
+  attenuation_network:
+    activation: relu
+    feature_dim: 128
+    hidden_dim: 64
+    num_layers: 3
+    output_dim: 32
+    use_shortcuts: true
+  csi_network:
+    d_model: 16  # Extreme reduction to save memory
+    n_layers: 1  # Minimal layers
+    n_heads: 1   # Minimal attention heads
+    d_ff: 32     # Extreme reduction in feed-forward dimension
+    dropout_rate: 0.05
+    max_magnitude: 100.0
+    # Add frequency domain smoothing for better phase prediction
+    smoothing_weight: 0  # No smoothing for memory efficiency
+    smoothing_type: "phase_preserve"  # Preserve magnitude, smooth phase only
+  frequency_codebook:
+    basis_dim: 32
+    initialization: complex_normal
+    std: 0.1
+    normalize: false
+  prism_network:
+    antenna_embedding_dim: 32
+    azimuth_divisions: 18
+    elevation_divisions: 6
+  radiance_network:
+    activation: relu
+    antenna_embedding_dim: 32
+    feature_dim: 128
+    hidden_dim: 64
+    num_layers: 2
+    output_dim: 32
+    ue_position_dim: 63
+    view_direction_dim: 63
+
+system:
+  device: cuda
+  fallback_to_cpu: true
+
 tracing:
   max_ray_length: 250.0
-  num_sampling_points: 16
+  num_sampling_points: 4     # Number of sampling points along each ray (extreme reduction)
   use_ipe_encoding: true
-  use_mixed_precision: false
+  use_mixed_precision: true
+  # Ray processing chunk sizes for memory management (extreme low memory mode)
+  ray_chunk_size: 4           # Main ray processing chunk size (extreme reduction)
+  freq_chunk_size: 16          # Frequency processing chunk size (minimum viable)
+  ray_sub_chunk_size: 1       # Ray sub-chunk size (minimum value)
+  point_chunk_size: 1         # Point processing chunk size (minimum value)
 
 input:
   dataset_path: data/chrissy/chrissy.h5  # Chrissy dataset path with 4 UE antennas
@@ -32,50 +91,7 @@ input:
   # Calibration configuration
   calibration:
     enabled: true
-    reference_subcarrier_index: 204  # Use first subcarrier (index 0) as reference for Chrissy
-
-neural_networks:
-  antenna_codebook:
-    embedding_dim: 32
-    initialization: normal
-    normalize: false
-    # (Removed) num_bs_antennas should be obtained from base_station, not duplicated here.
-    std: 0.1
-  attenuation_network:
-    activation: relu
-    feature_dim: 128
-    hidden_dim: 64
-    num_layers: 3
-    output_dim: 32
-    use_shortcuts: true
-  csi_network:
-    d_model: 64  # Reduced from 256
-    n_layers: 2  # Reduced from 4
-    n_heads: 4   # Reduced from 16
-    d_ff: 256    # Reduced from 1024
-    dropout_rate: 0.05
-    max_magnitude: 100.0
-    # Add frequency domain smoothing for better phase prediction
-    smoothing_weight: 0.05  # Moderate smoothing for Chrissy dataset
-    smoothing_type: "phase_preserve"  # Preserve magnitude, smooth phase only
-  frequency_codebook:
-    basis_dim: 32
-    initialization: complex_normal
-    std: 0.1
-    normalize: false
-  prism_network:
-    antenna_embedding_dim: 32
-    azimuth_divisions: 36
-    elevation_divisions: 9
-  radiance_network:
-    activation: relu
-    antenna_embedding_dim: 32
-    feature_dim: 128
-    hidden_dim: 64
-    num_layers: 2
-    output_dim: 32
-    ue_position_dim: 63
-    view_direction_dim: 63
+    reference_subcarrier_index: 204  # Use middle subcarrier as reference for Chrissy
 
 output:
   base_dir: results/chrissy
@@ -87,18 +103,13 @@ output:
     models_dir: '{{base_dir}}/training/models'
     tensorboard_dir: '{{base_dir}}/training/tensorboard'
 
-system:
-  device: cuda
-  fallback_to_cpu: true
-
-
 training:
-  num_epochs: 100
-  batch_size: 5  # Minimal batch size to reduce memory usage
-  checkpoint_frequency: 5
+  num_epochs: 50
+  batch_size: 1  # Minimal batch size to reduce memory usage
+  checkpoint_frequency: 10
   enable_gradient_checkpointing: true
   epoch_save_interval: 1
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 8  # Increased to compensate for tiny chunks
   learning_rate: 0.00015
   lr_scheduler:
     type: 'reduce_on_plateau'
@@ -127,41 +138,10 @@ training:
     regularization_loss:
       enabled: false
     regularization_weight: 0.0
-    spatial_spectrum_loss:
-      algorithm: bartlett
-      enabled: false
-      fusion_method: average
-      loss_type: ssim
-      orientation: bs  # Use BS antenna array (64 antennas) for Chrissy
-      phi_range:
-      - 0.0
-      - 10.0
-      - 350.0
-      ssim_k1: 0.01
-      ssim_k2: 0.03
-      ssim_window_size: 11
-      ssim_dimension: 1d  # Use 1D SSIM instead of 2D SSIM
-      theta_range:
-      - 0
-      - 5.0
-      - 90.0
-      # Subcarrier sampling optimization
-      num_sampled_subcarriers: 1
-      use_covariance_bartlett: false
-      use_frequency_dependent_steering: true
-    spatial_spectrum_weight: 0.0
   auto_checkpoint: true
-  ray_chunk_size: 10
+  ray_chunk_size: 4          # Further reduced for memory efficiency
   scaling_factor: 1.0e-15
   weight_decay: 1.0e-05
-
-user_equipment:
-  num_ue_antennas: 4  # Chrissy-u4 has 4 UE antennas
-  antenna_array:
-    configuration: "1x4"  # Chrissy-u4 UE antenna array: 1x4 antennas
-    spacing_x: 0.0405  # Antenna spacing in x direction (half wavelength at 3.7 GHz)
-    spacing_y: 0.0405  # Antenna spacing in y direction (half wavelength at 3.7 GHz)
-  ue_antenna_count: 4  # Number of UE antennas to use (4=antennas 0, 1, 2, and 3)
 
 analysis:
   pas:

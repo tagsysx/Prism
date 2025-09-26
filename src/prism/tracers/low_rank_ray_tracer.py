@@ -25,12 +25,13 @@ class LowRankRayTracer(nn.Module):
     3. Memory-efficient ray tracing
     """
     
-    def __init__(self, prism_network):
+    def __init__(self, prism_network, config=None):
         """
         Initialize the low-rank ray tracer.
         
         Args:
             prism_network: PrismNetwork instance for feature extraction
+            config: Configuration dictionary (optional)
         """
         super().__init__()
         
@@ -42,12 +43,38 @@ class LowRankRayTracer(nn.Module):
         # Get configuration from PrismNetwork
         self.max_ray_length = prism_network.max_ray_length
         
+        # Extract tracing configuration for chunk sizes
+        logger.info(f"🔍 LowRankRayTracer.__init__ - config received: {config is not None}")
+        if config:
+            logger.info(f"🔍 Config keys: {list(config.keys())}")
+            tracing_config = config.get('tracing', {})
+            logger.info(f"🔍 Tracing config: {tracing_config}")
+        else:
+            logger.warning("⚠️ No config passed to LowRankRayTracer - using defaults!")
+            tracing_config = {}
+        
+        # Set all chunk sizes from configuration with fallback defaults
+        self.ray_chunk_size = tracing_config.get('ray_chunk_size', 128)
+        self.freq_chunk_size = tracing_config.get('freq_chunk_size', 16)
+        self.ray_sub_chunk_size = tracing_config.get('ray_sub_chunk_size', 8)
+        self.point_chunk_size = tracing_config.get('point_chunk_size', 8)
+        
+        logger.info(f"🔍 Final chunk sizes set:")
+        logger.info(f"   - ray_chunk_size: {self.ray_chunk_size} (from config: {tracing_config.get('ray_chunk_size', 'NOT FOUND')})")
+        logger.info(f"   - freq_chunk_size: {self.freq_chunk_size} (from config: {tracing_config.get('freq_chunk_size', 'NOT FOUND')})")
+        logger.info(f"   - ray_sub_chunk_size: {self.ray_sub_chunk_size} (from config: {tracing_config.get('ray_sub_chunk_size', 'NOT FOUND')})")
+        logger.info(f"   - point_chunk_size: {self.point_chunk_size} (from config: {tracing_config.get('point_chunk_size', 'NOT FOUND')})")
+        
         # Note: Caching and profiling features removed - simplified implementation
         
         # Note: amplitude_scaling removed - CSI enhancement network handles amplitude control
         
         logger.info(f"🚀 LowRankRayTracer initialized")
         logger.info(f"   - PrismNetwork: {type(prism_network).__name__}")
+        logger.info(f"   - Ray chunk size: {self.ray_chunk_size}")
+        logger.info(f"   - Frequency chunk size: {self.freq_chunk_size}")
+        logger.info(f"   - Ray sub-chunk size: {self.ray_sub_chunk_size}")
+        logger.info(f"   - Point chunk size: {self.point_chunk_size}")
         logger.info(f"   - Amplitude control: handled by CSI enhancement network")
     
     
@@ -77,6 +104,14 @@ class LowRankRayTracer(nn.Module):
         num_directions, num_points, rank = attenuation_vectors.shape
         num_virtual_subcarriers = frequency_basis_vectors.shape[0]  # num_ue_antennas × num_subcarriers
         
+        # Debug: Print chunk sizes being used in this trace_rays call
+        logger.info(f"🔍 trace_rays() DEBUG - Chunk sizes from config:")
+        logger.info(f"   - ray_chunk_size: {self.ray_chunk_size}")
+        logger.info(f"   - freq_chunk_size: {self.freq_chunk_size}")
+        logger.info(f"   - ray_sub_chunk_size: {self.ray_sub_chunk_size}")
+        logger.info(f"   - point_chunk_size: {self.point_chunk_size}")
+        logger.info(f"   - Input shapes: directions={num_directions}, points={num_points}, subcarriers={num_virtual_subcarriers}")
+        
         logger.debug(f"🔧 LowRankRayTracer inputs: num_virtual_subcarriers={num_virtual_subcarriers}, frequency_basis_vectors.shape={frequency_basis_vectors.shape}")
         
         # Vectorized computation with ray chunking for memory efficiency
@@ -92,7 +127,8 @@ class LowRankRayTracer(nn.Module):
             csi_accumulator = torch.zeros(num_virtual_subcarriers, dtype=torch.complex64, device=device)
             
             # Process rays in chunks to manage memory usage
-            ray_chunk_size = min(256, num_directions)  # Increased from 32 to 256 for higher GPU utilization
+            ray_chunk_size = min(self.ray_chunk_size, num_directions)  # Use configurable chunk size
+            logger.info(f"🔍 Actual ray_chunk_size used: {ray_chunk_size} (config: {self.ray_chunk_size}, directions: {num_directions})")
             
             for ray_start in range(0, num_directions, ray_chunk_size):
                 ray_end = min(ray_start + ray_chunk_size, num_directions)
@@ -122,7 +158,9 @@ class LowRankRayTracer(nn.Module):
                     # We compute the einsum directly without storing the intermediate tensor
                     
                     # Process frequency basis vectors in chunks to avoid OOM
-                    freq_chunk_size = min(16, num_virtual_subcarriers)  # Process 16 subcarriers at a time (increased from 2)
+                    
+                    freq_chunk_size = min(self.freq_chunk_size, num_virtual_subcarriers)  # Use configurable frequency chunk size
+                    logger.info(f"🔍 Actual freq_chunk_size used: {freq_chunk_size} (config: {self.freq_chunk_size}, subcarriers: {num_virtual_subcarriers})")
                     for freq_start in range(0, num_virtual_subcarriers, freq_chunk_size):
                         freq_end = min(freq_start + freq_chunk_size, num_virtual_subcarriers)
                         freq_chunk = frequency_basis_vectors[freq_start:freq_end]  # [chunk_size, rank]
@@ -138,11 +176,13 @@ class LowRankRayTracer(nn.Module):
                         # This avoids storing the large us_outer_hat tensor
                         chunk_contribution = torch.zeros(ray_chunk_size, freq_end - freq_start, dtype=torch.complex64, device=device)
                         
-                        # Process rays in larger chunks for higher GPU utilization
-                        ray_sub_chunk_size = min(8, ray_chunk_size)  # Process 8 rays at a time (increased from 1)
+                        # Process rays in sub-chunks for memory optimization
+                        ray_sub_chunk_size = min(self.ray_sub_chunk_size, ray_chunk_size)  # Use configurable ray sub-chunk size
+                        logger.info(f"🔍 Actual ray_sub_chunk_size used: {ray_sub_chunk_size} (config: {self.ray_sub_chunk_size}, ray_chunk: {ray_chunk_size})")
                         
-                        # Process more points at a time for higher GPU utilization
-                        point_chunk_size = min(8, num_points - 1)  # Process 8 points at a time (increased from 4)
+                        # Process points in chunks for memory optimization
+                        point_chunk_size = min(self.point_chunk_size, num_points - 1)  # Use configurable point chunk size
+                        logger.info(f"🔍 Actual point_chunk_size used: {point_chunk_size} (config: {self.point_chunk_size}, points-1: {num_points-1})")
                         for ray_sub_start in range(0, ray_chunk_size, ray_sub_chunk_size):  # Renamed to avoid conflict
                             ray_sub_end = min(ray_sub_start + ray_sub_chunk_size, ray_chunk_size)
                             ray_sub_slice = slice(ray_sub_start, ray_sub_end)
