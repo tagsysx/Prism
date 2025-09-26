@@ -253,7 +253,7 @@ class ModernConfigLoader:
         # 6. CSINetwork - store config with derived max_antennas and max_subcarriers
         csi_config = nn_config.get('csi_network', {}).copy()
         csi_config['num_bs_antennas'] = self.num_bs_antennas
-        csi_config['num_subcarriers'] = self.base_subcarriers  # CSI network uses real subcarriers (408)
+        csi_config['num_subcarriers'] = self.base_subcarriers  # CSI network uses real subcarriers (from config)
         self.csi_network_config = csi_config
         
         # Training configuration
@@ -433,8 +433,8 @@ class ModernConfigLoader:
                 raise ValueError(f"❌ Missing required CSI network parameter: '{param}'")
         
         return {
-            'num_subcarriers': self.base_subcarriers,  # 真实子载波数 (408)
-            'num_virtual_subcarriers': self.num_virtual_subcarriers,  # 虚拟子载波数 (408 * 4 = 1632)
+            'num_subcarriers': self.base_subcarriers,  # 真实子载波数 (从配置文件读取)
+            'num_virtual_subcarriers': self.num_virtual_subcarriers,  # 虚拟子载波数 (num_subcarriers × ue_antenna_count)
             'num_bs_antennas': self.num_bs_antennas,     # 从基础配置获取
             'feature_dim': self.prism_network.feature_dim,
             'antenna_embedding_dim': self.prism_network.antenna_embedding_dim,

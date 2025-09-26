@@ -100,8 +100,8 @@ class PrismTrainingInterface(nn.Module):
         # Set virtual subcarriers based on UE antenna count
         self.prism_network.set_virtual_subcarriers(self.ue_config.get('ue_antenna_count', 1))
         # Set subcarrier configuration
-        self.num_subcarriers = self.prism_network.num_subcarriers  # Base subcarriers per UE antenna (64)
-        self.num_virtual_subcarriers = self.prism_network.num_virtual_subcarriers  # Total subcarriers (512)
+        self.num_subcarriers = self.prism_network.num_subcarriers  # Base subcarriers per UE antenna
+        self.num_virtual_subcarriers = self.prism_network.num_virtual_subcarriers  # Total subcarriers (num_subcarriers × ue_antenna_count)
         
         # UE antenna configuration
         self.ue_antenna_count = self.ue_config.get('ue_antenna_count', 1)

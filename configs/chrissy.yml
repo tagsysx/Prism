@@ -21,7 +21,7 @@ user_equipment:
     configuration: "1x4"  # Chrissy-u4 UE antenna array: 1x4 antennas
     spacing_x: 0.0405  # Antenna spacing in x direction (half wavelength at 3.7 GHz)
     spacing_y: 0.0405  # Antenna spacing in y direction (half wavelength at 3.7 GHz)
-  ue_antenna_count: 4  # Number of UE antennas to use (4=antennas 0, 1, 2, and 3)
+  ue_antenna_count: 1  # Number of UE antennas to use (4=antennas 0, 1, 2, and 3)
 
 neural_networks:
   antenna_codebook:

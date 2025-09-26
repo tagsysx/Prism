@@ -70,8 +70,9 @@ class PrismNetwork(nn.Module):
         self.use_mixed_precision = use_mixed_precision
         
         # Virtual subcarriers for multi-UE antenna scenarios
-        # This allows flexible usage of subcarriers based on UE antenna configuration
-        self.num_virtual_subcarriers = self.num_subcarriers
+        # This will be set correctly by set_virtual_subcarriers() method
+        # Default to single UE antenna case
+        self.num_virtual_subcarriers = self.num_subcarriers  # Will be updated by set_virtual_subcarriers()
         
         # Ray tracing configuration
         self.max_ray_length = max_ray_length
@@ -133,7 +134,7 @@ class PrismNetwork(nn.Module):
         
         # 2. FrequencyCodebook: Learnable frequency basis vectors
         self.frequency_codebook = FrequencyCodebook(
-            num_subcarriers=self.num_virtual_subcarriers,  # Use virtual subcarriers (1632)
+            num_subcarriers=self.num_virtual_subcarriers,  # Use virtual subcarriers (num_subcarriers × ue_antenna_count)
             basis_dim=self.frequency_codebook_config.get('basis_dim', 32),  # R-dimensional
             initialization=self.frequency_codebook_config.get('initialization', 'complex_normal'),
             std=self.frequency_codebook_config.get('std', 0.1),
