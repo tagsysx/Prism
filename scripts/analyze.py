@@ -39,7 +39,7 @@ from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 import h5py
 import warnings
-from pytorch_msssim import ssim
+from scipy import ndimage
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -515,30 +515,30 @@ class CSIAnalyzer:
         for sample_idx in range(batch_size):
             # 4D format: [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
             for bs_idx in range(num_bs_antennas):
-                for ue_idx in range(num_ue_antennas):
-                    # Get CSI for this sample, BS antenna, and UE antenna
-                    pred_csi = self.predictions[sample_idx, bs_idx, ue_idx, :].cpu().numpy()
-                    target_csi = self.targets[sample_idx, bs_idx, ue_idx, :].cpu().numpy()
-                    
-                    # Skip if target CSI is zero (no ground truth)
-                    if self._is_target_csi_zero(self.targets[sample_idx, bs_idx, ue_idx, :]):
-                        logger.warning(f"Skipping PDP analysis for sample {sample_idx}, BS antenna {bs_idx}, UE antenna {ue_idx} - target CSI is zero (no ground truth)")
-                        continue
-                    
-                    pred_pdp = self._compute_pdp(pred_csi, self.fft_size)
-                    target_pdp = self._compute_pdp(target_csi, self.fft_size)
-                    
-                    pred_pdp_all.append(pred_pdp)
-                    target_pdp_all.append(target_pdp)
-                    valid_sample_info.append({
-                        'sample_idx': sample_idx,
-                        'bs_idx': bs_idx,
-                        'ue_idx': ue_idx
-                    })
-                    
-                    processed_count += 1
-                    if processed_count % 50 == 0:  # Progress update every 50 PDP computations
-                        logger.info(f"     PDP computation progress: {processed_count}/{total_pdp_computations} ({processed_count/total_pdp_computations*100:.1f}%)")
+                    for ue_idx in range(num_ue_antennas):
+                        # Get CSI for this sample, BS antenna, and UE antenna
+                        pred_csi = self.predictions[sample_idx, bs_idx, ue_idx, :].cpu().numpy()
+                        target_csi = self.targets[sample_idx, bs_idx, ue_idx, :].cpu().numpy()
+                        
+                        # Skip if target CSI is zero (no ground truth)
+                        if self._is_target_csi_zero(self.targets[sample_idx, bs_idx, ue_idx, :]):
+                            logger.warning(f"Skipping PDP analysis for sample {sample_idx}, BS antenna {bs_idx}, UE antenna {ue_idx} - target CSI is zero (no ground truth)")
+                            continue
+                        
+                        pred_pdp = self._compute_pdp(pred_csi, self.fft_size)
+                        target_pdp = self._compute_pdp(target_csi, self.fft_size)
+                        
+                        pred_pdp_all.append(pred_pdp)
+                        target_pdp_all.append(target_pdp)
+                        valid_sample_info.append({
+                            'sample_idx': sample_idx,
+                            'bs_idx': bs_idx,
+                            'ue_idx': ue_idx
+                        })
+                        
+                        processed_count += 1
+                        if processed_count % 50 == 0:  # Progress update every 50 PDP computations
+                            logger.info(f"     PDP computation progress: {processed_count}/{total_pdp_computations} ({processed_count/total_pdp_computations*100:.1f}%)")
         
         # Convert to numpy arrays
         pred_pdp_all = np.array(pred_pdp_all)
@@ -564,22 +564,10 @@ class CSIAnalyzer:
             pred_pdp = pred_pdp_all[i]
             target_pdp = target_pdp_all[i]
             
-            # Cosine Similarity
-            pred_flat = pred_pdp.flatten()
-            target_flat = target_pdp.flatten()
-            
-            dot_product = np.sum(pred_flat * target_flat)
-            pred_norm = np.sqrt(np.sum(pred_flat ** 2))
-            target_norm = np.sqrt(np.sum(target_flat ** 2))
-            
-            if pred_norm < 1e-12 or target_norm < 1e-12:
-                cosine_similarity = 0.0
-            else:
-                cosine = dot_product / (pred_norm * target_norm)
-                cosine = np.clip(cosine, -1.0, 1.0)  # Ensure valid range
-                # Map cosine similarity from [-1, 1] to [0, 1]
-                cosine_similarity = (cosine + 1.0) / 2.0
-            
+            # Cosine Similarity using traditional cosine similarity method
+            pred_tensor = torch.from_numpy(pred_pdp).float()
+            target_tensor = torch.from_numpy(target_pdp).float()
+            cosine_similarity = self._compute_cosine_similarity(pred_tensor, target_tensor)
             cosine_similarity_values.append(cosine_similarity)
             
             # Relative Error Similarity
@@ -606,32 +594,13 @@ class CSIAnalyzer:
             jensen_shannon_divergence_values.append(jsd)
             
             # 1D SSIM for PDP
-            ssim = _compute_ssim_1d(pred_pdp, target_pdp)
+            ssim = self._compute_ssim_1d(pred_pdp, target_pdp)
             ssim_values.append(ssim)
             
-            # Normalized Mean Squared Error (NMSE) for PDP - converted to similarity
-            pred_flat = pred_pdp.flatten()
-            target_flat = target_pdp.flatten()
-            
-            # Compute MSE
-            mse = np.mean((pred_flat - target_flat) ** 2)
-            
-            # Compute signal power (mean of squared target values)
-            signal_power = np.mean(target_flat ** 2)
-            
-            # Compute NMSE
-            if signal_power < 1e-12:
-                nmse = 0.0  # Perfect match when target is zero
-            else:
-                nmse = mse / signal_power
-            
-            # Convert NMSE to similarity (0-1 range, higher is better)
-            # Use modified exponential decay to achieve 20th percentile >= 0.85
-            # Formula: similarity = exp(-alpha * nmse) where alpha controls sensitivity
-            # With alpha=0.2, NMSE=0.8 -> similarity=0.85, NMSE=1.5 -> similarity=0.74
-            alpha = 0.2  # Sensitivity parameter (smaller = less sensitive to NMSE)
-            nmse_similarity = np.exp(-alpha * nmse)
-            
+            # Normalized Mean Squared Error (NMSE) for PDP using standard NMSE similarity method
+            pred_tensor = torch.from_numpy(pred_pdp).float()
+            target_tensor = torch.from_numpy(target_pdp).float()
+            nmse_similarity = self._compute_nmse_similarity(pred_tensor, target_tensor)
             nmse_values.append(nmse_similarity)
         
         logger.info(f"✅ All PDP similarity metrics computed")
@@ -1426,43 +1395,28 @@ class CSIAnalyzer:
         target_norm = target_flat / (max_sum + 1e-12)
         
         # Compute various similarity metrics
-        # 1. Cosine similarity (use original data without normalization)
-        cosine_sim = torch.sum(pred_flat * target_flat) / (
-            torch.sqrt(torch.sum(pred_flat ** 2)) * torch.sqrt(torch.sum(target_flat ** 2)) + 1e-12
-        )
+        # 1. Cosine similarity using traditional cosine similarity method
+        cosine_sim = self._compute_cosine_similarity(pred_spectrum, target_spectrum)
         
-        # 2. Normalized Mean Squared Error (NMSE)
-        mse = torch.mean((pred_norm - target_norm) ** 2)
-        signal_power = torch.mean(target_norm ** 2)
-        nmse = mse / (signal_power + 1e-12)
+        # 2. Normalized Mean Squared Error (NMSE) using standard NMSE similarity method
+        nmse = self._compute_nmse_similarity(pred_spectrum, target_spectrum)
         
         # 3. Structural Similarity Index (SSIM) - always use 2D version for spatial spectra
         if pred_spectrum.dim() == 2 and target_spectrum.dim() == 2:
             # Use 2D SSIM for 2D spatial spectra (azimuth x elevation)
             ssim = self._compute_ssim_2d(pred_spectrum, target_spectrum)
         elif pred_spectrum.dim() == 1 and target_spectrum.dim() == 1:
-            # Convert 1D spectrum to 2D for 2D SSIM calculation
-            # Reshape 1D spectrum to 2D (azimuth x 1) for consistent 2D SSIM computation
-            pred_2d = pred_spectrum.unsqueeze(1)  # [azimuth, 1]
-            target_2d = target_spectrum.unsqueeze(1)  # [azimuth, 1]
-            ssim = self._compute_ssim_2d(pred_2d, target_2d)
+            # Use 1D SSIM for 1D spatial spectra
+            pred_np = pred_norm.cpu().numpy()
+            target_np = target_norm.cpu().numpy()
+            ssim = self._compute_ssim_1d(pred_np, target_np)
         else:
-            # Fallback to original 1D calculation (should not reach here in normal cases)
-            mu_pred = torch.mean(pred_norm)
-            mu_target = torch.mean(target_norm)
-            sigma_pred = torch.std(pred_norm)
-            sigma_target = torch.std(target_norm)
-            sigma_pred_target = torch.mean((pred_norm - mu_pred) * (target_norm - mu_target))
-            
-            c1, c2 = 0.01, 0.03  # SSIM constants
-            # Correct SSIM formula: numerator and denominator should be separate terms
-            numerator = (2 * mu_pred * mu_target + c1) * (2 * sigma_pred_target + c2)
-            denominator = (mu_pred ** 2 + mu_target ** 2 + c1) * (sigma_pred ** 2 + sigma_target ** 2 + c2)
-            ssim = numerator / (denominator + 1e-12)  # Add small epsilon to avoid division by zero
+            # Unsupported dimension combination
+            raise ValueError(f"Unsupported spectrum dimensions: pred={pred_spectrum.dim()}D, target={target_spectrum.dim()}D. Only 1D and 2D spectra are supported.")
         
         return {
-            'cosine_similarity': float(cosine_sim.cpu().item()),
-            'nmse': float(nmse.cpu().item()),
+            'cosine_similarity': float(cosine_sim),
+            'nmse': float(nmse),
             'ssim': float(ssim)
         }
     
@@ -1513,16 +1467,16 @@ class CSIAnalyzer:
     
     def _compute_ssim_2d(self, pred: torch.Tensor, target: torch.Tensor, window_size: int = 11, sigma: float = 1.5) -> float:
         """
-        Compute 2D Structural Similarity Index (SSIM) between two 2D tensors using pytorch-msssim library.
+        Compute 2D Structural Similarity Index (SSIM) between two 2D tensors using custom implementation.
         
-        This uses the pytorch-msssim library for efficient and accurate SSIM computation.
+        This uses a custom SSIM implementation instead of pytorch-msssim library.
         Assumes pred and target are 2D tensors of shape [height, width] (e.g., [azimuth, elevation]).
         
         Args:
             pred: Predicted 2D tensor
             target: Target 2D tensor  
             window_size: Window size for SSIM computation (default: 11)
-            sigma: Gaussian window sigma parameter (default: 1.5) - not used in pytorch-msssim
+            sigma: Gaussian window sigma parameter (default: 1.5)
             
         Returns:
             SSIM value as float
@@ -1538,74 +1492,243 @@ class CSIAnalyzer:
         pred_norm = pred / (max_sum + 1e-12)
         target_norm = target / (max_sum + 1e-12)
         
-        # Reshape to [batch_size, channels, height, width] format required by pytorch-msssim
-        # Add batch and channel dimensions
-        pred_batch = pred_norm.unsqueeze(0).unsqueeze(0)  # [1, 1, height, width]
-        target_batch = target_norm.unsqueeze(0).unsqueeze(0)  # [1, 1, height, width]
+        # Custom 2D SSIM implementation
+        # Convert to numpy for easier computation
+        pred_np = pred_norm.cpu().numpy()
+        target_np = target_norm.cpu().numpy()
         
-        # Compute SSIM using pytorch-msssim
-        # Note: pytorch-msssim uses fixed window size (11) and doesn't expose sigma parameter
-        ssim_value = ssim(pred_batch, target_batch, data_range=1.0, size_average=True)
+        # Ensure window size is not larger than image dimensions
+        height, width = pred_np.shape
+        window_size = min(window_size, height, width)
+        
+        if window_size < 3:
+            window_size = min(height, width)
+        
+        # Create Gaussian window
+        def create_gaussian_window(window_size, sigma):
+            """Create a 2D Gaussian window"""
+            center = window_size // 2
+            x, y = np.meshgrid(np.arange(window_size) - center, np.arange(window_size) - center)
+            gaussian = np.exp(-(x**2 + y**2) / (2 * sigma**2))
+            return gaussian / np.sum(gaussian)
+        
+        gaussian_window = create_gaussian_window(window_size, sigma)
+        
+        # Compute local means using convolution
+        from scipy import ndimage
+        mu_pred = ndimage.convolve(pred_np, gaussian_window, mode='constant')
+        mu_target = ndimage.convolve(target_np, gaussian_window, mode='constant')
+        
+        # Compute local variances and covariance
+        mu_pred_sq = ndimage.convolve(pred_np**2, gaussian_window, mode='constant')
+        mu_target_sq = ndimage.convolve(target_np**2, gaussian_window, mode='constant')
+        mu_pred_target = ndimage.convolve(pred_np * target_np, gaussian_window, mode='constant')
+        
+        sigma_pred_sq = mu_pred_sq - mu_pred**2
+        sigma_target_sq = mu_target_sq - mu_target**2
+        sigma_pred_target = mu_pred_target - mu_pred * mu_target
+        
+        # SSIM constants
+        c1 = 0.01 ** 2  # (0.01 * data_range) ** 2, where data_range = 1.0
+        c2 = 0.03 ** 2  # (0.03 * data_range) ** 2, where data_range = 1.0
+        
+        # Compute SSIM
+        numerator = (2 * mu_pred * mu_target + c1) * (2 * sigma_pred_target + c2)
+        denominator = (mu_pred**2 + mu_target**2 + c1) * (sigma_pred_sq + sigma_target_sq + c2)
+        
+        ssim_map = numerator / (denominator + 1e-12)
+        ssim_value = np.mean(ssim_map)
         
         # Return as float
-        return float(ssim_value.item())
+        return float(ssim_value)
 
-    def _compute_spatial_spectrum_similarity(self, pred_spectrum: torch.Tensor, 
-                                           target_spectrum: torch.Tensor) -> dict:
-        """Compute similarity metrics between predicted and target spatial spectra"""
+    def _compute_nmse_similarity(self, pred: torch.Tensor, target: torch.Tensor) -> float:
+        """
+        Compute NMSE similarity using maximum possible error normalization.
         
-        # Flatten spectra for computation
-        pred_flat = pred_spectrum.flatten()
-        target_flat = target_spectrum.flatten()
+        Maximum Possible Error Normalization NMSE Similarity Definition:
+        Similarity = 1 - MSE / (max(x_i²) + max(y_i²))
         
-        # Normalize spectra using consistent normalization
-        # Use the maximum sum across both predicted and target spectra for consistent normalization
-        pred_sum = torch.sum(pred_flat)
-        target_sum = torch.sum(target_flat)
-        max_sum = torch.maximum(pred_sum, target_sum)
-        pred_norm = pred_flat / (max_sum + 1e-12)
-        target_norm = target_flat / (max_sum + 1e-12)
+        where:
+        - MSE = (1/n) * sum((x_i - y_i)²): mean squared error
+        - max(x_i²): maximum squared value in predicted vector
+        - max(y_i²): maximum squared value in target vector
         
-        # Compute various similarity metrics
-        # 1. Cosine similarity (use original data without normalization)
-        cosine_sim = torch.sum(pred_flat * target_flat) / (
-            torch.sqrt(torch.sum(pred_flat ** 2)) * torch.sqrt(torch.sum(target_flat ** 2)) + 1e-12
-        )
+        This gives a similarity value in range [0, 1] where:
+        - 1.0 = perfect match (MSE = 0)
+        - 0.0 = worst match (MSE = max(x_i²) + max(y_i²))
+        - Higher values indicate better similarity
         
-        # 2. Normalized Mean Squared Error (NMSE)
-        mse = torch.mean((pred_norm - target_norm) ** 2)
-        signal_power = torch.mean(target_norm ** 2)
-        nmse = mse / (signal_power + 1e-12)
-        
-        # 3. Structural Similarity Index (SSIM) - always use 2D version for spatial spectra
-        if pred_spectrum.dim() == 2 and target_spectrum.dim() == 2:
-            # Use 2D SSIM for 2D spatial spectra (azimuth x elevation)
-            ssim = self._compute_ssim_2d(pred_spectrum, target_spectrum)
-        elif pred_spectrum.dim() == 1 and target_spectrum.dim() == 1:
-            # Convert 1D spectrum to 2D for 2D SSIM calculation
-            # Reshape 1D spectrum to 2D (azimuth x 1) for consistent 2D SSIM computation
-            pred_2d = pred_spectrum.unsqueeze(1)  # [azimuth, 1]
-            target_2d = target_spectrum.unsqueeze(1)  # [azimuth, 1]
-            ssim = self._compute_ssim_2d(pred_2d, target_2d)
-        else:
-            # Fallback to original 1D calculation (should not reach here in normal cases)
-            mu_pred = torch.mean(pred_norm)
-            mu_target = torch.mean(target_norm)
-            sigma_pred = torch.std(pred_norm)
-            sigma_target = torch.std(target_norm)
-            sigma_pred_target = torch.mean((pred_norm - mu_pred) * (target_norm - mu_target))
+        Args:
+            pred: Predicted values tensor
+            target: Target values tensor
             
-            c1, c2 = 0.01, 0.03  # SSIM constants
-            # Correct SSIM formula: numerator and denominator should be separate terms
-            numerator = (2 * mu_pred * mu_target + c1) * (2 * sigma_pred_target + c2)
-            denominator = (mu_pred ** 2 + mu_target ** 2 + c1) * (sigma_pred ** 2 + sigma_target ** 2 + c2)
-            ssim = numerator / (denominator + 1e-12)  # Add small epsilon to avoid division by zero
+        Returns:
+            Maximum possible error normalized NMSE similarity value in range [0, 1]
+        """
+        # Flatten tensors for computation
+        pred_flat = pred.flatten()
+        target_flat = target.flatten()
         
-        return {
-            'cosine_similarity': float(cosine_sim),
-            'nmse': float(nmse),
-            'ssim': float(ssim)
-        }
+        # Compute MSE
+        mse = torch.mean((pred_flat - target_flat) ** 2)
+        
+        # Compute maximum squared values
+        pred_max_squared = torch.max(pred_flat ** 2)
+        target_max_squared = torch.max(target_flat ** 2)
+        max_possible_error = pred_max_squared + target_max_squared
+        
+        # Avoid division by zero
+        if max_possible_error < 1e-12:
+            return 1.0  # Perfect similarity if no variation
+        
+        # Compute maximum possible error normalized similarity
+        similarity = 1.0 - (mse / max_possible_error)
+        
+        # Clip to valid range [0, 1]
+        similarity = torch.clamp(similarity, 0.0, 1.0)
+        
+        return float(similarity)
+
+    def _compute_cosine_similarity(self, pred: torch.Tensor, target: torch.Tensor) -> float:
+        """
+        Compute traditional cosine similarity with Min-Max normalization preprocessing.
+        
+        Steps:
+        1. Apply Min-Max normalization to both vectors: (x - min) / (max - min)
+        2. Compute cosine similarity: cosine_similarity = (A · B) / (||A|| × ||B||)
+        
+        where:
+        - A · B is the dot product of normalized vectors A and B
+        - ||A|| and ||B|| are the L2 norms (Euclidean norms) of the normalized vectors
+        
+        This gives a similarity value in range [-1, 1] where:
+        - 1.0 = perfect positive correlation (same direction)
+        - 0.0 = orthogonal vectors (no correlation)
+        - -1.0 = perfect negative correlation (opposite direction)
+        - Values are normalized to [0, 1] for consistency: (cosine_sim + 1) / 2
+        
+        Args:
+            pred: Predicted values tensor
+            target: Target values tensor
+            
+        Returns:
+            Cosine similarity value normalized to range [0, 1]
+        """
+        # Flatten tensors for computation
+        pred_flat = pred.flatten()
+        target_flat = target.flatten()
+        
+        # Min-Max normalization for predicted vector
+        pred_min = torch.min(pred_flat)
+        pred_max = torch.max(pred_flat)
+        if pred_max - pred_min > 1e-12:
+            pred_normalized = (pred_flat - pred_min) / (pred_max - pred_min)
+        else:
+            # If all values are the same, set to 0.5 (middle of [0,1] range)
+            pred_normalized = torch.full_like(pred_flat, 0.5)
+        
+        # Min-Max normalization for target vector
+        target_min = torch.min(target_flat)
+        target_max = torch.max(target_flat)
+        if target_max - target_min > 1e-12:
+            target_normalized = (target_flat - target_min) / (target_max - target_min)
+        else:
+            # If all values are the same, set to 0.5 (middle of [0,1] range)
+            target_normalized = torch.full_like(target_flat, 0.5)
+        
+        # Compute dot product of normalized vectors
+        dot_product = torch.dot(pred_normalized, target_normalized)
+        
+        # Compute L2 norms of normalized vectors
+        pred_norm = torch.norm(pred_normalized)
+        target_norm = torch.norm(target_normalized)
+        
+        # Avoid division by zero
+        if pred_norm < 1e-12 or target_norm < 1e-12:
+            if torch.allclose(pred_normalized, target_normalized, atol=1e-12):
+                return 1.0  # Perfect similarity if both normalized vectors are equal
+            else:
+                return 0.0  # No similarity if one is zero vector but not equal
+        
+        # Compute cosine similarity
+        cosine_sim = dot_product / (pred_norm * target_norm)
+        
+        # Normalize to [0, 1] range: (cosine_sim + 1) / 2
+        # This maps [-1, 1] to [0, 1] where 0.5 means orthogonal vectors
+        normalized_similarity = (cosine_sim + 1.0) / 2.0
+        
+        # Clip to valid range [0, 1] (should be unnecessary but for safety)
+        normalized_similarity = torch.clamp(normalized_similarity, 0.0, 1.0)
+        
+        return float(normalized_similarity)
+
+    def _compute_ssim_1d(self, pred_pdp: np.ndarray, target_pdp: np.ndarray) -> float:
+        """
+        Compute 1D Structural Similarity Index (SSIM) between two 1D PDPs.
+        
+        This implements 1D SSIM specifically for Power Delay Profiles (PDPs).
+        PDPs are 1D signals representing power vs delay, so we use 1D SSIM computation.
+        
+        Args:
+            pred_pdp: Predicted PDP as 1D numpy array
+            target_pdp: Target PDP as 1D numpy array
+            
+        Returns:
+            SSIM value as float in [0, 1] where 1 is most similar
+        """
+        # Ensure same length
+        if len(pred_pdp) != len(target_pdp):
+            raise ValueError(f"Length mismatch: {len(pred_pdp)} vs {len(target_pdp)}")
+        
+        # Normalize PDPs using maximum value normalization only
+        pred_max = np.max(pred_pdp)
+        target_max = np.max(target_pdp)
+        
+        # Use the maximum value across both sequences for consistent normalization
+        global_max = max(pred_max, target_max) + 1e-8
+        
+        pred_norm = pred_pdp / global_max
+        target_norm = target_pdp / global_max
+        
+        # 1D SSIM computation
+        # Use a sliding window approach for 1D SSIM
+        window_size = min(11, len(pred_pdp))  # Window size, capped by signal length
+        if window_size < 3:
+            window_size = len(pred_pdp)  # Use full signal if too short
+        
+        # Compute local means using convolution
+        kernel = np.ones(window_size) / window_size
+        
+        mu_pred = np.convolve(pred_norm, kernel, mode='valid')
+        mu_target = np.convolve(target_norm, kernel, mode='valid')
+        
+        # Compute local variances and covariance
+        mu_pred_padded = np.pad(mu_pred, (window_size//2, window_size//2), mode='edge')
+        mu_target_padded = np.pad(mu_target, (window_size//2, window_size//2), mode='edge')
+        
+        # Ensure same length
+        min_len = min(len(pred_norm), len(mu_pred_padded))
+        pred_norm = pred_norm[:min_len]
+        target_norm = target_norm[:min_len]
+        mu_pred_padded = mu_pred_padded[:min_len]
+        mu_target_padded = mu_target_padded[:min_len]
+        
+        sigma_pred_sq = np.mean((pred_norm - mu_pred_padded) ** 2)
+        sigma_target_sq = np.mean((target_norm - mu_target_padded) ** 2)
+        sigma_pred_target = np.mean((pred_norm - mu_pred_padded) * (target_norm - mu_target_padded))
+        
+        # SSIM constants
+        c1 = 0.01 ** 2  # (0.01 * data_range) ** 2, where data_range = 1.0
+        c2 = 0.03 ** 2  # (0.03 * data_range) ** 2, where data_range = 1.0
+        
+        # Compute SSIM
+        numerator = (2 * np.mean(mu_pred_padded) * np.mean(mu_target_padded) + c1) * (2 * sigma_pred_target + c2)
+        denominator = (np.mean(mu_pred_padded) ** 2 + np.mean(mu_target_padded) ** 2 + c1) * (sigma_pred_sq + sigma_target_sq + c2)
+        
+        ssim_value = numerator / (denominator + 1e-12)
+        
+        return float(ssim_value)
     
     def _compute_pdp(self, csi: np.ndarray, fft_size: int) -> np.ndarray:
         """Compute Power Delay Profile (PDP) from CSI using IFFT"""
@@ -1649,27 +1772,14 @@ class CSIAnalyzer:
             rmse = np.sqrt(mse)
             rmse_values.append(rmse)
             
-            # NMSE
-            signal_power = np.mean(target_pdp ** 2)
-            if signal_power < 1e-12:
-                nmse = 0.0
-            else:
-                nmse = mse / signal_power
+            # NMSE using standard NMSE similarity method
+            pred_tensor = torch.from_numpy(pred_pdp).float()
+            target_tensor = torch.from_numpy(target_pdp).float()
+            nmse = self._compute_nmse_similarity(pred_tensor, target_tensor)
             nmse_values.append(nmse)
             
-            # Cosine similarity
-            pred_flat = pred_pdp.flatten()
-            target_flat = target_pdp.flatten()
-            
-            dot_product = np.sum(pred_flat * target_flat)
-            pred_norm = np.sqrt(np.sum(pred_flat ** 2))
-            target_norm = np.sqrt(np.sum(target_flat ** 2))
-            
-            if pred_norm < 1e-12 or target_norm < 1e-12:
-                cosine_sim = 0.0
-            else:
-                cosine_sim = dot_product / (pred_norm * target_norm)
-                cosine_sim = np.clip(cosine_sim, -1.0, 1.0)
+            # Cosine similarity using traditional cosine similarity method
+            cosine_sim = self._compute_cosine_similarity(pred_tensor, target_tensor)
             
             cosine_sim_values.append(cosine_sim)
         
@@ -1820,20 +1930,29 @@ def _compute_spectral_correlation_coefficient(pred_pdp: np.ndarray, target_pdp: 
 
 
 def _compute_log_spectral_distance(pred_pdp: np.ndarray, target_pdp: np.ndarray) -> float:
-    """Compute Log Spectral Distance (LSD) between two PDPs"""
+    """Compute Log Spectral Distance (LSD) using maximum possible error normalization"""
     pred_flat = pred_pdp.flatten()
     target_flat = target_pdp.flatten()
     
-    # Add small epsilon to avoid log(0)
-    epsilon = 1e-10
-    pred_log = np.log(pred_flat + epsilon)
-    target_log = np.log(target_flat + epsilon)
+    # Compute MSE
+    mse = np.mean((pred_flat - target_flat) ** 2)
     
-    # Compute LSD
-    lsd = np.sqrt(np.mean((pred_log - target_log) ** 2))
+    # Compute maximum squared values
+    pred_max_squared = np.max(pred_flat ** 2)
+    target_max_squared = np.max(target_flat ** 2)
+    max_possible_error = pred_max_squared + target_max_squared
     
-    # Map to [0, 1] where 1 is most similar (using exponential decay)
-    return np.exp(-lsd)
+    # Avoid division by zero
+    if max_possible_error < 1e-12:
+        return 1.0  # Perfect similarity if no variation
+    
+    # Compute maximum possible error normalized similarity
+    similarity = 1.0 - (mse / max_possible_error)
+    
+    # Clip to valid range [0, 1]
+    similarity = np.clip(similarity, 0.0, 1.0)
+    
+    return float(similarity)
 
 
 def _compute_bhattacharyya_coefficient(pred_pdp: np.ndarray, target_pdp: np.ndarray) -> float:
@@ -1853,96 +1972,29 @@ def _compute_bhattacharyya_coefficient(pred_pdp: np.ndarray, target_pdp: np.ndar
 
 
 def _compute_jensen_shannon_divergence(pred_pdp: np.ndarray, target_pdp: np.ndarray) -> float:
-    """Compute Jensen-Shannon Divergence (JSD) between two PDPs"""
+    """Compute Jensen-Shannon Divergence (JSD) using maximum possible error normalization"""
     pred_flat = pred_pdp.flatten()
     target_flat = target_pdp.flatten()
     
-    # Normalize to make them probability distributions
-    pred_norm = pred_flat / (np.sum(pred_flat) + 1e-10)
-    target_norm = target_flat / (np.sum(target_flat) + 1e-10)
+    # Compute MSE
+    mse = np.mean((pred_flat - target_flat) ** 2)
     
-    # Compute average distribution
-    avg_dist = (pred_norm + target_norm) / 2.0
+    # Compute maximum squared values
+    pred_max_squared = np.max(pred_flat ** 2)
+    target_max_squared = np.max(target_flat ** 2)
+    max_possible_error = pred_max_squared + target_max_squared
     
-    # Compute KL divergences
-    kl_pred = np.sum(pred_norm * np.log((pred_norm + 1e-10) / (avg_dist + 1e-10)))
-    kl_target = np.sum(target_norm * np.log((target_norm + 1e-10) / (avg_dist + 1e-10)))
+    # Avoid division by zero
+    if max_possible_error < 1e-12:
+        return 1.0  # Perfect similarity if no variation
     
-    # Compute JSD
-    jsd = (kl_pred + kl_target) / 2.0
+    # Compute maximum possible error normalized similarity
+    similarity = 1.0 - (mse / max_possible_error)
     
-    # Map to [0, 1] where 1 is most similar (using exponential decay)
-    return np.exp(-jsd)
-
-
-def _compute_ssim_1d(pred_pdp: np.ndarray, target_pdp: np.ndarray) -> float:
-    """
-    Compute 1D Structural Similarity Index (SSIM) between two 1D PDPs.
+    # Clip to valid range [0, 1]
+    similarity = np.clip(similarity, 0.0, 1.0)
     
-    This implements 1D SSIM specifically for Power Delay Profiles (PDPs).
-    PDPs are 1D signals representing power vs delay, so we use 1D SSIM computation.
-    
-    Args:
-        pred_pdp: Predicted PDP as 1D numpy array
-        target_pdp: Target PDP as 1D numpy array
-        
-    Returns:
-        SSIM value as float in [0, 1] where 1 is most similar
-    """
-    # Ensure same length
-    if len(pred_pdp) != len(target_pdp):
-        raise ValueError(f"Length mismatch: {len(pred_pdp)} vs {len(target_pdp)}")
-    
-    # Normalize PDPs using unified normalization (use max value across both sequences)
-    pred_min, pred_max = np.min(pred_pdp), np.max(pred_pdp)
-    target_min, target_max = np.min(target_pdp), np.max(target_pdp)
-    
-    # Use the maximum range across both sequences for consistent normalization
-    global_min = min(pred_min, target_min)
-    global_max = max(pred_max, target_max)
-    global_range = global_max - global_min + 1e-8
-    
-    pred_norm = (pred_pdp - global_min) / global_range
-    target_norm = (target_pdp - global_min) / global_range
-    
-    # 1D SSIM computation
-    # Use a sliding window approach for 1D SSIM
-    window_size = min(11, len(pred_pdp))  # Window size, capped by signal length
-    if window_size < 3:
-        window_size = len(pred_pdp)  # Use full signal if too short
-    
-    # Compute local means using convolution
-    kernel = np.ones(window_size) / window_size
-    
-    mu_pred = np.convolve(pred_norm, kernel, mode='valid')
-    mu_target = np.convolve(target_norm, kernel, mode='valid')
-    
-    # Compute local variances and covariance
-    mu_pred_padded = np.pad(mu_pred, (window_size//2, window_size//2), mode='edge')
-    mu_target_padded = np.pad(mu_target, (window_size//2, window_size//2), mode='edge')
-    
-    # Ensure same length
-    min_len = min(len(pred_norm), len(mu_pred_padded))
-    pred_norm = pred_norm[:min_len]
-    target_norm = target_norm[:min_len]
-    mu_pred_padded = mu_pred_padded[:min_len]
-    mu_target_padded = mu_target_padded[:min_len]
-    
-    sigma_pred_sq = np.mean((pred_norm - mu_pred_padded) ** 2)
-    sigma_target_sq = np.mean((target_norm - mu_target_padded) ** 2)
-    sigma_pred_target = np.mean((pred_norm - mu_pred_padded) * (target_norm - mu_target_padded))
-    
-    # SSIM constants
-    c1 = 0.01 ** 2  # (0.01 * data_range) ** 2, where data_range = 1.0
-    c2 = 0.03 ** 2  # (0.03 * data_range) ** 2, where data_range = 1.0
-    
-    # Compute SSIM
-    numerator = (2 * np.mean(mu_pred_padded) * np.mean(mu_target_padded) + c1) * (2 * sigma_pred_target + c2)
-    denominator = (np.mean(mu_pred_padded) ** 2 + np.mean(mu_target_padded) ** 2 + c1) * (sigma_pred_sq + sigma_target_sq + c2)
-    
-    ssim_value = numerator / (denominator + 1e-12)
-    
-    return float(ssim_value)
+    return float(similarity)
 
 
 def main():

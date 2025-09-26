@@ -177,8 +177,29 @@ class PrismTester(BaseRunner):
         try:
             # Use default model path from output configuration
             output_paths = self.config_loader.get_output_paths()
-            default_model_path = os.path.join(output_paths['models_dir'], 'final_model.pt')
-            self.model_path = model_path or default_model_path
+            
+            # Priority: best_model.pt -> final_model.pt
+            best_model_path = os.path.join(output_paths['models_dir'], 'best_model.pt')
+            final_model_path = os.path.join(output_paths['models_dir'], 'final_model.pt')
+            
+            if model_path:
+                # Use explicitly provided model path
+                self.model_path = model_path
+                logger.info(f"Using explicitly provided model: {self.model_path}")
+                print(f"🎯 Using explicitly provided model: {self.model_path}")
+            elif os.path.exists(best_model_path):
+                # Use best model if it exists
+                self.model_path = best_model_path
+                logger.info(f"Using best model: {self.model_path}")
+                print(f"🏆 Using BEST model: {self.model_path}")
+            elif os.path.exists(final_model_path):
+                # Fallback to final model
+                self.model_path = final_model_path
+                logger.info(f"Using final model (best model not found): {self.model_path}")
+                print(f"📁 Using FINAL model (best model not found): {self.model_path}")
+            else:
+                # No model found
+                raise FileNotFoundError(f"No model found. Checked: {best_model_path}, {final_model_path}")
             
             # Construct dataset path from new configuration structure
             data_config = self.config_loader.get_data_loader_config()

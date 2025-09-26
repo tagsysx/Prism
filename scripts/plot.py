@@ -553,12 +553,12 @@ class CSIPlotter:
         with open(pas_file, 'r') as f:
             data = json.load(f)
         
-        metrics = ['cosine_similarity', 'ssim']
-        labels = ['Cosine Similarity', 'SSIM']
-        colors = ['blue', 'green']
+        metrics = ['cosine_similarity', 'ssim', 'nmse']
+        labels = ['Cosine Similarity', 'SSIM', 'NMSE']
+        colors = ['blue', 'green', 'red']
         
-        # Create figure with 2x2 subplots (2 metrics x 2 antenna types)
-        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        # Create figure with 3x2 subplots (3 metrics x 2 antenna types)
+        fig, axes = plt.subplots(3, 2, figsize=(16, 18))
         
         # Plot each metric
         for i, (metric, label, color) in enumerate(zip(metrics, labels, colors)):
@@ -583,7 +583,7 @@ class CSIPlotter:
                 ax_bs.set_xlabel('Similarity Value', fontsize=12)
                 ax_bs.set_ylabel('Cumulative Probability', fontsize=12)
                 ax_bs.set_title(f'BS {label} CDF', fontsize=14, fontweight='bold')
-                # Dynamic x-axis range: start from actual min, end at 1
+                # Dynamic x-axis range: start from actual min, end at 1 (all metrics are now 0-1 similarity)
                 min_val = np.min(values)
                 ax_bs.set_xlim(min_val, 1.0)
                 ax_bs.legend(fontsize=9)
@@ -608,7 +608,7 @@ class CSIPlotter:
                 ax_ue.set_xlabel('Similarity Value', fontsize=12)
                 ax_ue.set_ylabel('Cumulative Probability', fontsize=12)
                 ax_ue.set_title(f'UE {label} CDF', fontsize=14, fontweight='bold')
-                # Dynamic x-axis range: start from actual min, end at 1
+                # Dynamic x-axis range: start from actual min, end at 1 (all metrics are now 0-1 similarity)
                 min_val = np.min(values)
                 ax_ue.set_xlim(min_val, 1.0)
                 ax_ue.legend(fontsize=9)
