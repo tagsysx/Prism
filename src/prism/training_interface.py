@@ -91,11 +91,6 @@ class PrismTrainingInterface(nn.Module):
         self._validate_config()
         
         # Initialize LowRankRayTracer for CSI prediction with configuration
-        logger.info(f"🔍 PrismTrainingInterface - Creating LowRankRayTracer with config keys: {list(self.config.keys())}")
-        if 'tracing' in self.config:
-            logger.info(f"🔍 Tracing config being passed: {self.config['tracing']}")
-        else:
-            logger.warning("⚠️ No 'tracing' section found in config!")
         self.ray_tracer = LowRankRayTracer(prism_network=self.prism_network, config=self.config)
         
         # Move ray_tracer to device

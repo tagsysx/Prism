@@ -71,14 +71,16 @@ system:
 
 tracing:
   max_ray_length: 250.0
-  num_sampling_points: 4     # Number of sampling points along each ray (extreme reduction)
+  num_sampling_points: 4      # Number of sampling points along each ray (extreme reduction)
   use_ipe_encoding: true
   use_mixed_precision: true
   # Ray processing chunk sizes for memory management (extreme low memory mode)
-  ray_chunk_size: 4           # Main ray processing chunk size (extreme reduction)
-  freq_chunk_size: 16          # Frequency processing chunk size (minimum viable)
-  ray_sub_chunk_size: 1       # Ray sub-chunk size (minimum value)
-  point_chunk_size: 1         # Point processing chunk size (minimum value)
+  # IMPORTANT: ray_sub_chunk_size MUST be <= ray_chunk_size and point_chunk_size < num_sampling_points
+  # Otherwise will cause tensor dimension mismatch errors!
+  ray_chunk_size: 8            # Main ray processing chunk size (extreme reduction)
+  freq_chunk_size: 4           # Frequency processing chunk size (reduced)
+  ray_sub_chunk_size: 2        # Ray sub-chunk size (MUST be <= ray_chunk_size)
+  point_chunk_size: 2          # Point processing chunk size (MUST be < num_sampling_points)
 
 input:
   dataset_path: data/chrissy/chrissy.h5  # Chrissy dataset path with 4 UE antennas

@@ -75,10 +75,12 @@ tracing:
   use_ipe_encoding: true
   use_mixed_precision: false
   # Ray processing chunk sizes for memory management
+  # IMPORTANT: ray_sub_chunk_size MUST be <= ray_chunk_size and point_chunk_size < num_sampling_points
+  # Otherwise will cause tensor dimension mismatch errors!
   ray_chunk_size: 128         # Main ray processing chunk size (default for PolyU)
   freq_chunk_size: 16         # Frequency processing chunk size (default)
-  ray_sub_chunk_size: 8       # Ray sub-chunk size (default)
-  point_chunk_size: 8         # Point processing chunk size (default)
+  ray_sub_chunk_size: 8       # Ray sub-chunk size (MUST be <= ray_chunk_size)
+  point_chunk_size: 8         # Point processing chunk size (MUST be < num_sampling_points)
 
 input:
   dataset_path: data/polyu/polyu_syn.h5  # PolyU dataset path (reorganized CSI structure)
