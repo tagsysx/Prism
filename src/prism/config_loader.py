@@ -43,6 +43,17 @@ class PDPLossConfig:
     delay_weight: float = 0.3
 
 
+@dataclass
+class PASLossConfig:
+    """PAS (Power Angular Spectrum) Loss configuration."""
+    enabled: bool = False
+    azimuth_divisions: int = 18  # Number of azimuth angle divisions
+    elevation_divisions: int = 6  # Number of elevation angle divisions
+    normalize_pas: bool = True  # Whether to normalize PAS before loss computation
+    type: str = 'mse'  # Loss type: 'mse', 'mae', 'kl_div', 'js_div'
+    weight_by_power: bool = True  # Whether to weight loss by power distribution
+
+
 
 
 @dataclass
@@ -50,9 +61,11 @@ class LossConfig:
     """Overall loss configuration."""
     csi_weight: float = 0.7
     pdp_weight: float = 300.0
+    pas_weight: float = 0.1  # Weight for PAS loss
     regularization_weight: float = 0.01
     csi_loss: CSILossConfig = field(default_factory=CSILossConfig)
     pdp_loss: PDPLossConfig = field(default_factory=PDPLossConfig)
+    pas_loss: PASLossConfig = field(default_factory=PASLossConfig)
 
 
 @dataclass
@@ -75,8 +88,8 @@ class TrainingConfig:
     weight_decay: float = 1e-4
     num_epochs: int = 6
     batch_size: int = 4
-    antenna_batch_size: int = 8  # Number of BS antennas to process in each batch
-    gradient_accumulation_steps: int = 4
+    # antenna_batch_size removed - individual antenna combinations processed per sample
+    # gradient_accumulation_steps removed - gradient accumulation not implemented in training loop
     auto_checkpoint: bool = True
     checkpoint_frequency: int = 5
     epoch_save_interval: int = 1
@@ -103,6 +116,7 @@ class DataConfig:
     sampling_ratio: float = 0.5
     sampling_method: str = 'uniform'
     antenna_consistent: bool = True
+    use_position_aware_loading: bool = False  # Position-aware data loading
     calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
 
 
@@ -110,7 +124,7 @@ class DataConfig:
 class UserEquipmentConfig:
     """User Equipment configuration."""
     num_ue_antennas: int = 1
-    ue_antenna_count: int = 1  # Number of UE antennas to use (1=use antenna 0, 2=use antennas 0,1, 3=use antennas 0,1,2, etc.)
+    # ue_antenna_count removed - single antenna combinations processed per sample
 
 
 @dataclass
@@ -223,8 +237,8 @@ class ModernConfigLoader:
         
         self.num_bs_antennas = base_station.get('num_antennas', 64)
         self.base_subcarriers = base_station.get('ofdm', {}).get('num_subcarriers', 64)
-        self.ue_antenna_count = user_equipment.get('ue_antenna_count', 1)
-        self.num_virtual_subcarriers = self.base_subcarriers * self.ue_antenna_count
+        # ue_antenna_count removed - single antenna combinations processed per sample
+        # num_virtual_subcarriers removed - use base_subcarriers directly
         
         # Parse network configurations with derived parameters
         # 1. PrismNetwork - remove derived parameters that should come from base config
@@ -232,6 +246,15 @@ class ModernConfigLoader:
         # Remove parameters that should be derived from base_station
         prism_config.pop('num_bs_antennas', None)
         prism_config.pop('num_subcarriers', None)
+        
+        # Add tracing configuration to prism_network config
+        tracing_config = self._processed_config.get('tracing', {})
+        if tracing_config:
+            prism_config.update({
+                'max_ray_length': tracing_config.get('max_ray_length', 250.0),
+                'num_sampling_points': tracing_config.get('num_sampling_points', 64)
+            })
+        
         self.prism_network = PrismNetworkConfig(**prism_config)
         
         # 2. AttenuationNetwork - no derived parameters needed
@@ -247,7 +270,7 @@ class ModernConfigLoader:
         
         # 5. FrequencyCodebook - store config with derived num_subcarriers
         freq_config = nn_config.get('frequency_codebook', {}).copy()
-        freq_config['num_subcarriers'] = self.num_virtual_subcarriers
+        freq_config['num_subcarriers'] = self.base_subcarriers  # Use base subcarriers directly
         self.frequency_codebook_config = freq_config
         
         # 6. CSINetwork - store config with derived max_antennas and max_subcarriers
@@ -433,17 +456,15 @@ class ModernConfigLoader:
                 raise ValueError(f"❌ Missing required CSI network parameter: '{param}'")
         
         return {
-            'num_subcarriers': self.base_subcarriers,  # 真实子载波数 (从配置文件读取)
-            'num_virtual_subcarriers': self.num_virtual_subcarriers,  # 虚拟子载波数 (num_subcarriers × ue_antenna_count)
+            'num_subcarriers': self.base_subcarriers,  # Base subcarriers for single antenna combinations
             'num_bs_antennas': self.num_bs_antennas,     # 从基础配置获取
+            'num_ue_antennas': self.user_equipment.num_ue_antennas,  # 从UE配置获取
             'feature_dim': self.prism_network.feature_dim,
             'antenna_embedding_dim': self.prism_network.antenna_embedding_dim,
             'azimuth_divisions': self.prism_network.azimuth_divisions,
             'elevation_divisions': self.prism_network.elevation_divisions,
             'max_ray_length': self.prism_network.max_ray_length,
             'num_sampling_points': self.prism_network.num_sampling_points,
-            'use_ipe_encoding': self.prism_network.use_ipe_encoding,
-            'use_mixed_precision': self.prism_network.use_mixed_precision,
             'attenuation_network_config': self.attenuation_network.__dict__,
             'radiance_network_config': self.radiance_network.__dict__,
             'antenna_codebook_config': self.antenna_codebook.__dict__,
@@ -460,7 +481,7 @@ class ModernConfigLoader:
             'weight_decay': self.training.weight_decay,
             'num_epochs': self.training.num_epochs,
             'batch_size': self.training.batch_size,
-            'gradient_accumulation_steps': self.training.gradient_accumulation_steps,
+            # 'gradient_accumulation_steps' removed - not implemented in training loop
             'auto_checkpoint': self.training.auto_checkpoint,
             'checkpoint_frequency': self.training.checkpoint_frequency,
             'epoch_save_interval': self.training.epoch_save_interval,
@@ -468,25 +489,66 @@ class ModernConfigLoader:
     
     def get_loss_functions_config(self) -> Dict[str, Any]:
         """Get loss functions configuration."""
-        return {
+        config = {
             'csi_weight': self.training.loss.csi_weight,
             'pdp_weight': self.training.loss.pdp_weight,
             'regularization_weight': self.training.loss.regularization_weight,
             'csi_loss': self.training.loss.csi_loss.__dict__,  # Use correct key name
             'pdp_loss': self.training.loss.pdp_loss.__dict__   # Use correct key name
         }
+        
+        # Add PAS loss configuration if it exists
+        if hasattr(self.training.loss, 'pas_loss'):
+            pas_loss_attr = getattr(self.training.loss, 'pas_loss')
+            if hasattr(pas_loss_attr, '__dict__'):
+                config['pas_loss'] = pas_loss_attr.__dict__
+            else:
+                config['pas_loss'] = pas_loss_attr  # It's already a dict
+            config['pas_weight'] = getattr(self.training.loss, 'pas_weight', 0.0)
+        
+        # Add PAS2 loss configuration if it exists
+        if hasattr(self.training.loss, 'pas2_weight'):
+            config['pas2_weight'] = getattr(self.training.loss, 'pas2_weight', 0.0)
+        
+        # Load base_station and user_equipment configs from raw config file for PAS loss
+        # Since these aren't stored as direct attributes in ConfigLoader
+        import yaml
+        try:
+            with open(self.config_path, 'r') as f:
+                raw_config = yaml.safe_load(f)
+            
+            if 'base_station' in raw_config:
+                config['base_station'] = raw_config['base_station']
+            if 'user_equipment' in raw_config:
+                config['user_equipment'] = raw_config['user_equipment']
+            if 'base_station' in raw_config and 'ofdm' in raw_config['base_station']:
+                config['ofdm'] = raw_config['base_station']['ofdm']
+            
+            # Add pas2_loss configuration from raw config
+            if 'training' in raw_config and 'loss' in raw_config['training']:
+                loss_config = raw_config['training']['loss']
+                if 'pas2_loss' in loss_config:
+                    config['pas2_loss'] = loss_config['pas2_loss']
+                if 'pas2_weight' in loss_config:
+                    config['pas2_weight'] = loss_config['pas2_weight']
+        except Exception as e:
+            # If we can't load the raw config, skip these sections
+            pass
+        
+        return config
     
     def get_data_loader_config(self) -> Dict[str, Any]:
         """Get data loader configuration."""
         return {
             'dataset_path': self.data.dataset_path,
-            'ue_antenna_count': self.user_equipment.ue_antenna_count,  # Get from user_equipment config
+            # ue_antenna_count removed - single antenna combinations processed per sample
             'random_seed': self.data.random_seed,
             'train_ratio': self.data.train_ratio,
             'test_ratio': self.data.test_ratio,
             'sampling_ratio': self.data.sampling_ratio,
             'sampling_method': self.data.sampling_method,
             'antenna_consistent': self.data.antenna_consistent,
+            'use_position_aware_loading': self.data.use_position_aware_loading,
             'calibration': {
                 'enabled': self.data.calibration.enabled,
                 'reference_subcarrier_index': self.data.calibration.reference_subcarrier_index,

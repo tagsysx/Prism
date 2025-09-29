@@ -72,14 +72,48 @@ class CSIPlotter:
         """
         self.analysis_dir = Path(analysis_dir)
         self.output_dir = Path(output_dir) if output_dir else self.analysis_dir.parent / 'plots'
+        
+        # Clean existing plots before creating new ones
+        self._clean_plots_directory()
+        
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         # Create subdirectories
         (self.output_dir / 'pas').mkdir(exist_ok=True)
+        (self.output_dir / 'pdp').mkdir(exist_ok=True)
         
         logger.info(f"📊 CSI Plotter initialized:")
         logger.info(f"   Analysis directory: {self.analysis_dir}")
         logger.info(f"   Output directory: {self.output_dir}")
+    
+    def _clean_plots_directory(self):
+        """Clean all existing files in the plots directory before generating new ones"""
+        if self.output_dir.exists():
+            import shutil
+            
+            logger.info(f"🧹 Cleaning plots directory: {self.output_dir}")
+            
+            # Count files to be deleted
+            total_files = 0
+            for item in self.output_dir.rglob('*'):
+                if item.is_file():
+                    total_files += 1
+            
+            if total_files > 0:
+                logger.info(f"   Removing {total_files} existing plot files...")
+                
+                # Remove all contents but keep the directory structure
+                for item in self.output_dir.iterdir():
+                    if item.is_file():
+                        item.unlink()
+                    elif item.is_dir():
+                        shutil.rmtree(item)
+                
+                logger.info(f"   ✅ Cleaned {total_files} files from plots directory")
+            else:
+                logger.info(f"   📁 Plots directory is already empty")
+        else:
+            logger.info(f"   📁 Plots directory does not exist yet, will be created")
     
     def plot_csi_mae_cdf(self):
         """Plot CSI distribution analysis with 4 subplots: amplitude CDF, phase CDF, amplitude MAE CDF, phase MAE CDF"""
@@ -261,7 +295,7 @@ class CSIPlotter:
             
             ax_amp.set_xlabel('Subcarrier Index', fontsize=12)
             ax_amp.set_ylabel('Amplitude', fontsize=12)
-            ax_amp.set_title(f'CSI Amplitude Comparison\nSample {sample_idx}, BS Ant {bs_antenna_idx}, UE Ant {ue_antenna_idx}', 
+            ax_amp.set_title(f'CSI Amplitude Comparison (All Subcarriers)\nSample {sample_idx}, BS Ant {bs_antenna_idx}, UE Ant {ue_antenna_idx}', 
                            fontsize=14, fontweight='bold')
             ax_amp.legend(fontsize=11)
             ax_amp.grid(True, alpha=0.3)
@@ -272,21 +306,34 @@ class CSIPlotter:
             target_phase = np.angle(target_real + 1j * target_imag)
             
             # Apply phase wrapping to predicted phase to minimize distance to target
+            # while keeping the result in [-π, π] range
             pred_phase_wrapped = np.copy(pred_phase)
             for j in range(len(pred_phase)):
-                phase_diff = pred_phase[j] - target_phase[j]
-                # Wrap to [-π, π] range
-                phase_diff_wrapped = np.arctan2(np.sin(phase_diff), np.cos(phase_diff))
-                # Choose the wrapped version if it's closer to target
-                if abs(phase_diff_wrapped) < abs(phase_diff):
-                    pred_phase_wrapped[j] = target_phase[j] + phase_diff_wrapped
+                # Consider all possible wrapped versions of predicted phase
+                pred_original = pred_phase[j]
+                target = target_phase[j]
+                
+                # Three possible versions: original, +2π, -2π
+                candidates = [
+                    pred_original,
+                    pred_original + 2*np.pi,
+                    pred_original - 2*np.pi
+                ]
+                
+                # Find the candidate closest to target
+                distances = [abs(candidate - target) for candidate in candidates]
+                best_idx = np.argmin(distances)
+                best_candidate = candidates[best_idx]
+                
+                # Wrap the best candidate back to [-π, π] range
+                pred_phase_wrapped[j] = np.arctan2(np.sin(best_candidate), np.cos(best_candidate))
             
             ax_phase.plot(subcarriers, pred_phase_wrapped, 'b-', linewidth=2, label='Predicted (wrapped)')
             ax_phase.plot(subcarriers, target_phase, 'r--', linewidth=2, label='Target')
             
             ax_phase.set_xlabel('Subcarrier Index', fontsize=12)
             ax_phase.set_ylabel('Phase (radians)', fontsize=12)
-            ax_phase.set_title(f'CSI Phase Comparison\nSample {sample_idx}, BS Ant {bs_antenna_idx}, UE Ant {ue_antenna_idx}', 
+            ax_phase.set_title(f'CSI Phase Comparison (All Subcarriers)\nSample {sample_idx}, BS Ant {bs_antenna_idx}, UE Ant {ue_antenna_idx}', 
                              fontsize=14, fontweight='bold')
             ax_phase.legend(fontsize=11)
             ax_phase.grid(True, alpha=0.3)
@@ -319,7 +366,7 @@ class CSIPlotter:
         logger.info(f"✅ Demo CSI samples plots saved to: {csi_dir}")
     
     def plot_demo_pas_samples(self):
-        """Plot demo PAS samples: spatial spectrum comparison"""
+        """Plot demo PAS samples: spatial spectrum comparison from new analysis format"""
         logger.info("📊 Plotting demo PAS samples...")
         
         # Load demo PAS samples
@@ -331,104 +378,142 @@ class CSIPlotter:
         with open(demo_file, 'r') as f:
             data = json.load(f)
         
-        bs_samples = data['bs_samples']
-        ue_samples = data['ue_samples']
+        # Create pas subdirectory
+        pas_dir = self.output_dir / 'pas'
+        pas_dir.mkdir(parents=True, exist_ok=True)
         
-        # Plot BS samples
-        for i, sample in enumerate(bs_samples):
-            fig, axes = plt.subplots(1, 2, figsize=(15, 6))
-            
-            pred_spectrum = np.array(sample['predicted_spatial_spectrum'])
-            target_spectrum = np.array(sample['target_spatial_spectrum'])
-            
-            # Extract sample information
-            sample_idx = sample.get('sample_idx', i)
-            batch_idx = sample.get('batch_idx', 'N/A')
-            subcarrier_idx = sample.get('subcarrier_idx', 'N/A')
-            
-            # Create angle arrays for 2D spatial spectrum
-            azimuth_angles = np.linspace(0, 360, pred_spectrum.shape[0])  # 0-360 degrees, 2-degree steps
-            elevation_angles = np.linspace(0, 90, pred_spectrum.shape[1])  # 0-90 degrees, 2-degree steps
-            
-            # Plot predicted spectrum
-            im1 = axes[0].imshow(pred_spectrum, cmap='viridis', aspect='auto',
-                               extent=[0, 360, 0, 90], origin='lower')
-            axes[0].set_title(f'BS Predicted Spatial Spectrum\nSample {sample_idx}, Batch {batch_idx}, Subcarrier {subcarrier_idx}', 
-                            fontsize=12, fontweight='bold')
-            axes[0].set_xlabel('Azimuth Angle (degrees)', fontsize=10)
-            axes[0].set_ylabel('Elevation Angle (degrees)', fontsize=10)
-            axes[0].set_xticks(np.arange(0, 361, 45))  # Every 45 degrees (0, 45, 90, 135, 180, 225, 270, 315, 360)
-            axes[0].set_yticks(np.arange(0, 91, 15))   # Every 15 degrees (0, 15, 30, 45, 60, 75, 90)
-            axes[0].grid(True, alpha=0.3, linestyle='--')
-            plt.colorbar(im1, ax=axes[0], label='Power (dB)')
-            
-            # Plot target spectrum
-            im2 = axes[1].imshow(target_spectrum, cmap='viridis', aspect='auto',
-                               extent=[0, 360, 0, 90], origin='lower')
-            axes[1].set_title(f'BS Target Spatial Spectrum\nSample {sample_idx}, Batch {batch_idx}, Subcarrier {subcarrier_idx}', 
-                            fontsize=12, fontweight='bold')
-            axes[1].set_xlabel('Azimuth Angle (degrees)', fontsize=10)
-            axes[1].set_ylabel('Elevation Angle (degrees)', fontsize=10)
-            axes[1].set_xticks(np.arange(0, 361, 45))  # Every 45 degrees
-            axes[1].set_yticks(np.arange(0, 91, 15))   # Every 15 degrees
-            axes[1].grid(True, alpha=0.3, linestyle='--')
-            plt.colorbar(im2, ax=axes[1], label='Power (dB)')
-            
-            plt.tight_layout()
-            
-            # Save plot with actual sample information
-            output_file = self.output_dir / 'pas' / f'bs_spatial_spectrum_sample_{sample_idx}_batch_{batch_idx}_subcarrier_{subcarrier_idx}.png'
-            plt.savefig(output_file, dpi=300, bbox_inches='tight')
-            plt.close()
+        # Handle PAS samples from new format
+        bs_samples = data.get('bs_samples', [])
+        ue_samples = data.get('ue_samples', [])
         
-        # Plot UE samples
-        for i, sample in enumerate(ue_samples):
-            fig, axes = plt.subplots(1, 2, figsize=(15, 6))
-            
-            pred_spectrum = np.array(sample['predicted_spatial_spectrum'])
-            target_spectrum = np.array(sample['target_spatial_spectrum'])
-            
-            # Extract sample information
-            sample_idx = sample.get('sample_idx', i)
-            batch_idx = sample.get('batch_idx', 'N/A')
-            subcarrier_idx = sample.get('subcarrier_idx', 'N/A')
-            
-            # Create angle arrays for 2D spatial spectrum
-            azimuth_angles = np.linspace(0, 360, pred_spectrum.shape[0])  # 0-360 degrees, 2-degree steps
-            elevation_angles = np.linspace(0, 90, pred_spectrum.shape[1])  # 0-90 degrees, 2-degree steps
-            
-            # Plot predicted spectrum
-            im1 = axes[0].imshow(pred_spectrum, cmap='viridis', aspect='auto',
-                               extent=[0, 360, 0, 90], origin='lower')
-            axes[0].set_title(f'UE Predicted Spatial Spectrum\nSample {sample_idx}, Batch {batch_idx}, Subcarrier {subcarrier_idx}', 
-                            fontsize=12, fontweight='bold')
-            axes[0].set_xlabel('Azimuth Angle (degrees)', fontsize=10)
-            axes[0].set_ylabel('Elevation Angle (degrees)', fontsize=10)
-            axes[0].set_xticks(np.arange(0, 361, 45))  # Every 45 degrees (0, 45, 90, 135, 180, 225, 270, 315, 360)
-            axes[0].set_yticks(np.arange(0, 91, 15))   # Every 15 degrees (0, 15, 30, 45, 60, 75, 90)
-            axes[0].grid(True, alpha=0.3, linestyle='--')
-            plt.colorbar(im1, ax=axes[0], label='Power (dB)')
-            
-            # Plot target spectrum
-            im2 = axes[1].imshow(target_spectrum, cmap='viridis', aspect='auto',
-                               extent=[0, 360, 0, 90], origin='lower')
-            axes[1].set_title(f'UE Target Spatial Spectrum\nSample {sample_idx}, Batch {batch_idx}, Subcarrier {subcarrier_idx}', 
-                            fontsize=12, fontweight='bold')
-            axes[1].set_xlabel('Azimuth Angle (degrees)', fontsize=10)
-            axes[1].set_ylabel('Elevation Angle (degrees)', fontsize=10)
-            axes[1].set_xticks(np.arange(0, 361, 45))  # Every 45 degrees
-            axes[1].set_yticks(np.arange(0, 91, 15))   # Every 15 degrees
-            axes[1].grid(True, alpha=0.3, linestyle='--')
-            plt.colorbar(im2, ax=axes[1], label='Power (dB)')
-            
-            plt.tight_layout()
-            
-            # Save plot with actual sample information
-            output_file = self.output_dir / 'pas' / f'ue_spatial_spectrum_sample_{sample_idx}_batch_{batch_idx}_subcarrier_{subcarrier_idx}.png'
-            plt.savefig(output_file, dpi=300, bbox_inches='tight')
-            plt.close()
+        if not bs_samples and not ue_samples:
+            logger.warning("❌ No BS or UE PAS samples found in demo file")
+            return
         
-        logger.info(f"✅ Demo PAS samples plots saved to: {self.output_dir / 'pas'}")
+        # Plot BS samples (from BS perspective)
+        if bs_samples:
+            logger.info(f"   Plotting {len(bs_samples)} BS perspective PAS samples...")
+            for i, sample in enumerate(bs_samples):
+                fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+                
+                pred_spectrum = np.array(sample['predicted_spatial_spectrum'])
+                target_spectrum = np.array(sample['target_spatial_spectrum'])
+                
+                # Extract sample information from new format
+                sample_idx = sample.get('sample_idx', i)
+                pos_idx = sample.get('pos_idx', 'N/A')
+                ue_antenna_idx = sample.get('ue_antenna_idx', 'N/A')
+                
+                # Get similarity metrics
+                similarity = sample.get('similarity_metrics', {})
+                cosine_sim = similarity.get('cosine_similarity', 'N/A')
+                ssim = similarity.get('ssim', 'N/A')
+                
+                # Determine spectrum dimensions for angle arrays
+                azimuth_divisions = pred_spectrum.shape[0]
+                elevation_divisions = pred_spectrum.shape[1]
+                
+                # Create angle arrays based on actual spectrum dimensions
+                azimuth_angles = np.linspace(0, 360, azimuth_divisions)  # 0-360 degrees
+                elevation_angles = np.linspace(0, 90, elevation_divisions)  # 0-90 degrees
+                
+                # Plot predicted spectrum
+                im1 = axes[0].imshow(pred_spectrum.T, cmap='viridis', aspect='auto',
+                                   extent=[azimuth_angles[0], azimuth_angles[-1], 
+                                          elevation_angles[0], elevation_angles[-1]], 
+                                   origin='lower')
+                axes[0].set_title(f'BS Perspective - Predicted Spatial Spectrum\nSample {sample_idx}, Pos {pos_idx}, UE Ant {ue_antenna_idx}', 
+                                fontsize=12, fontweight='bold')
+                axes[0].set_xlabel('Azimuth Angle (degrees)', fontsize=10)
+                axes[0].set_ylabel('Elevation Angle (degrees)', fontsize=10)
+                axes[0].grid(True, alpha=0.3, linestyle='--')
+                plt.colorbar(im1, ax=axes[0], label='Power')
+                
+                # Plot target spectrum
+                im2 = axes[1].imshow(target_spectrum.T, cmap='viridis', aspect='auto',
+                                   extent=[azimuth_angles[0], azimuth_angles[-1], 
+                                          elevation_angles[0], elevation_angles[-1]], 
+                                   origin='lower')
+                axes[1].set_title(f'BS Perspective - Target Spatial Spectrum\nCosine: {cosine_sim:.3f}, SSIM: {ssim:.3f}', 
+                                fontsize=12, fontweight='bold')
+                axes[1].set_xlabel('Azimuth Angle (degrees)', fontsize=10)
+                axes[1].set_ylabel('Elevation Angle (degrees)', fontsize=10)
+                axes[1].grid(True, alpha=0.3, linestyle='--')
+                plt.colorbar(im2, ax=axes[1], label='Power')
+                
+                plt.tight_layout()
+                
+                # Save plot with new naming convention
+                output_file = pas_dir / f'bs_pas_sample_{sample_idx}_pos_{pos_idx}_ue_ant_{ue_antenna_idx}.png'
+                plt.savefig(output_file, dpi=300, bbox_inches='tight')
+                plt.close()
+                
+                logger.info(f"   ✅ BS sample {i+1}/{len(bs_samples)} saved: {output_file.name}")
+        
+        # Plot UE samples (from UE perspective)
+        if ue_samples:
+            logger.info(f"   Plotting {len(ue_samples)} UE perspective PAS samples...")
+            for i, sample in enumerate(ue_samples):
+                fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+                
+                pred_spectrum = np.array(sample['predicted_spatial_spectrum'])
+                target_spectrum = np.array(sample['target_spatial_spectrum'])
+                
+                # Extract sample information from new format
+                sample_idx = sample.get('sample_idx', i)
+                pos_idx = sample.get('pos_idx', 'N/A')
+                bs_antenna_idx = sample.get('bs_antenna_idx', 'N/A')
+                
+                # Get similarity metrics
+                similarity = sample.get('similarity_metrics', {})
+                cosine_sim = similarity.get('cosine_similarity', 'N/A')
+                ssim = similarity.get('ssim', 'N/A')
+                
+                # Determine spectrum dimensions for angle arrays
+                azimuth_divisions = pred_spectrum.shape[0]
+                elevation_divisions = pred_spectrum.shape[1]
+                
+                # Create angle arrays based on actual spectrum dimensions
+                azimuth_angles = np.linspace(0, 360, azimuth_divisions)  # 0-360 degrees
+                elevation_angles = np.linspace(0, 90, elevation_divisions)  # 0-90 degrees
+                
+                # Plot predicted spectrum
+                im1 = axes[0].imshow(pred_spectrum.T, cmap='viridis', aspect='auto',
+                                   extent=[azimuth_angles[0], azimuth_angles[-1], 
+                                          elevation_angles[0], elevation_angles[-1]], 
+                                   origin='lower')
+                axes[0].set_title(f'UE Perspective - Predicted Spatial Spectrum\nSample {sample_idx}, Pos {pos_idx}, BS Ant {bs_antenna_idx}', 
+                                fontsize=12, fontweight='bold')
+                axes[0].set_xlabel('Azimuth Angle (degrees)', fontsize=10)
+                axes[0].set_ylabel('Elevation Angle (degrees)', fontsize=10)
+                axes[0].grid(True, alpha=0.3, linestyle='--')
+                plt.colorbar(im1, ax=axes[0], label='Power')
+                
+                # Plot target spectrum
+                im2 = axes[1].imshow(target_spectrum.T, cmap='viridis', aspect='auto',
+                                   extent=[azimuth_angles[0], azimuth_angles[-1], 
+                                          elevation_angles[0], elevation_angles[-1]], 
+                                   origin='lower')
+                axes[1].set_title(f'UE Perspective - Target Spatial Spectrum\nCosine: {cosine_sim:.3f}, SSIM: {ssim:.3f}', 
+                                fontsize=12, fontweight='bold')
+                axes[1].set_xlabel('Azimuth Angle (degrees)', fontsize=10)
+                axes[1].set_ylabel('Elevation Angle (degrees)', fontsize=10)
+                axes[1].grid(True, alpha=0.3, linestyle='--')
+                plt.colorbar(im2, ax=axes[1], label='Power')
+                
+                plt.tight_layout()
+                
+                # Save plot with new naming convention
+                output_file = pas_dir / f'ue_pas_sample_{sample_idx}_pos_{pos_idx}_bs_ant_{bs_antenna_idx}.png'
+                plt.savefig(output_file, dpi=300, bbox_inches='tight')
+                plt.close()
+                
+                logger.info(f"   ✅ UE sample {i+1}/{len(ue_samples)} saved: {output_file.name}")
+        
+        logger.info(f"✅ Demo PAS samples plots saved to: {pas_dir}")
+        logger.info(f"   Total BS samples: {len(bs_samples)}")
+        logger.info(f"   Total UE samples: {len(ue_samples)}")
+    
     
     def plot_demo_pdp_samples(self):
         """Plot demo PDP samples: PDP comparison - separate PNG for each sample"""
@@ -541,7 +626,7 @@ class CSIPlotter:
         logger.info(f"✅ PDP similarity CDF plot saved: {output_file}")
     
     def plot_pas_similarity_cdf(self):
-        """Plot PAS similarity metrics CDF - separate subplots for each metric in one PNG"""
+        """Plot PAS similarity metrics CDF from unified analysis format"""
         logger.info("📊 Plotting PAS similarity metrics CDF...")
         
         # Load detailed PAS analysis
@@ -553,75 +638,106 @@ class CSIPlotter:
         with open(pas_file, 'r') as f:
             data = json.load(f)
         
+        # Check what data is available
+        has_bs_data = 'bs_analysis' in data and data['bs_analysis'] and 'similarity_metrics' in data['bs_analysis']
+        has_ue_data = 'ue_analysis' in data and data['ue_analysis'] and 'similarity_metrics' in data['ue_analysis']
+        
+        if not has_bs_data and not has_ue_data:
+            logger.error("❌ No BS or UE similarity metrics found in PAS analysis")
+            return
+        
         metrics = ['cosine_similarity', 'ssim', 'nmse']
         labels = ['Cosine Similarity', 'SSIM', 'NMSE']
         colors = ['blue', 'green', 'red']
         
-        # Create figure with 3x2 subplots (3 metrics x 2 antenna types)
-        fig, axes = plt.subplots(3, 2, figsize=(16, 18))
+        # Determine subplot layout based on available data
+        if has_bs_data and has_ue_data:
+            # Both BS and UE data available - use 3x2 layout
+            fig, axes = plt.subplots(3, 2, figsize=(16, 18))
+            logger.info("   Plotting both BS and UE perspective similarity metrics")
+        elif has_bs_data or has_ue_data:
+            # Only one perspective available - use 3x1 layout
+            fig, axes = plt.subplots(3, 1, figsize=(8, 18))
+            axes = axes.reshape(-1, 1)  # Reshape for consistent indexing
+            perspective = "BS" if has_bs_data else "UE"
+            logger.info(f"   Plotting {perspective} perspective similarity metrics only")
         
         # Plot each metric
         for i, (metric, label, color) in enumerate(zip(metrics, labels, colors)):
             logger.info(f"   Creating {label} CDF subplot...")
             
-            # Plot BS analysis
-            if 'bs_analysis' in data and data['bs_analysis']:
+            # Plot BS analysis if available
+            if has_bs_data:
                 bs_metrics = data['bs_analysis']['similarity_metrics']
-                ax_bs = axes[i, 0]
+                ax_bs = axes[i, 0] if has_ue_data else axes[i, 0]
                 
-                values = np.array(bs_metrics[metric])
-                sorted_values = np.sort(values)
-                cdf = np.arange(1, len(sorted_values) + 1) / len(sorted_values)
-                
-                # Calculate mean and 20th percentile
-                mean_value = np.mean(values)
-                percentile_20 = np.percentile(values, 20)
-                
-                ax_bs.plot(sorted_values, cdf, color=color, linewidth=2, 
-                          label=f'BS {label}\nMean: {mean_value:.4f}\n20th %ile: {percentile_20:.4f}')
-                
-                ax_bs.set_xlabel('Similarity Value', fontsize=12)
-                ax_bs.set_ylabel('Cumulative Probability', fontsize=12)
-                ax_bs.set_title(f'BS {label} CDF', fontsize=14, fontweight='bold')
-                # Dynamic x-axis range: start from actual min, end at 1 (all metrics are now 0-1 similarity)
-                min_val = np.min(values)
-                ax_bs.set_xlim(min_val, 1.0)
-                ax_bs.legend(fontsize=9)
-                ax_bs.grid(True, alpha=0.3)
+                if metric in bs_metrics:
+                    values = np.array(bs_metrics[metric])
+                    sorted_values = np.sort(values)
+                    cdf = np.arange(1, len(sorted_values) + 1) / len(sorted_values)
+                    
+                    # Calculate statistics
+                    mean_value = np.mean(values)
+                    percentile_20 = np.percentile(values, 20)
+                    median_value = np.median(values)
+                    
+                    ax_bs.plot(sorted_values, cdf, color=color, linewidth=2, 
+                              label=f'BS {label}\nMean: {mean_value:.4f}\nMedian: {median_value:.4f}\n20th %ile: {percentile_20:.4f}')
+                    
+                    ax_bs.set_xlabel('Similarity Value', fontsize=12)
+                    ax_bs.set_ylabel('Cumulative Probability', fontsize=12)
+                    ax_bs.set_title(f'BS Perspective - {label} CDF', fontsize=14, fontweight='bold')
+                    ax_bs.set_xlim(np.min(values) * 0.95, 1.0)
+                    ax_bs.legend(fontsize=9)
+                    ax_bs.grid(True, alpha=0.3)
+                else:
+                    ax_bs.text(0.5, 0.5, f'No {metric} data available', 
+                              transform=ax_bs.transAxes, ha='center', va='center', fontsize=12)
+                    ax_bs.set_title(f'BS Perspective - {label} CDF', fontsize=14, fontweight='bold')
             
-            # Plot UE analysis
-            if 'ue_analysis' in data and data['ue_analysis']:
+            # Plot UE analysis if available
+            if has_ue_data:
                 ue_metrics = data['ue_analysis']['similarity_metrics']
-                ax_ue = axes[i, 1]
+                ax_ue = axes[i, 1] if has_bs_data else axes[i, 0]
                 
-                values = np.array(ue_metrics[metric])
-                sorted_values = np.sort(values)
-                cdf = np.arange(1, len(sorted_values) + 1) / len(sorted_values)
-                
-                # Calculate mean and 20th percentile
-                mean_value = np.mean(values)
-                percentile_20 = np.percentile(values, 20)
-                
-                ax_ue.plot(sorted_values, cdf, color=color, linewidth=2, 
-                          label=f'UE {label}\nMean: {mean_value:.4f}\n20th %ile: {percentile_20:.4f}')
-                
-                ax_ue.set_xlabel('Similarity Value', fontsize=12)
-                ax_ue.set_ylabel('Cumulative Probability', fontsize=12)
-                ax_ue.set_title(f'UE {label} CDF', fontsize=14, fontweight='bold')
-                # Dynamic x-axis range: start from actual min, end at 1 (all metrics are now 0-1 similarity)
-                min_val = np.min(values)
-                ax_ue.set_xlim(min_val, 1.0)
-                ax_ue.legend(fontsize=9)
-                ax_ue.grid(True, alpha=0.3)
+                if metric in ue_metrics:
+                    values = np.array(ue_metrics[metric])
+                    sorted_values = np.sort(values)
+                    cdf = np.arange(1, len(sorted_values) + 1) / len(sorted_values)
+                    
+                    # Calculate statistics
+                    mean_value = np.mean(values)
+                    percentile_20 = np.percentile(values, 20)
+                    median_value = np.median(values)
+                    
+                    ax_ue.plot(sorted_values, cdf, color=color, linewidth=2, 
+                              label=f'UE {label}\nMean: {mean_value:.4f}\nMedian: {median_value:.4f}\n20th %ile: {percentile_20:.4f}')
+                    
+                    ax_ue.set_xlabel('Similarity Value', fontsize=12)
+                    ax_ue.set_ylabel('Cumulative Probability', fontsize=12)
+                    ax_ue.set_title(f'UE Perspective - {label} CDF', fontsize=14, fontweight='bold')
+                    ax_ue.set_xlim(np.min(values) * 0.95, 1.0)
+                    ax_ue.legend(fontsize=9)
+                    ax_ue.grid(True, alpha=0.3)
+                else:
+                    ax_ue.text(0.5, 0.5, f'No {metric} data available', 
+                              transform=ax_ue.transAxes, ha='center', va='center', fontsize=12)
+                    ax_ue.set_title(f'UE Perspective - {label} CDF', fontsize=14, fontweight='bold')
         
         plt.tight_layout()
         
-        # Save single plot with all metrics
+        # Save plot
         output_file = self.output_dir / 'pas_similarity_cdf.png'
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
         plt.close()
         
         logger.info(f"✅ PAS similarity CDF plot saved: {output_file}")
+        if has_bs_data:
+            bs_samples = data['analysis_info'].get('total_bs_samples', 'N/A')
+            logger.info(f"   BS perspective samples: {bs_samples}")
+        if has_ue_data:
+            ue_samples = data['analysis_info'].get('total_ue_samples', 'N/A')
+            logger.info(f"   UE perspective samples: {ue_samples}")
     
     def generate_all_plots(self):
         """Generate all plots"""

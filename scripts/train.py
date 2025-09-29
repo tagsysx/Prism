@@ -44,6 +44,7 @@ from prism.networks.prism_network import PrismNetwork
 from prism.training_interface import PrismTrainingInterface
 from prism.config_loader import ModernConfigLoader
 from prism.loss.loss_function import LossFunction
+from prism.data_utils import create_position_aware_dataloader
 from base_runner import BaseRunner
 
 
@@ -212,7 +213,7 @@ class PrismTrainer(BaseRunner):
             'training': self.config_loader.training.__dict__,
             'user_equipment': {
                 'num_ue_antennas': self.config_loader.user_equipment.num_ue_antennas,
-                'ue_antenna_count': self.config_loader.user_equipment.ue_antenna_count
+                # ue_antenna_count removed - single antenna combinations processed per sample
             },
             'input': {
                 'subcarrier_sampling': {
@@ -236,24 +237,8 @@ class PrismTrainer(BaseRunner):
             device=self.device
         )
         
-        # Apply memory optimizations if enabled
-        if self.training_config.get('enable_gradient_checkpointing', False):
-            self.logger.info("🚀 Applying ultra memory optimizations...")
-            
-            try:
-                from prism.memory_optimizations import apply_memory_optimizations
-                self.training_interface, self.prism_network = apply_memory_optimizations(
-                    self.training_interface, 
-                    self.prism_network, 
-                    {'training': self.training_config}
-                )
-                self.logger.info("✅ Memory optimizations applied successfully")
-            except ImportError as e:
-                self.logger.warning(f"⚠️ Memory optimization module not available: {e}")
-                self.logger.info("💡 Using standard memory optimization")
-            except Exception as e:
-                self.logger.error(f"❌ Failed to apply memory optimizations: {e}")
-                self.logger.info("💡 Falling back to standard training")
+        # Memory optimizations are no longer needed due to per-sample processing
+        self.logger.info("🔧 Memory optimizations no longer needed - using per-sample processing")
         
         # Log model info
         model_info = self.prism_network.get_network_info()
@@ -271,7 +256,7 @@ class PrismTrainer(BaseRunner):
         loss_config = self.config_loader.get_loss_functions_config()
         
         # Create combined loss function with unified config
-        self.loss_function = LossFunction(config=loss_config)
+        self.loss_function = LossFunction(config=loss_config, full_config=loss_config)
         
         self.logger.info(f"✅ Loss function created with weights: CSI={loss_config.get('csi_weight', 0.7)}, "
                         f"PDP={loss_config.get('pdp_weight', 0.3)}, "
@@ -320,8 +305,8 @@ class PrismTrainer(BaseRunner):
                 'threshold': scheduler_config.get('threshold', 0.0001),
                 'threshold_mode': scheduler_config.get('threshold_mode', 'rel'),
                 'cooldown': scheduler_config.get('cooldown', 1),
-                'min_lr': scheduler_config.get('min_lr_plateau', 0.000005),
-                'verbose': scheduler_config.get('verbose', False)
+                'min_lr': scheduler_config.get('min_lr_plateau', 0.000005)
+                # Note: 'verbose' parameter removed - deprecated in PyTorch. Use get_last_lr() instead.
             }
         else:
             scheduler_params = {
@@ -331,8 +316,8 @@ class PrismTrainer(BaseRunner):
                 'threshold': getattr(scheduler_config, 'threshold', 0.0001),
                 'threshold_mode': getattr(scheduler_config, 'threshold_mode', 'rel'),
                 'cooldown': getattr(scheduler_config, 'cooldown', 1),
-                'min_lr': getattr(scheduler_config, 'min_lr_plateau', 0.000005),
-                'verbose': getattr(scheduler_config, 'verbose', False)
+                'min_lr': getattr(scheduler_config, 'min_lr_plateau', 0.000005)
+                # Note: 'verbose' parameter removed - deprecated in PyTorch. Use get_last_lr() instead.
             }
         
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -347,22 +332,11 @@ class PrismTrainer(BaseRunner):
         self.logger.info(f"   Threshold: {scheduler_params['threshold']}")
         self.logger.info(f"   Min LR: {scheduler_params['min_lr']}")
         
-        # Create GradScaler for mixed precision training with proper initialization
-        if self.config_loader.prism_network.use_mixed_precision and torch.cuda.is_available():
-            # Initialize GradScaler with conservative settings to avoid "No inf checks" error
-            self.scaler = torch.amp.GradScaler(
-                device='cuda',
-                init_scale=2.**16,  # Start with moderate scale
-                growth_factor=2.0,  # Conservative growth
-                backoff_factor=0.5, # Conservative backoff
-                growth_interval=2000  # Less frequent growth
-            )
-        else:
-            self.scaler = None
+        # Mixed precision disabled: incompatible with complex tensor operations in CSI processing
+        self.scaler = None
         
-        mixed_precision_status = "enabled" if self.config_loader.prism_network.use_mixed_precision else "disabled"
         self.logger.info(f"✅ Optimizer created: Adam (lr={self.training_config['learning_rate']})")
-        self.logger.info(f"   Mixed precision: {mixed_precision_status}")
+        self.logger.info(f"   Mixed precision: disabled (incompatible with complex tensors)")
         
         # Note: Amplitude scaling handled by CSI enhancement network
         
@@ -372,18 +346,19 @@ class PrismTrainer(BaseRunner):
         self.logger.info("🔧 Loading training data...")
         
         # Use base class data loading method
-        ue_positions, bs_positions, antenna_indices, csi_data = super()._load_data()
+        ue_positions, bs_positions, bs_ant_indices, ue_ant_indices, csi_data = super()._load_data()
         
         # Prepare data split for training
-        self._prepare_data_split(ue_positions, bs_positions, antenna_indices, csi_data)
+        self._prepare_data_split(ue_positions, bs_positions, bs_ant_indices, ue_ant_indices, csi_data)
     def _prepare_data_split(self, ue_positions: torch.Tensor, bs_positions: torch.Tensor, 
-                           antenna_indices: torch.Tensor, csi_data: torch.Tensor):
-        """Prepare train/validation data split"""
+                           bs_ant_indices: torch.Tensor, ue_ant_indices: torch.Tensor, csi_data: torch.Tensor):
+        """Prepare train/validation data split for individual CSI samples"""
         self.logger.info(f"✅ Data loaded successfully:")
         self.logger.info(f"   UE positions: {ue_positions.shape}")
         self.logger.info(f"   BS positions: {bs_positions.shape}")
+        self.logger.info(f"   BS antenna indices: {bs_ant_indices.shape}")
+        self.logger.info(f"   UE antenna indices: {ue_ant_indices.shape}")
         self.logger.info(f"   CSI data: {csi_data.shape}")
-        self.logger.info(f"   Antenna indices: {antenna_indices.shape}")
         
         # Create train/validation split
         num_samples = ue_positions.shape[0]
@@ -395,51 +370,92 @@ class PrismTrainer(BaseRunner):
         train_indices = indices[:train_size]
         val_indices = indices[train_size:]
         
-        # Create datasets with logical order: (ue_pos, bs_pos, antenna_idx, target_csi)
+        # Create datasets with logical order: (ue_pos, bs_pos, bs_ant_idx, ue_ant_idx, target_csi)
         train_dataset = TensorDataset(
             ue_positions[train_indices],
             bs_positions[train_indices],
-            antenna_indices[train_indices],
+            bs_ant_indices[train_indices],
+            ue_ant_indices[train_indices],
             csi_data[train_indices]
         )
         
         val_dataset = TensorDataset(
             ue_positions[val_indices],
             bs_positions[val_indices],
-            antenna_indices[val_indices],
+            bs_ant_indices[val_indices],
+            ue_ant_indices[val_indices],
             csi_data[val_indices]
         )
         
-        # Create data loaders
-        self.train_loader = DataLoader(
-            train_dataset,
-            batch_size=self.training_config['batch_size'],
-            shuffle=True,
-            num_workers=0,  # Set to 0 for debugging
-            pin_memory=True if self.device.type == 'cuda' else False
-        )
+        # Create data loaders with position-aware batching if enabled
+        use_position_aware = self.data_config.get('use_position_aware_loading', False)
         
-        self.val_loader = DataLoader(
-            val_dataset,
-            batch_size=self.training_config['batch_size'],
-            shuffle=False,
-            num_workers=0,
-            pin_memory=True if self.device.type == 'cuda' else False
-        )
+        # Get metadata from the loaded data (passed from BaseRunner)
+        metadata = getattr(self, '_loaded_metadata', {})
         
-        self.logger.info(f"✅ Data loaders created:")
-        self.logger.info(f"   Training samples: {len(train_dataset)} ({len(self.train_loader)} batches)")
-        self.logger.info(f"   Validation samples: {len(val_dataset)} ({len(self.val_loader)} batches)")
+        if use_position_aware and 'position_pair_grouping' in metadata:
+            self.logger.info("🔄 Creating position-aware data loaders")
+            
+            # Get position pair grouping information
+            position_pair_grouping = metadata['position_pair_grouping']
+            position_pair_indices = position_pair_grouping['group_indices']
+            
+            # Create position-aware data loaders
+            self.train_loader = create_position_aware_dataloader(
+                dataset=train_dataset,
+                position_pair_indices=position_pair_indices[:len(train_dataset)],
+                batch_size=self.training_config['batch_size'],
+                shuffle=True,
+                drop_last=False,
+                num_workers=0,
+                pin_memory=True if self.device.type == 'cuda' else False
+            )
+            
+            self.val_loader = create_position_aware_dataloader(
+                dataset=val_dataset,
+                position_pair_indices=position_pair_indices[len(train_dataset):],
+                batch_size=self.training_config['batch_size'],
+                shuffle=False,
+                drop_last=False,
+                num_workers=0,
+                pin_memory=True if self.device.type == 'cuda' else False
+            )
+            
+            self.logger.info(f"✅ Position-aware data loaders created:")
+            self.logger.info(f"   Training batches: {len(self.train_loader)}")
+            self.logger.info(f"   Validation batches: {len(self.val_loader)}")
+            self.logger.info(f"   Batch size (position pairs): {self.training_config['batch_size']}")
+            self.logger.info(f"   Samples per position pair: {position_pair_grouping['samples_per_group']}")
+            
+        else:
+            self.logger.info("🔄 Creating standard data loaders")
+            # Create standard data loaders
+            self.train_loader = DataLoader(
+                train_dataset,
+                batch_size=self.training_config['batch_size'],
+                shuffle=True,
+                num_workers=0,  # Set to 0 for debugging
+                pin_memory=True if self.device.type == 'cuda' else False
+            )
+            
+            self.val_loader = DataLoader(
+                val_dataset,
+                batch_size=self.training_config['batch_size'],
+                shuffle=False,
+                num_workers=0,
+                pin_memory=True if self.device.type == 'cuda' else False
+            )
+            
+            self.logger.info(f"✅ Standard data loaders created:")
+            self.logger.info(f"   Training samples: {len(train_dataset)} ({len(self.train_loader)} batches)")
+            self.logger.info(f"   Validation samples: {len(val_dataset)} ({len(self.val_loader)} batches)")
         
         # Validate that training interface subcarrier count matches data
-        # All CSI data is now 4D format: [batch, bs_antennas, ue_antennas, subcarriers]
-        actual_subcarriers = csi_data.shape[3]
+        # CSI data is now 2D format: [batch, subcarriers]
+        actual_subcarriers = csi_data.shape[1]
         if hasattr(self.training_interface, 'num_subcarriers') and self.training_interface.num_subcarriers != actual_subcarriers:
             self.logger.warning(f"⚠️ Subcarrier count mismatch: training_interface has {self.training_interface.num_subcarriers}, data has {actual_subcarriers}")
             self.logger.info(f"   Training interface expects {self.training_interface.num_subcarriers} subcarriers per UE antenna")
-            self.logger.info(f"   Data provides {actual_subcarriers} subcarriers per UE antenna")
-        else:
-            self.logger.info(f"✅ Subcarrier count validation passed: {self.training_interface.num_subcarriers} subcarriers per UE antenna")
         
     def _setup_tensorboard(self):
         """Setup TensorBoard logging."""
@@ -468,12 +484,6 @@ class PrismTrainer(BaseRunner):
 
     def _load_checkpoint(self):
         """Load checkpoint if resuming training."""
-        # Clear previous results if new training (before loading checkpoint)
-        if self.new_training:
-            self._clear_previous_results()
-            # Recreate directories after clearing
-            self.config_loader.ensure_output_directories()
-        
         checkpoint_path = None
         
         # Priority 1: Explicitly specified checkpoint
@@ -533,11 +543,8 @@ class PrismTrainer(BaseRunner):
         monitor = TrainingProgressMonitor(self.training_config['num_epochs'], num_batches)
         monitor.start_epoch(epoch)
         
-        for batch_idx, (ue_pos, bs_pos, antenna_idx, target_csi) in enumerate(self.train_loader):
-            # Data order: (inputs: ue_pos, bs_pos, antenna_idx) -> (output: target_csi)
-            # Clear cache periodically to prevent fragmentation
-            if torch.cuda.is_available() and batch_idx % 20 == 0:
-                torch.cuda.empty_cache()
+        for batch_idx, (ue_pos, bs_pos, bs_ant_idx, ue_ant_idx, target_csi) in enumerate(self.train_loader):
+            # Data order: (inputs: ue_pos, bs_pos, bs_ant_idx, ue_ant_idx) -> (output: target_csi)
             
             # Show progress for each batch
             progress_percent = (batch_idx + 1) / num_batches * 100
@@ -549,72 +556,64 @@ class PrismTrainer(BaseRunner):
             ue_pos = ue_pos.to(self.device)
             bs_pos = bs_pos.to(self.device)
             target_csi = target_csi.to(self.device)
-            antenna_idx = antenna_idx.to(self.device)
+            bs_ant_idx = bs_ant_idx.to(self.device)
+            ue_ant_idx = ue_ant_idx.to(self.device)
             
             # Zero gradients
             self.optimizer.zero_grad()
             
             try:
-                # Forward pass with mixed precision autocast
-                with torch.amp.autocast('cuda', enabled=self.scaler is not None):
-                    # Forward pass through training interface
-                    outputs = self.training_interface(
-                        ue_positions=ue_pos,
-                        bs_positions=bs_pos,  # BS positions for each sample
-                        bs_antenna_indices=antenna_idx
-                    )
-                    
-                    predictions = outputs['csi']
-                    
-                    # Compute loss
-                    loss = self.training_interface.compute_loss(
-                        predictions=predictions,
-                        targets=target_csi,
-                        loss_function=self.loss_function,
-                        validation_mode=False
-                    )
+                # Forward pass without mixed precision (complex tensors incompatible)
+                # Forward pass through training interface
+                outputs = self.training_interface(
+                    ue_positions=ue_pos,
+                    bs_positions=bs_pos,
+                    bs_antenna_indices=bs_ant_idx,
+                    ue_antenna_indices=ue_ant_idx
+                )
                 
-                # Backward pass with mixed precision support
-                if self.scaler is not None:
-                    # Mixed precision training - scale loss and compute gradients
-                    scaled_loss = self.scaler.scale(loss)
-                    scaled_loss.backward()
-                    
-                    # Gradient clipping with scaler
-                    self.scaler.unscale_(self.optimizer)
-                    grad_norm = torch.nn.utils.clip_grad_norm_(self.optimizer.param_groups[0]['params'], max_norm=1.0)
-                    
-                    # Check for infinite or NaN gradients
-                    if torch.isfinite(grad_norm) and torch.isfinite(loss):
-                        # Safe optimizer step
-                        self.scaler.step(self.optimizer)
-                        self.scaler.update()
-                    else:
-                        # Skip optimizer step for non-finite gradients
-                        self.logger.warning(f"⚠️ Non-finite gradients detected (grad_norm={grad_norm}, loss={loss.item()}), skipping step")
-                        self.scaler.update()  # Still update scaler to maintain state
+                predictions = outputs['csi']
+                
+                # Prepare prediction and target dictionaries
+                pred_dict = {
+                    'csi': predictions,
+                    'bs_antenna_indices': bs_ant_idx,
+                    'ue_antenna_indices': ue_ant_idx,
+                    'bs_positions': bs_pos,
+                    'ue_positions': ue_pos
+                }
+                target_dict = {
+                    'csi': target_csi,
+                    'bs_antenna_indices': bs_ant_idx,
+                    'ue_antenna_indices': ue_ant_idx,
+                    'bs_positions': bs_pos,
+                    'ue_positions': ue_pos
+                }
+                
+                # Compute loss
+                loss = self.training_interface.compute_loss(
+                    predictions=pred_dict,
+                    targets=target_dict,
+                    loss_function=self.loss_function,
+                    validation_mode=False
+                )
+                
+                # Backward pass - standard FP32 training (mixed precision disabled for complex tensors)
+                loss.backward()
+                
+                # Gradient clipping
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.optimizer.param_groups[0]['params'], max_norm=1.0)
+                
+                # Optimizer step
+                if torch.isfinite(loss) and torch.isfinite(grad_norm):
+                    self.optimizer.step()
                 else:
-                    # Standard FP32 training
-                    loss.backward()
-                    
-                    # Gradient clipping
-                    grad_norm = torch.nn.utils.clip_grad_norm_(self.optimizer.param_groups[0]['params'], max_norm=1.0)
-                    
-                    # Optimizer step
-                    if torch.isfinite(loss) and torch.isfinite(grad_norm):
-                        self.optimizer.step()
-                    else:
-                        self.logger.warning(f"⚠️ Non-finite values detected (grad_norm={grad_norm}, loss={loss.item()}), skipping step")
+                    self.logger.warning(f"⚠️ Non-finite values detected (grad_norm={grad_norm}, loss={loss.item()}), skipping step")
                 
                 # Update statistics
                 batch_loss = loss.item()
                 total_loss += batch_loss
                 
-                # Minimal memory monitoring for critical issues only
-                if torch.cuda.is_available() and batch_idx % 50 == 0:
-                    peak = torch.cuda.max_memory_allocated() / 1024**3
-                    if peak > 70.0:
-                        self.logger.warning(f"⚠️ CRITICAL: Peak memory {peak:.2f}GB approaching limit!")
                 
                 # Update training interface state
                 self.training_interface.update_training_state(epoch, batch_idx, batch_loss)
@@ -628,6 +627,8 @@ class PrismTrainer(BaseRunner):
                     batch_idx > 0):
                     
                     self.training_interface.save_checkpoint(
+                        epoch=epoch,
+                        batch=batch_idx,
                         optimizer_state=self.optimizer.state_dict(),
                         scheduler_state=self.scheduler.state_dict()
                     )
@@ -636,19 +637,14 @@ class PrismTrainer(BaseRunner):
                 global_step = epoch * num_batches + batch_idx
                 self.writer.add_scalar('Loss/Train/Batch', batch_loss, global_step)
                 
-                # Aggressive memory cleanup between batches
-                del outputs, predictions, loss
-                del ue_pos, bs_pos, target_csi, antenna_idx  # Clear batch data
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()  # Ensure all operations complete
                 
             except Exception as e:
                 self.logger.error(f"❌ Error in batch {batch_idx}: {e}")
                 self.logger.error(f"   UE positions shape: {ue_pos.shape}")
                 self.logger.error(f"   BS positions shape: {bs_pos.shape}")
                 self.logger.error(f"   Target CSI shape: {target_csi.shape}")
-                self.logger.error(f"   Antenna indices shape: {antenna_idx.shape}")
+                self.logger.error(f"   BS antenna indices shape: {bs_ant_idx.shape}")
+                self.logger.error(f"   UE antenna indices shape: {ue_ant_idx.shape}")
                 raise
         
         # Calculate average loss
@@ -667,8 +663,8 @@ class PrismTrainer(BaseRunner):
         num_batches = len(self.val_loader)
         
         with torch.no_grad():
-            for batch_idx, (ue_pos, bs_pos, antenna_idx, target_csi) in enumerate(self.val_loader):
-                # Data order: (inputs: ue_pos, bs_pos, antenna_idx) -> (output: target_csi)
+            for batch_idx, (ue_pos, bs_pos, bs_ant_idx, ue_ant_idx, target_csi) in enumerate(self.val_loader):
+                # Data order: (inputs: ue_pos, bs_pos, bs_ant_idx, ue_ant_idx) -> (output: target_csi)
                 # Show progress for each batch
                 progress_percent = (batch_idx + 1) / num_batches * 100
                 print(f"\r🔍 Validation Batch {batch_idx + 1}/{num_batches} ({progress_percent:.1f}%)", end="", flush=True)
@@ -679,22 +675,40 @@ class PrismTrainer(BaseRunner):
                 ue_pos = ue_pos.to(self.device)
                 bs_pos = bs_pos.to(self.device)
                 target_csi = target_csi.to(self.device)
-                antenna_idx = antenna_idx.to(self.device)
+                bs_ant_idx = bs_ant_idx.to(self.device)
+                ue_ant_idx = ue_ant_idx.to(self.device)
                 
                 try:
                     # Forward pass
                     outputs = self.training_interface(
                         ue_positions=ue_pos,
-                        bs_positions=bs_pos,  # BS positions for each sample
-                        bs_antenna_indices=antenna_idx
+                        bs_positions=bs_pos,
+                        bs_antenna_indices=bs_ant_idx,
+                        ue_antenna_indices=ue_ant_idx
                     )
                     
                     predictions = outputs['csi']
                     
+                    # Prepare prediction and target dictionaries
+                    pred_dict = {
+                        'csi': predictions,
+                        'bs_antenna_indices': bs_ant_idx,
+                        'ue_antenna_indices': ue_ant_idx,
+                        'bs_positions': bs_pos,
+                        'ue_positions': ue_pos
+                    }
+                    target_dict = {
+                        'csi': target_csi,
+                        'bs_antenna_indices': bs_ant_idx,
+                        'ue_antenna_indices': ue_ant_idx,
+                        'bs_positions': bs_pos,
+                        'ue_positions': ue_pos
+                    }
+                    
                     # Compute loss
                     loss = self.training_interface.compute_loss(
-                        predictions=predictions,
-                        targets=target_csi,
+                        predictions=pred_dict,
+                        targets=target_dict,
                         loss_function=self.loss_function,
                         validation_mode=True
                     )
@@ -795,12 +809,6 @@ class PrismTrainer(BaseRunner):
             self.logger.info(f"📈 Total Batches Processed: {total_batches}")
             self.logger.info(f"⚡ Average Time per Batch: {avg_batch_time:.3f}s")
         
-        # Log GPU memory usage if available
-        if torch.cuda.is_available():
-            gpu_memory_allocated = torch.cuda.memory_allocated() / 1024**3
-            gpu_memory_reserved = torch.cuda.memory_reserved() / 1024**3
-            self.logger.info(f"🎮 GPU Memory Allocated: {gpu_memory_allocated:.2f} GB")
-            self.logger.info(f"🎮 GPU Memory Reserved: {gpu_memory_reserved:.2f} GB")
         
         self.logger.info("=" * 80)
         
@@ -819,17 +827,18 @@ class PrismTrainer(BaseRunner):
             avg_batch_time = total_time / total_batches if total_batches > 0 else 0
             print(f"📈 Total Batches Processed: {total_batches}")
             print(f"⚡ Average Time per Batch: {avg_batch_time:.3f}s")
-        if torch.cuda.is_available():
-            gpu_memory_allocated = torch.cuda.memory_allocated() / 1024**3
-            gpu_memory_reserved = torch.cuda.memory_reserved() / 1024**3
-            print(f"🎮 GPU Memory Allocated: {gpu_memory_allocated:.2f} GB")
-            print(f"🎮 GPU Memory Reserved: {gpu_memory_reserved:.2f} GB")
         print("=" * 80)
         
     def train(self):
         """Main training loop."""
         self.logger.info("🚀 Starting Prism neural network training")
         self.training_start_time = time.time()
+        
+        # Clear previous results FIRST if new training
+        if self.new_training:
+            self._clear_previous_results()
+            # Recreate directories after clearing
+            self.config_loader.ensure_output_directories()
         
         # Initialize all components
         self._create_model()
@@ -856,7 +865,13 @@ class PrismTrainer(BaseRunner):
                 val_loss = self.validate_epoch(epoch)
                 
                 # Learning rate scheduling
+                old_lr = self.optimizer.param_groups[0]['lr']
                 self.scheduler.step(val_loss)
+                new_lr = self.optimizer.param_groups[0]['lr']
+                
+                # Log learning rate changes (replaces deprecated 'verbose' parameter)
+                if old_lr != new_lr:
+                    self.logger.info(f"📉 Learning rate reduced: {old_lr:.2e} → {new_lr:.2e}")
                 
                 # Update best loss and save best model
                 if val_loss < self.best_loss:
@@ -868,6 +883,8 @@ class PrismTrainer(BaseRunner):
                 # Epoch-level checkpointing
                 if epoch % self.training_config['epoch_save_interval'] == 0:
                     self.training_interface.save_checkpoint(
+                        epoch=epoch,
+                        batch=0,  # Epoch-level checkpoint
                         optimizer_state=self.optimizer.state_dict(),
                         scheduler_state=self.scheduler.state_dict()
                     )
@@ -912,10 +929,12 @@ class PrismTrainer(BaseRunner):
             # Save final model
             final_model_path = os.path.join(self.output_paths['models_dir'], 'final_model.pt')
             torch.save(self.prism_network.state_dict(), final_model_path)
+            self.logger.info(f"🎯 Final model saved: {final_model_path}")
             
             # Save final checkpoint
             self.training_interface.save_checkpoint(
-                filename='final_checkpoint.pt',
+                epoch=epoch,
+                batch=-1,  # Final checkpoint marker
                 optimizer_state=self.optimizer.state_dict(),
                 scheduler_state=self.scheduler.state_dict()
             )

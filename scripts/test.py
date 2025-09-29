@@ -44,7 +44,6 @@ from prism.networks.prism_network import PrismNetwork
 from prism.config_loader import ModernConfigLoader
 from prism.training_interface import PrismTrainingInterface
 from prism.loss.loss_function import LossFunction
-from prism.loss.ss_loss import SSLoss
 from base_runner import BaseRunner
 
 # Configure logging
@@ -164,9 +163,10 @@ class PrismTester(BaseRunner):
     - Chrissy: Custom dataset format
     """
     
-    def __init__(self, config_path: str, model_path: str = None, data_path: str = None, output_dir: str = None, gpu_id: int = None, random_seed: int = None):
+    def __init__(self, config_path: str, model_selection: str = 'best', data_path: str = None, output_dir: str = None, gpu_id: int = None, random_seed: int = None):
         """Initialize tester with configuration and optional model/data/output paths"""
         self.gpu_id = gpu_id  # Store GPU ID for device setup
+        self.model_selection = model_selection  # Store model selection strategy
         
         # Initialize base runner
         super().__init__(config_path)
@@ -178,28 +178,33 @@ class PrismTester(BaseRunner):
             # Use default model path from output configuration
             output_paths = self.config_loader.get_output_paths()
             
-            # Priority: best_model.pt -> final_model.pt
+            # Model selection based on user choice
             best_model_path = os.path.join(output_paths['models_dir'], 'best_model.pt')
             final_model_path = os.path.join(output_paths['models_dir'], 'final_model.pt')
             
-            if model_path:
-                # Use explicitly provided model path
-                self.model_path = model_path
-                logger.info(f"Using explicitly provided model: {self.model_path}")
-                print(f"🎯 Using explicitly provided model: {self.model_path}")
-            elif os.path.exists(best_model_path):
-                # Use best model if it exists
-                self.model_path = best_model_path
-                logger.info(f"Using best model: {self.model_path}")
-                print(f"🏆 Using BEST model: {self.model_path}")
-            elif os.path.exists(final_model_path):
-                # Fallback to final model
-                self.model_path = final_model_path
-                logger.info(f"Using final model (best model not found): {self.model_path}")
-                print(f"📁 Using FINAL model (best model not found): {self.model_path}")
+            if self.model_selection == 'best':
+                if os.path.exists(best_model_path):
+                    self.model_path = best_model_path
+                    logger.info(f"Using best model: {self.model_path}")
+                    print(f"🏆 Using BEST model: {self.model_path}")
+                else:
+                    raise FileNotFoundError(f"Best model not found: {best_model_path}")
+            elif self.model_selection == 'final':
+                if os.path.exists(final_model_path):
+                    self.model_path = final_model_path
+                    logger.info(f"Using final model: {self.model_path}")
+                    print(f"📁 Using FINAL model: {self.model_path}")
+                else:
+                    # Fallback: look for latest checkpoint
+                    latest_checkpoint = self._find_latest_checkpoint()
+                    if latest_checkpoint:
+                        self.model_path = latest_checkpoint
+                        logger.info(f"Final model not found, using latest checkpoint: {self.model_path}")
+                        print(f"📁 Using LATEST CHECKPOINT (final model not found): {self.model_path}")
+                    else:
+                        raise FileNotFoundError(f"Final model not found: {final_model_path}, and no checkpoints available")
             else:
-                # No model found
-                raise FileNotFoundError(f"No model found. Checked: {best_model_path}, {final_model_path}")
+                raise ValueError(f"Invalid model selection: {self.model_selection}. Must be 'best' or 'final'")
             
             # Construct dataset path from new configuration structure
             data_config = self.config_loader.get_data_loader_config()
@@ -247,29 +252,10 @@ class PrismTester(BaseRunner):
         self._load_model()
         self._load_data()
         
-        # Initialize CSI loss for testing
-        self._init_csi_loss()
+        # CSI loss computation handled by training interface compute_loss method
     
     
-    def _init_csi_loss(self):
-        """Initialize CSI loss for testing metrics"""
-        self.csi_loss = None
-        
-        try:
-            from prism.loss.csi_loss import CSILoss
-            
-            # Initialize CSI loss with default configuration
-            self.csi_loss = CSILoss(
-                phase_weight=1.0,
-                magnitude_weight=1.0,
-                normalize_weights=True
-            ).to(self.device)
-            
-            logger.info("✅ CSI loss initialized for testing")
-                
-        except Exception as e:
-            logger.warning(f"⚠️  Failed to initialize CSI loss: {e}")
-            self.csi_loss = None
+    # _init_csi_loss removed - CSI loss computation handled by training interface compute_loss method
     
     def _setup_logging(self):
         """Setup logging with proper file path from config for testing"""
@@ -329,6 +315,26 @@ class PrismTester(BaseRunner):
         
         logger.info(f"🗂️  Testing directories created under: {self.output_dir}")
     
+    def _find_latest_checkpoint(self):
+        """Find the latest checkpoint in the checkpoint directory."""
+        checkpoint_dir = self.config_loader.get_output_paths()['checkpoint_dir']
+        if not os.path.exists(checkpoint_dir):
+            return None
+        
+        # Find all .pt checkpoint files
+        checkpoint_files = []
+        for file in os.listdir(checkpoint_dir):
+            if file.endswith('.pt') and file.startswith('checkpoint_epoch_'):
+                full_path = os.path.join(checkpoint_dir, file)
+                checkpoint_files.append((full_path, os.path.getmtime(full_path)))
+        
+        if not checkpoint_files:
+            return None
+        
+        # Return the most recent checkpoint
+        latest_checkpoint = max(checkpoint_files, key=lambda x: x[1])[0]
+        return latest_checkpoint
+    
     def _load_model(self):
         """Load trained Prism network model from TrainingInterface checkpoint"""
         logger.info(f"Loading TrainingInterface model from {self.model_path}")
@@ -370,7 +376,7 @@ class PrismTester(BaseRunner):
                 'training': self.config_loader.training.__dict__,
                 'user_equipment': {
                     'num_ue_antennas': self.config_loader.user_equipment.num_ue_antennas,
-                    'ue_antenna_count': self.config_loader.user_equipment.ue_antenna_count
+                    # ue_antenna_count removed - single antenna combinations processed per sample
                 },
                 'input': {
                     'subcarrier_sampling': {
@@ -429,11 +435,13 @@ class PrismTester(BaseRunner):
                 
                 if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
                     # Full checkpoint format from training interface
-                    self.model.load_state_dict(checkpoint['model_state_dict'])
+                    self.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+                    logger.info("✅ Model loaded with strict=False (some buffers may be reinitialized)")
                     self.checkpoint_info = checkpoint.get('checkpoint_info', {})
                 elif isinstance(checkpoint, dict):
                     # Simple state dict (probably just the PrismNetwork)
-                    self.prism_network.load_state_dict(checkpoint)
+                    self.prism_network.load_state_dict(checkpoint, strict=False)
+                    logger.info("✅ Model loaded with strict=False (some buffers may be reinitialized)")
                     self.checkpoint_info = {}
                 else:
                     raise ValueError("Unknown checkpoint format")
@@ -466,38 +474,34 @@ class PrismTester(BaseRunner):
         """Load and prepare testing data based on configuration"""
         logger.info("🔧 Loading testing data...")
         
-        # Use base class data loading method
-        ue_positions, bs_positions, antenna_indices, csi_data = super()._load_data()
+        # Use base class data loading method (returns 5 values, metadata stored in base class)
+        ue_positions, bs_positions, bs_ant_indices, ue_ant_indices, csi_data = super()._load_data()
         
         # Prepare test split for testing
-        self._prepare_test_split(ue_positions, bs_positions, antenna_indices, csi_data)
+        self._prepare_test_split(ue_positions, bs_positions, bs_ant_indices, ue_ant_indices, csi_data)
     def _prepare_test_split(self, ue_positions: torch.Tensor, bs_positions: torch.Tensor, 
-                           antenna_indices: torch.Tensor, csi_data: torch.Tensor):
-        """Prepare test data split"""
-        logger.info(f"✅ Data loaded successfully:")
+                           bs_ant_indices: torch.Tensor, ue_ant_indices: torch.Tensor, csi_data: torch.Tensor):
+        """Prepare test data split for individual CSI samples"""
+        logger.info(f"✅ Data loaded successfully using load_and_split_by_csi:")
         logger.info(f"   UE positions: {ue_positions.shape}")
         logger.info(f"   BS positions: {bs_positions.shape}")
+        logger.info(f"   BS antenna indices: {bs_ant_indices.shape}")
+        logger.info(f"   UE antenna indices: {ue_ant_indices.shape}")
         logger.info(f"   CSI data: {csi_data.shape}")
-        logger.info(f"   Antenna indices: {antenna_indices.shape}")
         
-        # Create test split (use the portion not used for training)
-        num_samples = ue_positions.shape[0]
-        train_size = int(num_samples * self.train_ratio)
-        
-        # Use same random split as training
-        torch.manual_seed(self.random_seed)
-        indices = torch.randperm(num_samples)
-        test_indices = indices[train_size:]  # Use validation portion as test
-        
-        # Store test data
-        self.test_ue_positions = ue_positions[test_indices]
-        self.test_bs_positions = bs_positions[test_indices]
-        self.test_csi_data = csi_data[test_indices]
-        self.test_antenna_indices = antenna_indices[test_indices]
+        # Data is already split by load_and_split_by_csi in test mode
+        # Store test data directly
+        self.test_ue_positions = ue_positions
+        self.test_bs_positions = bs_positions
+        self.test_bs_ant_indices = bs_ant_indices
+        self.test_ue_ant_indices = ue_ant_indices
+        self.test_csi_data = csi_data
         
         logger.info(f"✅ Test data prepared:")
-        logger.info(f"   Test samples: {len(test_indices)} (indices {train_size} to {num_samples-1})")
+        logger.info(f"   Test samples: {len(ue_positions)}")
         logger.info(f"   Test UE positions: {self.test_ue_positions.shape}")
+        logger.info(f"   Test BS antenna indices: {self.test_bs_ant_indices.shape}")
+        logger.info(f"   Test UE antenna indices: {self.test_ue_ant_indices.shape}")
         logger.info(f"   Test CSI data: {self.test_csi_data.shape}")
     
     def test(self):
@@ -527,19 +531,21 @@ class PrismTester(BaseRunner):
                 batch_ue_pos = self.test_ue_positions[i:end_idx].to(self.device)
                 batch_bs_pos = self.test_bs_positions[i:end_idx].to(self.device)
                 batch_target_csi = self.test_csi_data[i:end_idx].to(self.device)
-                batch_antenna_idx = self.test_antenna_indices[i:end_idx].to(self.device)
+                batch_bs_ant_idx = self.test_bs_ant_indices[i:end_idx].to(self.device)
+                batch_ue_ant_idx = self.test_ue_ant_indices[i:end_idx].to(self.device)
                 
                 try:
                     # Forward pass through training interface
                     outputs = self.model(
                         ue_positions=batch_ue_pos,
                         bs_positions=batch_bs_pos,
-                        bs_antenna_indices=batch_antenna_idx
+                        bs_antenna_indices=batch_bs_ant_idx,
+                        ue_antenna_indices=batch_ue_ant_idx
                     )
                     
                     batch_predictions = outputs['csi']
                     
-                    # Apply CSI calibration to both predictions and targets
+                    # Apply CSI calibration directly for testing (no loss computation needed)
                     batch_predictions_calibrated = self.model._csi_calibration(batch_predictions)
                     batch_targets_calibrated = self.model._csi_calibration(batch_target_csi)
                     
@@ -599,21 +605,22 @@ class PrismTester(BaseRunner):
         phase_mse_wrapped = torch.mean(phase_diff_wrapped ** 2).item()
         phase_mae_wrapped = torch.mean(torch.abs(phase_diff_wrapped)).item()
         
-        # 4. CSI Loss
+        # 4. CSI Loss - use training interface compute_loss for consistency
         csi_loss_value = None
-        if self.csi_loss is not None:
-            try:
-                # Move tensors to device and compute CSI loss
-                pred_device = predictions.to(self.device)
-                target_device = targets.to(self.device)
+        try:
+            # Move tensors to device and compute CSI loss using training interface
+            pred_device = predictions.to(self.device)
+            target_device = targets.to(self.device)
+            
+            with torch.no_grad():
+                # Use model's compute_loss method for consistent loss calculation
+                loss_outputs = self.model.compute_loss(pred_device, target_device)
+                csi_loss_value = loss_outputs['total_loss'].item()
                 
-                with torch.no_grad():
-                    csi_loss_value = self.csi_loss(pred_device, target_device).item()
-                    
-                logger.info(f"✅ CSI loss computed: {csi_loss_value:.8f}")
-            except Exception as e:
-                logger.warning(f"⚠️  Failed to compute CSI loss: {e}")
-                csi_loss_value = None
+            logger.info(f"✅ CSI loss computed: {csi_loss_value:.8f}")
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to compute CSI loss: {e}")
+            csi_loss_value = None
         
         # 5. Statistical analysis
         pred_mag_stats = {
@@ -682,17 +689,24 @@ class PrismTester(BaseRunner):
         logger.info(f"💾 Metrics saved to: {metrics_file}")
     
     def _save_results(self, predictions_calibrated: torch.Tensor, targets_calibrated: torch.Tensor):
-        """Save testing results with calibrated CSI"""
+        """Save testing results with calibrated CSI in 4D format for analyze script"""
         logger.info("💾 Saving calibrated CSI testing results...")
         
         results_file = self.output_dir / 'predictions' / 'test_results.npz'
         
-        # Prepare data dictionary with calibrated CSI
+        # Restructure data from individual samples to 4D format [positions, bs_antennas, ue_antennas, subcarriers]
+        logger.info("🔄 Restructuring CSI data to 4D format for analyze script...")
+        
+        predictions_4d, targets_4d, unique_positions = self._restructure_to_4d_format(
+            predictions_calibrated, targets_calibrated
+        )
+        
+        # Prepare data dictionary with 4D CSI format
         save_data = {
-            'predictions': predictions_calibrated.cpu().numpy(),
-            'targets': targets_calibrated.cpu().numpy(),
-            'test_ue_positions': self.test_ue_positions.cpu().numpy(),
-            'test_bs_positions': self.test_bs_positions.cpu().numpy()
+            'predictions': predictions_4d.cpu().numpy(),
+            'targets': targets_4d.cpu().numpy(),
+            'test_ue_positions': unique_positions.cpu().numpy(),
+            'test_bs_positions': unique_positions.cpu().numpy()  # For compatibility, use same positions
         }
         
         np.savez_compressed(results_file, **save_data)
@@ -700,19 +714,88 @@ class PrismTester(BaseRunner):
         logger.info(f"💾 Calibrated CSI results saved to: {results_file}")
         logger.info(f"   File contains: {list(save_data.keys())}")
         logger.info(f"   CSI calibration applied: reference subcarrier index = {self.model.reference_subcarrier_index}")
+        logger.info(f"   Data format: 4D [positions, bs_antennas, ue_antennas, subcarriers]")
         
         # 输出详细的文件信息
         print(f"\n💾 预测结果文件保存完成:")
         print(f"{'='*60}")
         print(f"📄 文件路径: {results_file}")
         print(f"📊 文件大小: {results_file.stat().st_size / 1024 / 1024:.2f} MB")
-        print(f"📊 数据形状:")
-        print(f"   - predictions: {save_data['predictions'].shape}")
-        print(f"   - targets: {save_data['targets'].shape}")
+        print(f"📊 数据形状 (4D格式):")
+        print(f"   - predictions: {save_data['predictions'].shape} [positions, bs_antennas, ue_antennas, subcarriers]")
+        print(f"   - targets: {save_data['targets'].shape} [positions, bs_antennas, ue_antennas, subcarriers]")
         print(f"   - test_ue_positions: {save_data['test_ue_positions'].shape}")
         print(f"   - test_bs_positions: {save_data['test_bs_positions'].shape}")
         print(f"🔧 CSI校准: 已应用 (参考子载波索引: {self.model.reference_subcarrier_index})")
+        print(f"✅ 格式: 兼容analyze.py脚本的4D格式")
         print(f"{'='*60}")
+    
+    def _restructure_to_4d_format(self, predictions: torch.Tensor, targets: torch.Tensor):
+        """
+        Restructure CSI data from individual samples to 4D format for analyze script
+        
+        Args:
+            predictions: [num_samples, subcarriers] - individual antenna combination samples
+            targets: [num_samples, subcarriers] - individual antenna combination samples
+            
+        Returns:
+            predictions_4d: [positions, bs_antennas, ue_antennas, subcarriers]
+            targets_4d: [positions, bs_antennas, ue_antennas, subcarriers]
+            unique_positions: [positions, 3] - unique UE positions
+        """
+        logger.info("🔄 Restructuring CSI data from individual samples to 4D format...")
+        
+        # Get unique positions and their indices
+        unique_ue_positions, inverse_indices = torch.unique(self.test_ue_positions, dim=0, return_inverse=True)
+        num_positions = len(unique_ue_positions)
+        
+        # Get antenna configuration from data
+        unique_bs_indices = torch.unique(self.test_bs_ant_indices)
+        unique_ue_indices = torch.unique(self.test_ue_ant_indices)
+        num_bs_antennas = len(unique_bs_indices)
+        num_ue_antennas = len(unique_ue_indices)
+        num_subcarriers = predictions.shape[1]
+        
+        logger.info(f"📊 Restructuring parameters:")
+        logger.info(f"   Positions: {num_positions}")
+        logger.info(f"   BS antennas: {num_bs_antennas}")
+        logger.info(f"   UE antennas: {num_ue_antennas}")
+        logger.info(f"   Subcarriers: {num_subcarriers}")
+        logger.info(f"   Total samples: {len(predictions)}")
+        
+        # Initialize 4D tensors
+        predictions_4d = torch.zeros(num_positions, num_bs_antennas, num_ue_antennas, num_subcarriers, 
+                                   dtype=predictions.dtype, device=predictions.device)
+        targets_4d = torch.zeros(num_positions, num_bs_antennas, num_ue_antennas, num_subcarriers,
+                               dtype=targets.dtype, device=targets.device)
+        
+        # Create mapping dictionaries for antenna indices
+        bs_idx_map = {idx.item(): i for i, idx in enumerate(unique_bs_indices)}
+        ue_idx_map = {idx.item(): i for i, idx in enumerate(unique_ue_indices)}
+        
+        # Fill 4D tensors
+        for sample_idx in range(len(predictions)):
+            # Get position index
+            pos_idx = inverse_indices[sample_idx].item()
+            
+            # Get antenna indices
+            bs_ant_idx = self.test_bs_ant_indices[sample_idx].item()
+            ue_ant_idx = self.test_ue_ant_indices[sample_idx].item()
+            
+            # Map to 4D indices
+            bs_4d_idx = bs_idx_map[bs_ant_idx]
+            ue_4d_idx = ue_idx_map[ue_ant_idx]
+            
+            # Fill data
+            predictions_4d[pos_idx, bs_4d_idx, ue_4d_idx, :] = predictions[sample_idx]
+            targets_4d[pos_idx, bs_4d_idx, ue_4d_idx, :] = targets[sample_idx]
+        
+        logger.info(f"✅ 4D restructuring completed:")
+        logger.info(f"   Predictions 4D shape: {predictions_4d.shape}")
+        logger.info(f"   Targets 4D shape: {targets_4d.shape}")
+        logger.info(f"   Unique positions shape: {unique_ue_positions.shape}")
+        
+        return predictions_4d, targets_4d, unique_ue_positions
     
     # End of Selection
 
@@ -734,14 +817,18 @@ Examples:
   python test.py --config configs/chrissy.yml
   
   # Test with custom model and output directory
-  python test.py --config configs/sionna.yml --model path/to/model.pt --output results/custom_test
+  python test.py --config configs/sionna.yml --model best --output results/custom_test
+  
+  # Test with final model instead of best model
+  python test.py --config configs/sionna.yml --model final
   
   # Test on specific GPU
   python test.py --config configs/sionna.yml --gpu 0
         """
     )
     parser.add_argument('--config', required=True, help='Path to configuration file (e.g., configs/sionna.yml)')
-    parser.add_argument('--model', help='Path to trained model file (optional, will auto-detect if not provided)')
+    parser.add_argument('--model', choices=['best', 'final'], default='best', 
+                       help='Model selection: best (default) or final')
     parser.add_argument('--data', help='Path to test data file (optional, will use config path)')
     parser.add_argument('--output', help='Output directory for results (optional, will use config output dir)')
     parser.add_argument('--gpu', type=int, default=0, help='GPU ID to use (default: 0)')
@@ -776,7 +863,7 @@ Examples:
         
         tester = PrismTester(
             config_path=args.config,
-            model_path=args.model,
+            model_selection=args.model,
             data_path=args.data,
             output_dir=args.output,
             gpu_id=args.gpu,

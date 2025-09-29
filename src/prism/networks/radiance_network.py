@@ -24,15 +24,15 @@ class RadianceNetwork(nn.Module):
     - Single antenna: num_antennas=1 (special case)
     - Multi-antenna: num_antennas>1 (general case)
     
-    Each antenna processes: [IPE-encoded UE_pos, IPE-encoded view_dir, 128D_features, 64D_antenna_embedding] 
+    Each antenna processes: [Linear-encoded UE_pos, Linear-encoded view_dir, 128D_features, 64D_antenna_embedding] 
     → N_BS × N_UE × K radiation values
     Output: Complex values representing radiation characteristics with antenna dimension.
     """
     
     def __init__(
         self,
-        ue_position_dim: int = 63,  # IPE-encoded 3D position
-        view_direction_dim: int = 63,  # IPE-encoded 3D direction
+        ue_position_dim: int = 16,  # Linear projection of 3D position to N-dimensional features
+        view_direction_dim: int = 16,  # Linear projection of 3D direction to N-dimensional features
         feature_dim: int = 128,  # From AttenuationNetwork
         antenna_embedding_dim: int = 64,  # From antenna codebook
         hidden_dim: int = 256,
@@ -42,7 +42,8 @@ class RadianceNetwork(nn.Module):
         activation: str = "relu",
         complex_output: bool = True,
         dropout: float = 0.1,
-        use_skip_connections: bool = True
+        use_skip_connections: bool = True,
+        output_dim: int = 32  # Output dimension for ray tracing (R dimension)
     ):
         super().__init__()
         
@@ -57,10 +58,15 @@ class RadianceNetwork(nn.Module):
         self.use_skip_connections = use_skip_connections
         self.complex_output = complex_output
         self.dropout = dropout
+        self.output_dim = output_dim  # Store output_dim for ray tracing
         
         # Optimize chunk_size for memory efficiency
         self.chunk_size = 512  # Increased for better GPU utilization
         self.use_gradient_checkpointing = True  # Enable gradient checkpointing
+        
+        # Linear projection layers for encoding raw 3D inputs
+        self.ue_position_encoder = nn.Linear(3, ue_position_dim)    # UE position: 3D -> N-dimensional
+        self.view_direction_encoder = nn.Linear(3, view_direction_dim)  # View direction: 3D -> N-dimensional
         
         # Calculate input dimension
         self.input_dim = ue_position_dim + view_direction_dim + feature_dim + antenna_embedding_dim
@@ -99,9 +105,9 @@ class RadianceNetwork(nn.Module):
         # The output_dim should match AttenuationNetwork's output_dim for ray tracing
         if self.complex_output:
             # For complex output, we need 2 * output_dim
-            output_dim = 2 * 32  # Fixed dimension of 32 for ray tracing
+            output_dim = 2 * self.output_dim  # Use configurable output_dim for ray tracing
         else:
-            output_dim = 32  # Fixed dimension of 32 for ray tracing
+            output_dim = self.output_dim  # Use configurable output_dim for ray tracing
             
         self.output_layer = nn.Linear(self.hidden_dim, output_dim)
         
@@ -109,6 +115,9 @@ class RadianceNetwork(nn.Module):
         self.dropout_layers = nn.ModuleList([
             nn.Dropout(self.dropout) for _ in range(self.num_layers - 1)
         ])
+        
+        # Initialize weights properly to prevent NaN
+        self._initialize_weights()
         
     def forward(
         self, 
@@ -118,26 +127,26 @@ class RadianceNetwork(nn.Module):
         antenna_embeddings: torch.Tensor
     ) -> torch.Tensor:
         """
-        Unified forward pass through the RadianceNetwork with chunking for memory optimization.
+        Forward pass through the RadianceNetwork with chunking for memory optimization.
         
-        Handles both single and multi-antenna cases uniformly:
-        - Single antenna: num_antennas=1 (special case)
-        - Multi-antenna: num_antennas>1 (general case)
+        Handles single BS-UE antenna pair embeddings.
         
         Args:
-            ue_positions: IPE-encoded UE positions of shape (batch_size, ue_position_dim)
+            ue_positions: Raw UE positions of shape (batch_size, 3) - will be linearly encoded to N-dimensional
             view_directions: IPE-encoded viewing directions of shape (batch_size, view_direction_dim)
             features: 128D feature vectors from AttenuationNetwork of shape (batch_size, feature_dim)
-            antenna_embeddings: Antenna embeddings of shape (batch_size, num_antennas, antenna_embedding_dim)
-                               - Single antenna: num_antennas=1
-                               - Multi-antenna: num_antennas>1
+            antenna_embeddings: BS-UE antenna pair embeddings of shape (batch_size, antenna_embedding_dim)
             
         Returns:
-            Radiation values of shape (batch_size, num_antennas, num_ue_antennas, num_subcarriers)
-            - Always includes antenna dimension for unified processing
-            - Single antenna case: num_antennas=1
+            Radiation values of shape (batch_size, output_dim)
         """
-        batch_size, num_antennas = antenna_embeddings.shape[:2]
+        batch_size = antenna_embeddings.shape[0]
+        
+        # Validate antenna embeddings shape
+        if antenna_embeddings.dim() != 2:
+            raise ValueError(f"Expected 2D antenna embeddings (batch_size, embedding_dim), got shape: {antenna_embeddings.shape}")
+        
+        # No need to expand antenna embeddings - they're already in the right format
         
         # Debug: Check input shapes to catch expand errors
         logger.debug(f"🔍 RadianceNetwork forward debug:")
@@ -145,39 +154,33 @@ class RadianceNetwork(nn.Module):
         logger.debug(f"   - view_directions shape: {view_directions.shape}")
         logger.debug(f"   - features shape: {features.shape}")
         logger.debug(f"   - antenna_embeddings shape: {antenna_embeddings.shape}")
-        logger.debug(f"   - batch_size: {batch_size}, num_antennas: {num_antennas}")
+        logger.debug(f"   - batch_size: {batch_size}")
         
-        # Unified processing: always handle as multi-antenna (single antenna is just num_antennas=1)
-        # Expand inputs to match antenna dimension for consistent processing
+        # Encode inputs using linear projections (3D -> N-dimensional)
+        if ue_positions.shape[-1] != 3:
+            raise ValueError(f"Expected UE positions to have 3 dimensions (x,y,z), but got {ue_positions.shape[-1]}")
+        if view_directions.shape[-1] != 3:
+            raise ValueError(f"Expected view directions to have 3 dimensions (dx,dy,dz), but got {view_directions.shape[-1]}")
         
-        # Expand ue_positions and view_directions to match antenna dimension
-        # From (batch_size, dim) to (batch_size, num_antennas, dim)
-        try:
-            ue_positions_expanded = ue_positions.unsqueeze(1).expand(batch_size, num_antennas, -1)
-            view_directions_expanded = view_directions.unsqueeze(1).expand(batch_size, num_antennas, -1)
-            features_expanded = features.unsqueeze(1).expand(batch_size, num_antennas, -1)
-        except Exception as e:
-            logger.error(f"❌ Tensor expand error in RadianceNetwork:")
-            logger.error(f"   - ue_positions shape: {ue_positions.shape}")
-            logger.error(f"   - view_directions shape: {view_directions.shape}")
-            logger.error(f"   - features shape: {features.shape}")
-            logger.error(f"   - antenna_embeddings shape: {antenna_embeddings.shape}")
-            logger.error(f"   - batch_size: {batch_size}, num_antennas: {num_antennas}")
-            logger.error(f"   - Error: {str(e)}")
-            raise
+        # Linear encoding: (batch_size, 3) -> (batch_size, encoded_dim)
+        ue_positions_encoded = self.ue_position_encoder(ue_positions)
+        view_directions_encoded = self.view_direction_encoder(view_directions)
+
         
         # Concatenate inputs: [ue_pos, view_dir, features, antenna_embedding]
-        # Shape: (batch_size, num_antennas, total_input_dim)
+        # Shape: (batch_size, total_input_dim)
         x = torch.cat([
-            ue_positions_expanded, 
-            view_directions_expanded, 
-            features_expanded, 
+            ue_positions_encoded, 
+            view_directions_encoded, 
+            features, 
             antenna_embeddings
         ], dim=-1)
         
-        # Process through unified multi-antenna path with chunking
-        # Flatten for chunking: (batch_size * num_antennas, total_input_dim)
-        x_flat = x.view(-1, x.shape[-1])
+        # Input validation passed - position normalization ensures numerical stability
+        
+        # Process through network with chunking
+        # x is already in the right shape: (batch_size, total_input_dim)
+        x_flat = x
         
         # If input is small, process directly
         if x_flat.shape[0] <= self.chunk_size:
@@ -210,36 +213,49 @@ class RadianceNetwork(nn.Module):
             raw_output = torch.cat(raw_outputs, dim=0)
         
         # Now perform reshape and complex conversion on the full raw output
-        # Raw output shape: (batch_size * num_antennas, output_dim)
+        # Raw output shape: (batch_size, output_dim)
         if self.complex_output:
-            # For complex output, output_dim = 2 * 32 (fixed dimension for ray tracing)
-            # Reshape to (batch_size * num_antennas, 32, 2)
-            raw_output = raw_output.view(batch_size * num_antennas, 32, 2)
+            # For complex output, output_dim = 2 * self.output_dim (configurable dimension for ray tracing)
+            # Reshape to (batch_size, self.output_dim, 2)
+            raw_output = raw_output.view(batch_size, self.output_dim, 2)
             # Convert to complex tensor with float32 for numerical stability
             real_part = raw_output[..., 0].to(torch.float32)
             imag_part = raw_output[..., 1].to(torch.float32)
             # Use float32 complex tensors for numerical stability
             output = real_part + 1j * imag_part  # Complex64
-            # Reshape back to (batch_size, num_antennas, 32)
-            output = output.view(batch_size, num_antennas, 32)
+            # Output shape: (batch_size, output_dim)
         else:
-            # Reshape to (batch_size, num_antennas, 32)
-            output = raw_output.view(batch_size, num_antennas, 32)
+            # Output shape: (batch_size, output_dim)
+            output = raw_output
         
         return output
     
+    def _initialize_weights(self):
+        """Initialize network weights to prevent numerical instability."""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                # Use Xavier/Glorot initialization for better numerical stability
+                nn.init.xavier_uniform_(module.weight, gain=1.0)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0.0)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.constant_(module.weight, 1.0)
+                nn.init.constant_(module.bias, 0.0)
+    
     def _process_unified_antennas(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Unified antenna processing method. Processes flattened input and returns raw output before reshape.
+        Unified BS-UE antenna pair processing method. Processes flattened input and returns raw output before reshape.
         
         Args:
             x: Flattened input tensor of shape (flattened_batch_size, total_input_dim)
-               where flattened_batch_size = batch_size * num_antennas (or chunk thereof)
+               where flattened_batch_size = batch_size * num_bs_antennas * num_ue_antennas (or chunk thereof)
             
         Returns:
             Raw output tensor of shape (flattened_batch_size, output_dim)
-               where output_dim = 2 * num_ue_antennas * num_subcarriers if complex_output else num_ue_antennas * num_subcarriers
+               where output_dim = 2 * self.output_dim if complex_output else self.output_dim
         """
+        # NaN debugging removed - issue resolved with position normalization
+        
         # Input layer
         h = self.input_layer(x)
         h = self.input_norm(h)
@@ -263,13 +279,13 @@ class RadianceNetwork(nn.Module):
     
     def get_output_shape(self) -> Tuple[int, int, int]:
         """
-        Get the output shape for unified antenna processing.
+        Get the output shape for BS-UE antenna pair processing.
         
         Returns:
-            Tuple of (num_antennas, num_ue_antennas, num_subcarriers)
-            Note: num_antennas is determined at runtime (1 for single antenna, >1 for multi-antenna)
+            Tuple of (num_bs_antennas, num_ue_antennas, output_dim)
+            Note: num_bs_antennas and num_ue_antennas are determined at runtime
         """
-        return (-1, self.num_ue_antennas, self.num_subcarriers)  # -1 indicates variable antenna dimension
+        return (-1, -1, self.output_dim)  # -1 indicates variable antenna dimensions
     
     def is_complex(self) -> bool:
         """Check if the network outputs complex values."""
@@ -291,7 +307,7 @@ class RadianceNetworkConfig:
     
     def __init__(
         self,
-        ue_position_dim: int = 63,
+        ue_position_dim: int = 16,  # Linear projection of 3D position to N-dimensional features
         view_direction_dim: int = 63,
         feature_dim: int = 128,
         antenna_embedding_dim: int = 64,

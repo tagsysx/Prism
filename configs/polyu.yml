@@ -4,14 +4,9 @@ base_station:
   num_antennas: 1  # PolyU has 1 BS antenna
   antenna_array:
     configuration: "1x1"  # PolyU has 1 BS antenna
-    spacing_x: 0.0625  # Antenna spacing in x direction (half wavelength at 2.4 GHz)
-    spacing_y: 0.0625  # Antenna spacing in y direction (half wavelength at 2.4 GHz)
   ofdm:
     bandwidth: 20.0e6  # PolyU WiFi bandwidth: 20 MHz
     center_frequency: 2.4e9  # PolyU WiFi frequency: 2.4 GHz
-    fft_size: 64
-    guard_band_ratio: 0.0
-    num_guard_carriers: 0
     num_subcarriers: 64  # PolyU has 64 subcarriers
     subcarrier_spacing: 312.5e3  # PolyU WiFi subcarrier spacing: 312.5 kHz
 
@@ -19,9 +14,6 @@ user_equipment:
   num_ue_antennas: 8  # PolyU has 8 UE antennas
   antenna_array:
     configuration: "2x4"  # PolyU UE antenna array: 2 rows x 4 columns
-    spacing_x: 0.0625  # Antenna spacing in x direction (half wavelength at 2.4 GHz)
-    spacing_y: 0.0625  # Antenna spacing in y direction (half wavelength at 2.4 GHz)
-  ue_antenna_count: 8  # Number of UE antennas to use (1=antenna 0, 2=antennas 0,1, 3=antennas 0,1,2, etc.)
 
 neural_networks:
   antenna_codebook:
@@ -38,10 +30,10 @@ neural_networks:
     use_shortcuts: true
   csi_network:
     d_model: 128
-    n_layers: 2
+    n_layers: 4
     n_heads: 8
     d_ff: 512
-    dropout_rate: 0.1
+    dropout_rate: 0.05
     max_magnitude: 50.0
     # Add frequency domain smoothing for better phase prediction
     smoothing_weight: 0  # Lower smoothing weight for PolyU dataset
@@ -62,8 +54,8 @@ neural_networks:
     hidden_dim: 64
     num_layers: 2
     output_dim: 32
-    ue_position_dim: 63
-    view_direction_dim: 63
+    ue_position_dim: 16  # Linear projection of 3D UE position to 16D features
+    view_direction_dim: 16  # Linear projection of 3D view direction to 16D features
 
 system:
   device: cuda
@@ -71,16 +63,14 @@ system:
 
 tracing:
   max_ray_length: 250.0
-  num_sampling_points: 16
-  use_ipe_encoding: true
-  use_mixed_precision: false
+  num_sampling_points: 64
   # Ray processing chunk sizes for memory management
   # IMPORTANT: ray_sub_chunk_size MUST be <= ray_chunk_size and point_chunk_size < num_sampling_points
   # Otherwise will cause tensor dimension mismatch errors!
-  ray_chunk_size: 128         # Main ray processing chunk size (default for PolyU)
-  freq_chunk_size: 16         # Frequency processing chunk size (default)
-  ray_sub_chunk_size: 8       # Ray sub-chunk size (MUST be <= ray_chunk_size)
-  point_chunk_size: 8         # Point processing chunk size (MUST be < num_sampling_points)
+  ray_chunk_size: 1024         # Main ray processing chunk size (default for PolyU)
+  freq_chunk_size: 512         # Frequency processing chunk size (default)
+  ray_sub_chunk_size: 128       # Ray sub-chunk size (MUST be <= ray_chunk_size)
+  point_chunk_size: 56         # Point processing chunk size (MUST be < num_sampling_points)
 
 input:
   dataset_path: data/polyu/polyu_syn.h5  # PolyU dataset path (reorganized CSI structure)
@@ -90,6 +80,8 @@ input:
     sampling_method: uniform
     sampling_ratio: 1
   train_ratio: 0.8
+  # Position-aware data loading configuration
+  use_position_aware_loading: true  # Set to true to enable position-pair-based batching
   # Calibration configuration
   calibration:
     enabled: true
@@ -106,14 +98,13 @@ output:
     tensorboard_dir: '{{base_dir}}/training/tensorboard'
 
 training:
-  num_epochs: 50  # Reduced epochs for PolyU dataset
-  batch_size: 8
-  antenna_batch_size: 16  # Process 16 BS antennas at a time for PolyU (has more memory)
-  checkpoint_frequency: 10
-  enable_gradient_checkpointing: true
+  num_epochs: 60  # Reduced epochs for PolyU dataset
+  batch_size: 16  # Position pairs per batch (16 pairs × 8 antenna combinations = 128 samples)
+  checkpoint_frequency: 5
+  auto_checkpoint: true
   epoch_save_interval: 1
-  gradient_accumulation_steps: 1
-  learning_rate: 0.00015
+  learning_rate: 0.0003  # Adjusted for position-aware batching (16 position pairs)
+  weight_decay: 1.0e-06  # Reduced from 1.0e-05 to allow more dynamic range
   lr_scheduler:
     type: 'reduce_on_plateau'
     mode: 'min'
@@ -127,28 +118,41 @@ training:
   loss:
     csi_loss:
       enabled: true
-      magnitude_weight: 1.0
-      phase_weight: 2.0
+      magnitude_weight: 1.2
+      phase_weight: 3.0
       normalize_weights: true
       max_magnitude: 50.0  # Maximum magnitude for numerical stability
     csi_weight: 1.0
     pdp_loss:
       enabled: false
-      fft_size: 128  # Adjusted for 64 subcarriers
+      fft_size: 2048  # Adjusted for 64 subcarriers
       normalize_pdp: true
       type: hybrid
-    pdp_weight: 0.0
+    pdp_weight: 1.0
+    pas_loss:
+      enabled: true  # Set to false to disable original PAS loss
+      azimuth_divisions: 18  # ~20 degree resolution (180/18 = 10 deg per bin)
+      elevation_divisions: 6   # 15 degree resolution (90/6 = 15 deg per bin)
+      normalize_pas: false  # Disable normalization for larger loss values
+      type: mse  # 'mse', 'mae', 'kl_div', 'js_div'
+      weight_by_power: false  # Disable power weighting for simplicity
+    pas_weight: 1.0
+    pas2_loss:
+      enabled: false  # Enable PAS Loss 2 (Multi-subcarrier CSI Spatial-Frequency Loss)
+      freq_spatial_weight: 0.40  # Weight for frequency-spatial correlation loss
+      phase_consistency_weight: 0.35  # Weight for phase consistency loss
+      angle_spectrum_weight: 0.25  # Weight for angle spectrum loss
+      lambda_smooth: 0.1  # Smoothing regularization parameter
+      mu_eig: 0.1  # Eigenvalue gradient regularization parameter
+    pas2_weight: 0.03
     regularization_loss:
       enabled: false
     regularization_weight: 0.0
-  auto_checkpoint: true
-  ray_chunk_size: 10
-  scaling_factor: 1.0e-9
-  weight_decay: 1.0e-05
+
 
 analysis:
   pas:
     ignore_amplitude: false  # Whether to ignore amplitude and only use phase for spatial spectrum computation
-    count: 500  # Maximum number of spatial spectrum samples to analyze (randomly selected from all samples)
+    count: 50000  # Maximum number of spatial spectrum samples to analyze (randomly selected from all samples)
     enabled: true  # Enable PAS analysis
     use_parallel: false  # Enable parallel processing for PAS analysis

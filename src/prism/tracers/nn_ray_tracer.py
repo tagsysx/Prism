@@ -48,7 +48,7 @@ class NNRayTracer:
         self.num_bs_antennas = prism_network.num_bs_antennas
         
         # Calculate derived parameters
-        self.azimuth_resolution = 2 * torch.pi / self.azimuth_divisions
+        self.azimuth_resolution = 2 * torch.pi / self.azimuth_divisions  # 0° to 360° (2π range)
         self.elevation_resolution = (torch.pi / 2) / self.elevation_divisions
         self.total_directions = self.azimuth_divisions * self.elevation_divisions
         
@@ -85,7 +85,8 @@ class NNRayTracer:
         frequency_basis = frequency_basis_vectors.to(device)
         
         # Process each ray direction separately according to the original formula
-        with torch.amp.autocast('cuda', enabled=True):
+        # Note: Mixed precision disabled for complex tensor operations
+        with torch.amp.autocast('cuda', enabled=False):
             num_directions = u_rho.shape[0]  # A*B
             num_subcarriers = frequency_basis.shape[0]
             

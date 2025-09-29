@@ -44,7 +44,7 @@ class NaiveRayTracer:
         self.num_sampling_points = prism_network.num_sampling_points
         
         # Calculate derived parameters using precise π values
-        self.azimuth_resolution = 2 * torch.pi / self.azimuth_divisions  # 0° to 360°
+        self.azimuth_resolution = 2 * torch.pi / self.azimuth_divisions  # 0° to 360° (2π range)
         self.elevation_resolution = (torch.pi / 2) / self.elevation_divisions   # 0° to 90° (π/2 range)
         self.total_directions = self.azimuth_divisions * self.elevation_divisions
         
@@ -92,7 +92,8 @@ class NaiveRayTracer:
             ue_pos = ue_position.to(device)
             
             # Use PrismNetwork for ray tracing
-            with torch.amp.autocast('cuda', enabled=True):
+            # Note: Mixed precision disabled for complex tensor operations
+            with torch.amp.autocast('cuda', enabled=False):
                 outputs = self.prism_network(
                     bs_position=bs_pos,
                     ue_position=ue_pos,

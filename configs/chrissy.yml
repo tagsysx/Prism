@@ -4,14 +4,9 @@ base_station:
   num_antennas: 64  # Chrissy has 64 BS antennas (8x8 array)
   antenna_array:
     configuration: "8x8"  # Chrissy has 8x8 BS antenna array
-    spacing_x: 0.0405  # Antenna spacing in x direction (half wavelength at 3.7 GHz)
-    spacing_y: 0.0405  # Antenna spacing in y direction (half wavelength at 3.7 GHz)
   ofdm:
     bandwidth: 100.0e6  # Chrissy bandwidth: 100 MHz
     center_frequency: 3.7e9  # Chrissy frequency: 3.7 GHz
-    fft_size: 512
-    guard_band_ratio: 0.0
-    num_guard_carriers: 0
     num_subcarriers: 408  # Chrissy has 408 subcarriers
     subcarrier_spacing: 240.0e3  # Chrissy subcarrier spacing: 240 kHz
 
@@ -19,9 +14,6 @@ user_equipment:
   num_ue_antennas: 4  # Chrissy-u4 has 4 UE antennas
   antenna_array:
     configuration: "1x4"  # Chrissy-u4 UE antenna array: 1x4 antennas
-    spacing_x: 0.0405  # Antenna spacing in x direction (half wavelength at 3.7 GHz)
-    spacing_y: 0.0405  # Antenna spacing in y direction (half wavelength at 3.7 GHz)
-  ue_antenna_count: 1  # Number of UE antennas to use (4=antennas 0, 1, 2, and 3)
 
 neural_networks:
   antenna_codebook:
@@ -62,8 +54,8 @@ neural_networks:
     hidden_dim: 64
     num_layers: 2
     output_dim: 32
-    ue_position_dim: 63
-    view_direction_dim: 63
+    ue_position_dim: 16  # Linear projection of 3D UE position to 16D features
+    view_direction_dim: 16  # Linear projection of 3D view direction to 16D features
 
 system:
   device: cuda
@@ -71,16 +63,14 @@ system:
 
 tracing:
   max_ray_length: 250.0
-  num_sampling_points: 4      # Number of sampling points along each ray (extreme reduction)
-  use_ipe_encoding: true
-  use_mixed_precision: true
-  # Ray processing chunk sizes for memory management (extreme low memory mode)
+  num_sampling_points: 64      # Number of sampling points along each ray (enhanced precision)
+  # Ray processing chunk sizes for memory management (high performance mode)
   # IMPORTANT: ray_sub_chunk_size MUST be <= ray_chunk_size and point_chunk_size < num_sampling_points
   # Otherwise will cause tensor dimension mismatch errors!
-  ray_chunk_size: 8            # Main ray processing chunk size (extreme reduction)
-  freq_chunk_size: 4           # Frequency processing chunk size (reduced)
-  ray_sub_chunk_size: 1        # Ray sub-chunk size (MUST be <= ray_chunk_size)
-  point_chunk_size: 1          # Point processing chunk size (MUST be < num_sampling_points)
+  ray_chunk_size: 1024        # Main ray processing chunk size (maximum GPU utilization)
+  freq_chunk_size: 512        # Frequency processing chunk size (maximum throughput)
+  ray_sub_chunk_size: 128     # Ray sub-chunk size (MUST be <= ray_chunk_size)
+  point_chunk_size: 56        # Point processing chunk size (MUST be < num_sampling_points=64)
 
 input:
   dataset_path: data/chrissy/chrissy.h5  # Chrissy dataset path with 4 UE antennas
@@ -88,8 +78,10 @@ input:
   subcarrier_sampling:
     antenna_consistent: true
     sampling_method: uniform
-    sampling_ratio: 1  # Use only 25% of subcarriers for extreme memory saving
+    sampling_ratio: 1  # Use all subcarriers for full dataset training
   train_ratio: 0.8
+  # Position-aware data loading configuration
+  use_position_aware_loading: true  # Set to true to enable position-pair-based batching
   # Calibration configuration
   calibration:
     enabled: true
@@ -107,13 +99,12 @@ output:
 
 training:
   num_epochs: 50
-  batch_size: 1  # Minimal batch size to reduce memory usage
-  antenna_batch_size: 1  # Process 4 BS antennas at a time (instead of all 64)
-  checkpoint_frequency: 10
-  enable_gradient_checkpointing: true
+  batch_size: 300  # Aggressive batch size to maximize GPU utilization (50% → 80% VRAM)
+  checkpoint_frequency: 5
+  auto_checkpoint: true
   epoch_save_interval: 1
-  gradient_accumulation_steps: 8  # Increased to compensate for tiny chunks
   learning_rate: 0.00015
+  weight_decay: 1.0e-05
   lr_scheduler:
     type: 'reduce_on_plateau'
     mode: 'min'
@@ -137,13 +128,26 @@ training:
       normalize_pdp: true
       type: hybrid
     pdp_weight: 0.0
+    pas_loss:
+      enabled: false  # Disable original PAS loss for Chrissy dataset
+      azimuth_divisions: 36  # Higher resolution for Chrissy dataset
+      elevation_divisions: 9
+      normalize_pas: true
+      type: mse
+      weight_by_power: true
+    pas_weight: 0.0
+    pas_loss2:
+      enabled: true  # Enable PAS Loss 2 for Chrissy dataset
+      freq_spatial_weight: 0.40  # Weight for frequency-spatial correlation loss
+      phase_consistency_weight: 0.35  # Weight for phase consistency loss
+      angle_spectrum_weight: 0.25  # Weight for angle spectrum loss
+      lambda_smooth: 0.1  # Smoothing regularization parameter
+      mu_eig: 0.1  # Eigenvalue gradient regularization parameter
+    pas2_weight: 0.3  # Lower weight for Chrissy dataset
     regularization_loss:
       enabled: false
     regularization_weight: 0.0
-  auto_checkpoint: true
-  ray_chunk_size: 4          # Further reduced for memory efficiency
-  scaling_factor: 1.0e-15
-  weight_decay: 1.0e-05
+
 
 analysis:
   pas:

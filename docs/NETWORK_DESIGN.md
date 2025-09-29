@@ -160,8 +160,8 @@ model:
   hidden_dim: 256               # Hidden layer dimension
   feature_dim: 128              # Feature vector dimension (configurable)
   antenna_embedding_dim: 64     # Antenna embedding dimension
-  use_antenna_codebook: true    # Enable antenna-specific embeddings
-  use_ipe_encoding: true        # Enable IPE encoding for spatial inputs
+  # IPE encoding is always enabled for spatial inputs
+  # Antenna codebook is always enabled for antenna-specific embeddings
   
   # AntennaNetwork Configuration
   antenna_network:

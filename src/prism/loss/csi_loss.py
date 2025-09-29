@@ -57,19 +57,26 @@ class CSILoss(nn.Module):
             self.phase_weight = phase_weight
             self.magnitude_weight = magnitude_weight
         
-    def forward(self, predicted_csi: torch.Tensor, target_csi: torch.Tensor) -> torch.Tensor:
+    def forward(self, predictions: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
         Compute subcarrier-precise CSI loss between predicted and target CSI
         
         Args:
-            predicted_csi: Predicted CSI tensor (complex)
-                          Shape: [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
-            target_csi: Target CSI tensor (complex)
-                       Shape: [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
+            predictions: Dictionary containing predicted values
+                        - 'csi': Predicted CSI tensor [batch_size, num_subcarriers] (complex)
+                        - 'bs_antenna_indices': BS antenna indices [batch_size] (optional)
+                        - 'ue_antenna_indices': UE antenna indices [batch_size] (optional)
+                        - 'bs_positions': BS positions [batch_size, 3] (optional)
+                        - 'ue_positions': UE positions [batch_size, 3] (optional)
+            targets: Dictionary containing target values (same structure as predictions)
         
         Returns:
             loss: Computed loss value (scalar tensor)
         """
+        # Extract CSI tensors from dictionaries
+        predicted_csi = predictions['csi']
+        target_csi = targets['csi']
+        
         if predicted_csi.shape != target_csi.shape:
             raise ValueError(f"Shape mismatch: predicted {predicted_csi.shape} vs target {target_csi.shape}")
         
@@ -119,55 +126,51 @@ class CSILoss(nn.Module):
             logger.error(f"   Min: {target_mag.min()}, Max: {target_mag.max()}")
         
         # 1. Per-subcarrier magnitude MSE
-        # Handle 4D format: [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
-        if pred_mag.dim() != 4:
-            raise ValueError(f"Expected 4D tensor [batch, bs_antennas, ue_antennas, subcarriers], got {pred_mag.shape}")
+        # Handle 2D format: [batch_size, num_subcarriers] - individual CSI samples
+        if pred_mag.dim() != 2:
+            raise ValueError(f"Expected 2D tensor [batch_size, num_subcarriers], got {pred_mag.shape}")
         
-        batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers = pred_mag.shape
+        batch_size, num_subcarriers = pred_mag.shape
         
-        # Per-antenna-pair magnitude loss: compute MSE for each antenna pair independently
-        antenna_pair_mag_losses = []
+        # Per-sample magnitude loss: compute MSE for each sample independently
+        sample_mag_losses = []
         for b in range(batch_size):
-            for bs in range(num_bs_antennas):
-                for ue in range(num_ue_antennas):
-                    # Get magnitude vectors for this antenna pair: [num_subcarriers]
-                    pred_antenna = pred_mag[b, bs, ue, :]
-                    target_antenna = target_mag[b, bs, ue, :]
-                    
-                    # Compute MSE for this antenna pair (all subcarriers)
-                    antenna_mse = torch.mean((pred_antenna - target_antenna)**2)
-                    antenna_pair_mag_losses.append(antenna_mse)
+            # Get magnitude vectors for this sample: [num_subcarriers]
+            pred_sample = pred_mag[b, :]
+            target_sample = target_mag[b, :]
+            
+            # Compute MSE for this sample (all subcarriers)
+            sample_mse = torch.mean((pred_sample - target_sample)**2)
+            sample_mag_losses.append(sample_mse)
         
-        # Average MSE across all antenna pairs
-        subcarrier_mag_loss = torch.mean(torch.stack(antenna_pair_mag_losses))
+        # Average MSE across all samples
+        subcarrier_mag_loss = torch.mean(torch.stack(sample_mag_losses))
         
-        # 2. Per-antenna-pair magnitude distribution preservation
-        antenna_pair_mean_losses = []
-        antenna_pair_std_losses = []
+        # 2. Per-sample magnitude distribution preservation
+        sample_mean_losses = []
+        sample_std_losses = []
         
         for b in range(batch_size):
-            for bs in range(num_bs_antennas):
-                for ue in range(num_ue_antennas):
-                    # Get magnitude vectors for this antenna pair: [num_subcarriers]
-                    pred_antenna = pred_mag[b, bs, ue, :]
-                    target_antenna = target_mag[b, bs, ue, :]
-                    
-                    # Compute mean and std for this antenna pair
-                    pred_mean = torch.mean(pred_antenna)
-                    target_mean = torch.mean(target_antenna)
-                    pred_std = torch.sqrt(torch.clamp(torch.var(pred_antenna, unbiased=False), min=1e-12))
-                    target_std = torch.sqrt(torch.clamp(torch.var(target_antenna, unbiased=False), min=1e-12))
-                    
-                    # Compute distribution losses for this antenna pair
-                    mean_loss = (pred_mean - target_mean)**2
-                    std_loss = (pred_std - target_std)**2
-                    
-                    antenna_pair_mean_losses.append(mean_loss)
-                    antenna_pair_std_losses.append(std_loss)
+            # Get magnitude vectors for this sample: [num_subcarriers]
+            pred_sample = pred_mag[b, :]
+            target_sample = target_mag[b, :]
+            
+            # Compute mean and std for this sample
+            pred_mean = torch.mean(pred_sample)
+            target_mean = torch.mean(target_sample)
+            pred_std = torch.sqrt(torch.clamp(torch.var(pred_sample, unbiased=False), min=1e-12))
+            target_std = torch.sqrt(torch.clamp(torch.var(target_sample, unbiased=False), min=1e-12))
+            
+            # Compute distribution losses for this sample
+            mean_loss = (pred_mean - target_mean)**2
+            std_loss = (pred_std - target_std)**2
+            
+            sample_mean_losses.append(mean_loss)
+            sample_std_losses.append(std_loss)
         
-        # Average distribution losses across all antenna pairs
-        mean_distribution_loss = torch.mean(torch.stack(antenna_pair_mean_losses))
-        std_distribution_loss = torch.mean(torch.stack(antenna_pair_std_losses))
+        # Average distribution losses across all samples
+        mean_distribution_loss = torch.mean(torch.stack(sample_mean_losses))
+        std_distribution_loss = torch.mean(torch.stack(sample_std_losses))
         
         # Debug: Check distribution losses
         if torch.isnan(mean_distribution_loss) or torch.isinf(mean_distribution_loss):
@@ -182,57 +185,51 @@ class CSILoss(nn.Module):
         
         phase_diff = torch.remainder(pred_phase - target_phase + np.pi, 2*np.pi) - np.pi
         
-        # Per-antenna-pair phase loss: compute MSE for each antenna pair independently
-        antenna_pair_phase_losses = []
+        # Per-sample phase loss: compute MSE for each sample independently
+        sample_phase_losses = []
         for b in range(batch_size):
-            for bs in range(num_bs_antennas):
-                for ue in range(num_ue_antennas):
-                    # Get phase difference vector for this antenna pair: [num_subcarriers]
-                    phase_diff_antenna = phase_diff[b, bs, ue, :]
-                    
-                    # Compute MSE for this antenna pair (all subcarriers)
-                    antenna_phase_mse = torch.mean(phase_diff_antenna**2)
-                    antenna_pair_phase_losses.append(antenna_phase_mse)
+            # Get phase difference vector for this sample: [num_subcarriers]
+            phase_diff_sample = phase_diff[b, :]
+            
+            # Compute MSE for this sample (all subcarriers)
+            sample_phase_mse = torch.mean(phase_diff_sample**2)
+            sample_phase_losses.append(sample_phase_mse)
         
-        # Average MSE across all antenna pairs
-        subcarrier_phase_loss = torch.mean(torch.stack(antenna_pair_phase_losses))
+        # Average MSE across all samples
+        subcarrier_phase_loss = torch.mean(torch.stack(sample_phase_losses))
         
-        # 4. Per-antenna-pair complex correlation preservation (maintains complex relationship)
+        # 4. Per-sample complex correlation preservation (maintains complex relationship)
         # Use clipped magnitudes for normalization
         pred_complex_norm = predicted_csi / (pred_mag + 1e-8)
         target_complex_norm = target_csi / (target_mag + 1e-8)
         
-        # Per-antenna-pair correlation loss: compute MSE for each antenna pair independently
-        antenna_pair_correlation_losses = []
+        # Per-sample correlation loss: compute MSE for each sample independently
+        sample_correlation_losses = []
         for b in range(batch_size):
-            for bs in range(num_bs_antennas):
-                for ue in range(num_ue_antennas):
-                    # Get normalized complex vectors for this antenna pair: [num_subcarriers]
-                    pred_norm_antenna = pred_complex_norm[b, bs, ue, :]
-                    target_norm_antenna = target_complex_norm[b, bs, ue, :]
-                    
-                    # Compute MSE for this antenna pair (all subcarriers)
-                    antenna_corr_mse = torch.mean(torch.abs(pred_norm_antenna - target_norm_antenna)**2)
-                    antenna_pair_correlation_losses.append(antenna_corr_mse)
+            # Get normalized complex vectors for this sample: [num_subcarriers]
+            pred_norm_sample = pred_complex_norm[b, :]
+            target_norm_sample = target_complex_norm[b, :]
+            
+            # Compute MSE for this sample (all subcarriers)
+            sample_corr_mse = torch.mean(torch.abs(pred_norm_sample - target_norm_sample)**2)
+            sample_correlation_losses.append(sample_corr_mse)
         
-        # Average MSE across all antenna pairs
-        correlation_loss = torch.mean(torch.stack(antenna_pair_correlation_losses))
+        # Average MSE across all samples
+        correlation_loss = torch.mean(torch.stack(sample_correlation_losses))
         
-        # 5. Per-antenna-pair Jensen-Shannon Divergence for distribution similarity
-        antenna_pair_js_losses = []
+        # 5. Per-sample Jensen-Shannon Divergence for distribution similarity
+        sample_js_losses = []
         for b in range(batch_size):
-            for bs in range(num_bs_antennas):
-                for ue in range(num_ue_antennas):
-                    # Get CSI vectors for this antenna pair: [num_subcarriers]
-                    pred_antenna = predicted_csi[b, bs, ue, :]
-                    target_antenna = target_csi[b, bs, ue, :]
-                    
-                    # Compute JS divergence for this antenna pair (all subcarriers)
-                    js_loss = self._compute_js_divergence(pred_antenna, target_antenna)
-                    antenna_pair_js_losses.append(js_loss)
+            # Get CSI vectors for this sample: [num_subcarriers]
+            pred_sample = predicted_csi[b, :]
+            target_sample = target_csi[b, :]
+            
+            # Compute JS divergence for this sample (all subcarriers)
+            js_loss = self._compute_js_divergence(pred_sample, target_sample)
+            sample_js_losses.append(js_loss)
         
-        # Average JS divergence loss across all antenna pairs
-        js_divergence_loss = torch.mean(torch.stack(antenna_pair_js_losses))
+        # Average JS divergence loss across all samples
+        js_divergence_loss = torch.mean(torch.stack(sample_js_losses))
         
         # Combined loss emphasizing subcarrier-level accuracy
         loss = (self.magnitude_weight * subcarrier_mag_loss +

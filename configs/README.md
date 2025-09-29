@@ -617,7 +617,7 @@ training:
       algorithm: 'bartlett'            # Spatial spectrum estimation algorithm
       fusion_method: 'average'         # Multi-subcarrier fusion method
       theta_range: [-60.0, 2.0, 60.0] # Elevation angle range [min, step, max] in degrees
-      phi_range: [0.0, 2.0, 360.0]    # Azimuth angle range [min, step, max] in degrees
+      phi_range: [0.0, 2.0, 36.0]     # Azimuth angle range [min, step, max] in degrees
 ```
 
 ### Required Base Station Configuration

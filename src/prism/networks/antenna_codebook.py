@@ -13,16 +13,16 @@ from typing import Optional, Tuple
 
 class AntennaEmbeddingCodebook(nn.Module):
     """
-    AntennaEmbeddingCodebook: Learnable antenna-specific embeddings.
+    AntennaEmbeddingCodebook: Learnable BS-UE antenna pair embeddings.
     
     Structure:
-    - Codebook Size: N_BS learnable embeddings (N_BS = 64 for typical configurations)
+    - Codebook Size: N_BS × N_UE learnable embeddings for each BS-UE antenna pair
     - Embedding Dimension: 64-dimensional learnable vectors
-    - Total Parameters: N_BS × 64 = 4,096 learnable parameters
+    - Total Parameters: N_BS × N_UE × 64 learnable parameters
     
     Implementation:
-    - Lookup Table: Indexed by antenna ID (0 to N_BS-1)
-    - Learnable Parameters: Each embedding is a trainable 64D vector
+    - Lookup Table: Indexed by (bs_antenna_id, ue_antenna_id) pairs
+    - Learnable Parameters: Each embedding is a trainable 64D vector for each antenna pair
     - Initialization: Random initialization or pre-trained embeddings
     - Gradient Flow: Full gradient updates during training
     """
@@ -30,6 +30,7 @@ class AntennaEmbeddingCodebook(nn.Module):
     def __init__(
         self,
         num_bs_antennas: int = 64,
+        num_ue_antennas: int = 4,
         embedding_dim: int = 64,
         initialization: str = "normal",
         std: float = 0.1,
@@ -38,27 +39,29 @@ class AntennaEmbeddingCodebook(nn.Module):
         super().__init__()
         
         self.num_bs_antennas = num_bs_antennas
+        self.num_ue_antennas = num_ue_antennas
         self.embedding_dim = embedding_dim
         self.initialization = initialization
         self.std = std
         self.normalize = normalize
         
-        # Create learnable embeddings
+        # Create learnable embeddings for BS-UE antenna pairs
         self._create_embeddings()
         
     def _create_embeddings(self):
-        """Create and initialize the learnable embeddings."""
+        """Create and initialize the learnable embeddings for BS-UE antenna pairs."""
         
         # Initialize embeddings based on specified method
+        # Shape: (num_bs_antennas, num_ue_antennas, embedding_dim)
         if self.initialization == "normal":
-            embeddings = torch.randn(self.num_bs_antennas, self.embedding_dim) * self.std
+            embeddings = torch.randn(self.num_bs_antennas, self.num_ue_antennas, self.embedding_dim) * self.std
         elif self.initialization == "uniform":
-            embeddings = torch.rand(self.num_bs_antennas, self.embedding_dim) * 2 * self.std - self.std
+            embeddings = torch.rand(self.num_bs_antennas, self.num_ue_antennas, self.embedding_dim) * 2 * self.std - self.std
         elif self.initialization == "xavier":
-            embeddings = torch.randn(self.num_bs_antennas, self.embedding_dim)
+            embeddings = torch.randn(self.num_bs_antennas, self.num_ue_antennas, self.embedding_dim)
             nn.init.xavier_uniform_(embeddings)
         elif self.initialization == "kaiming":
-            embeddings = torch.randn(self.num_bs_antennas, self.embedding_dim)
+            embeddings = torch.randn(self.num_bs_antennas, self.num_ue_antennas, self.embedding_dim)
             nn.init.kaiming_uniform_(embeddings)
         else:
             raise ValueError(f"Unsupported initialization: {self.initialization}")
@@ -66,100 +69,111 @@ class AntennaEmbeddingCodebook(nn.Module):
         # Register as learnable parameter
         self.register_parameter('embeddings', nn.Parameter(embeddings))
         
-    def forward(self, antenna_indices: torch.Tensor) -> torch.Tensor:
+    def forward(self, bs_antenna_indices: torch.Tensor, ue_antenna_indices: torch.Tensor) -> torch.Tensor:
         """
-        Unified forward pass to retrieve antenna embeddings.
+        Forward pass to retrieve BS-UE antenna pair embeddings.
         
         Args:
-            antenna_indices: Tensor of antenna indices of shape (batch_size,) or (batch_size, num_antennas)
-                           Values should be in range [0, num_bs_antennas-1]
+            bs_antenna_indices: BS antenna indices of shape (batch_size,)
+                              Values should be in range [0, num_bs_antennas-1]
+            ue_antenna_indices: UE antenna indices of shape (batch_size,)
+                              Values should be in range [0, num_ue_antennas-1]
             
         Returns:
-            Antenna embeddings of shape (batch_size, num_antennas, embedding_dim)
-            Note: Always returns 3D tensor for unified processing. Single antenna becomes (batch_size, 1, embedding_dim)
+            Antenna pair embeddings of shape (batch_size, embedding_dim)
+            Each row contains the embedding for the corresponding BS-UE antenna pair
         """
-        batch_size = antenna_indices.shape[0]
+        # Validate input shapes
+        if bs_antenna_indices.shape != ue_antenna_indices.shape:
+            raise ValueError(f"BS and UE antenna indices must have same shape: "
+                           f"{bs_antenna_indices.shape} vs {ue_antenna_indices.shape}")
         
-        # Unified processing: normalize input to 2D shape (batch_size, num_antennas)
-        if antenna_indices.dim() == 1:
-            # Single antenna case: add antenna dimension
-            antenna_indices = antenna_indices.unsqueeze(1)  # (batch_size, 1)
-            num_antennas = 1
-        else:
-            # Multiple antennas case: keep as is
-            num_antennas = antenna_indices.shape[1]
+        # Ensure inputs are 1D
+        if bs_antenna_indices.dim() != 1:
+            raise ValueError(f"Expected 1D tensors, got BS indices shape: {bs_antenna_indices.shape}")
         
-        # Unified embedding lookup
-        # Reshape to (batch_size * num_antennas,) for embedding lookup
-        flat_indices = antenna_indices.view(-1)
-        embeddings = F.embedding(flat_indices, self.embeddings)
+        # Validate antenna indices ranges
+        if torch.any(bs_antenna_indices >= self.num_bs_antennas) or torch.any(bs_antenna_indices < 0):
+            raise ValueError(f"BS antenna indices out of range [0, {self.num_bs_antennas-1}]")
+        if torch.any(ue_antenna_indices >= self.num_ue_antennas) or torch.any(ue_antenna_indices < 0):
+            raise ValueError(f"UE antenna indices out of range [0, {self.num_ue_antennas-1}]")
         
-        # Reshape back to unified 3D format: (batch_size, num_antennas, embedding_dim)
-        embeddings = embeddings.view(batch_size, num_antennas, self.embedding_dim)
+        # Direct indexing for specific BS-UE antenna pairs
+        embeddings = self.embeddings[bs_antenna_indices, ue_antenna_indices]
         
         if self.normalize:
             embeddings = F.normalize(embeddings, p=2, dim=-1)
             
         return embeddings
     
-    def get_embedding(self, antenna_id: int) -> torch.Tensor:
+    def get_embedding(self, bs_antenna_id: int, ue_antenna_id: int) -> torch.Tensor:
         """
-        Get embedding for a specific antenna ID.
+        Get embedding for a specific BS-UE antenna pair.
         
         Args:
-            antenna_id: Antenna ID (0 to num_bs_antennas-1)
+            bs_antenna_id: BS antenna ID (0 to num_bs_antennas-1)
+            ue_antenna_id: UE antenna ID (0 to num_ue_antennas-1)
             
         Returns:
             Embedding tensor of shape (embedding_dim,)
         """
-        if not 0 <= antenna_id < self.num_bs_antennas:
-            raise ValueError(f"Antenna ID {antenna_id} out of range [0, {self.num_bs_antennas-1}]")
+        if not 0 <= bs_antenna_id < self.num_bs_antennas:
+            raise ValueError(f"BS antenna ID {bs_antenna_id} out of range [0, {self.num_bs_antennas-1}]")
+        if not 0 <= ue_antenna_id < self.num_ue_antennas:
+            raise ValueError(f"UE antenna ID {ue_antenna_id} out of range [0, {self.num_ue_antennas-1}]")
         
-        embedding = self.embeddings[antenna_id]
+        embedding = self.embeddings[bs_antenna_id, ue_antenna_id]
         if self.normalize:
             embedding = F.normalize(embedding, p=2, dim=0)
         return embedding
     
     def get_all_embeddings(self) -> torch.Tensor:
         """
-        Get all antenna embeddings.
+        Get all BS-UE antenna pair embeddings.
         
         Returns:
-            All embeddings tensor of shape (num_bs_antennas, embedding_dim)
+            All embeddings tensor of shape (num_bs_antennas, num_ue_antennas, embedding_dim)
         """
         embeddings = self.embeddings
         if self.normalize:
             embeddings = F.normalize(embeddings, p=2, dim=-1)
         return embeddings
     
-    def update_embedding(self, antenna_id: int, new_embedding: torch.Tensor):
+    def update_embedding(self, bs_antenna_id: int, ue_antenna_id: int, new_embedding: torch.Tensor):
         """
-        Update embedding for a specific antenna ID.
+        Update embedding for a specific BS-UE antenna pair.
         
         Args:
-            antenna_id: Antenna ID to update
+            bs_antenna_id: BS antenna ID to update
+            ue_antenna_id: UE antenna ID to update
             new_embedding: New embedding tensor of shape (embedding_dim,)
         """
-        if not 0 <= antenna_id < self.num_bs_antennas:
-            raise ValueError(f"Antenna ID {antenna_id} out of range [0, {self.num_bs_antennas-1}]")
+        if not 0 <= bs_antenna_id < self.num_bs_antennas:
+            raise ValueError(f"BS antenna ID {bs_antenna_id} out of range [0, {self.num_bs_antennas-1}]")
+        if not 0 <= ue_antenna_id < self.num_ue_antennas:
+            raise ValueError(f"UE antenna ID {ue_antenna_id} out of range [0, {self.num_ue_antennas-1}]")
         
         if new_embedding.shape != (self.embedding_dim,):
             raise ValueError(f"New embedding shape {new_embedding.shape} doesn't match expected {(self.embedding_dim,)}")
         
         with torch.no_grad():
-            self.embeddings[antenna_id] = new_embedding
+            self.embeddings[bs_antenna_id, ue_antenna_id] = new_embedding
     
     def get_embedding_dim(self) -> int:
         """Get the embedding dimension."""
         return self.embedding_dim
     
-    def get_num_antennas(self) -> int:
+    def get_num_bs_antennas(self) -> int:
         """Get the number of BS antennas."""
         return self.num_bs_antennas
     
+    def get_num_ue_antennas(self) -> int:
+        """Get the number of UE antennas."""
+        return self.num_ue_antennas
+    
     def get_total_parameters(self) -> int:
         """Get the total number of learnable parameters."""
-        return self.num_bs_antennas * self.embedding_dim
+        return self.num_bs_antennas * self.num_ue_antennas * self.embedding_dim
 
 
 class AntennaEmbeddingCodebookConfig:
@@ -168,12 +182,14 @@ class AntennaEmbeddingCodebookConfig:
     def __init__(
         self,
         num_bs_antennas: int = 64,
+        num_ue_antennas: int = 4,
         embedding_dim: int = 64,
         initialization: str = "normal",
         std: float = 0.1,
         normalize: bool = False
     ):
         self.num_bs_antennas = num_bs_antennas
+        self.num_ue_antennas = num_ue_antennas
         self.embedding_dim = embedding_dim
         self.initialization = initialization
         self.std = std
@@ -183,6 +199,7 @@ class AntennaEmbeddingCodebookConfig:
         """Convert configuration to dictionary."""
         return {
             'num_bs_antennas': self.num_bs_antennas,
+            'num_ue_antennas': self.num_ue_antennas,
             'embedding_dim': self.embedding_dim,
             'initialization': self.initialization,
             'std': self.std,

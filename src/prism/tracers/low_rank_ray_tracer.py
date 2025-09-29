@@ -72,29 +72,49 @@ class LowRankRayTracer(nn.Module):
         """
         Optimized ray tracing using vectorized operations.
         
-        This method performs ray tracing for all virtual subcarriers, which includes
-        num_ue_antennas × num_subcarriers total subcarriers. The virtual subcarriers
-        are organized such that each UE antenna gets its own set of subcarriers.
+        This method performs ray tracing for individual CSI samples, where each sample
+        represents a single antenna combination (one BS antenna + one UE antenna).
         
         Args:
             attenuation_vectors: Attenuation vectors tensor (num_directions, num_points, R)
             radiation_vectors: Radiation vectors tensor (num_directions, num_points, R)
-            frequency_basis_vectors: Frequency basis vectors tensor (num_virtual_subcarriers, R)
-                                   where num_virtual_subcarriers = num_ue_antennas × num_subcarriers
+            frequency_basis_vectors: Frequency basis vectors tensor (num_subcarriers, R)
+                                   Direct subcarrier count for single antenna combination
             
         Returns:
             Dictionary containing:
-                - csi: Complex CSI predictions tensor [num_virtual_subcarriers]
-                       Contains predictions for all virtual subcarriers (num_ue_antennas × num_subcarriers)
+                - csi: Complex CSI predictions tensor [num_subcarriers]
+                       CSI prediction for single antenna combination
         """
         device = attenuation_vectors.device
         num_directions, num_points, rank = attenuation_vectors.shape
-        num_virtual_subcarriers = frequency_basis_vectors.shape[0]  # num_ue_antennas × num_subcarriers
+        num_subcarriers = frequency_basis_vectors.shape[0]  # Direct subcarrier count
         
-        logger.debug(f"🔧 LowRankRayTracer inputs: num_virtual_subcarriers={num_virtual_subcarriers}, frequency_basis_vectors.shape={frequency_basis_vectors.shape}")
+        # Check for empty inputs that could cause division by zero
+        if num_directions == 0:
+            logger.error(f"❌ Empty attenuation_vectors: shape={attenuation_vectors.shape}")
+            # Return zero CSI for empty inputs
+            zero_csi = torch.zeros(num_subcarriers, dtype=torch.complex64, device=device)
+            return {'csi': zero_csi}
+        
+        if num_subcarriers == 0:
+            logger.error(f"❌ Empty frequency_basis_vectors: shape={frequency_basis_vectors.shape}")
+            # Return empty CSI for empty frequency basis
+            return {'csi': torch.tensor([], dtype=torch.complex64, device=device)}
+        
+        logger.debug(f"🔧 LowRankRayTracer inputs:")
+        logger.debug(f"   📊 frequency_basis_vectors.shape: {frequency_basis_vectors.shape}")
+        logger.debug(f"   📊 num_subcarriers: {num_subcarriers}")
+        logger.debug(f"   📊 frequency_basis_vectors.dtype: {frequency_basis_vectors.dtype}")
+        logger.debug(f"   📊 frequency_basis_vectors.device: {frequency_basis_vectors.device}")
+        logger.debug(f"   📊 attenuation_vectors.shape: {attenuation_vectors.shape}")
+        logger.debug(f"   📊 radiation_vectors.shape: {radiation_vectors.shape}")
+        
+        logger.debug(f"🔧 LowRankRayTracer inputs: num_subcarriers={num_subcarriers}, frequency_basis_vectors.shape={frequency_basis_vectors.shape}")
         
         # Vectorized computation with ray chunking for memory efficiency
-        with torch.amp.autocast('cuda', enabled=True):
+        # Note: Mixed precision disabled for complex tensor operations
+        with torch.amp.autocast('cuda', enabled=False):
             # Calculate Δt (step size along rays) - same as naive_ray_tracer
             delta_t = self.max_ray_length / num_points
             
@@ -103,7 +123,7 @@ class LowRankRayTracer(nn.Module):
             u_hat_rho = torch.cumsum(attenuation_vectors.conj() * delta_t, dim=1)  # Cumulative sum with Δt
             
             # Initialize CSI accumulator
-            csi_accumulator = torch.zeros(num_virtual_subcarriers, dtype=torch.complex64, device=device)
+            csi_accumulator = torch.zeros(num_subcarriers, dtype=torch.complex64, device=device)
             
             # Process rays in chunks to manage memory usage
             ray_chunk_size = min(self.ray_chunk_size, num_directions)  # Use configurable chunk size
@@ -128,7 +148,7 @@ class LowRankRayTracer(nn.Module):
                 # Only for k > 0 (skip first point)
                 # Initialize second_order_chunk with actual ray count
                 actual_ray_count = ray_end - ray_start
-                second_order_chunk = torch.zeros(actual_ray_count, num_virtual_subcarriers, dtype=torch.complex64, device=device)
+                second_order_chunk = torch.zeros(actual_ray_count, num_subcarriers, dtype=torch.complex64, device=device)
                 
                 if num_points > 1:
                     # Memory-optimized computation: avoid creating large 5D tensor us_outer_hat
@@ -136,9 +156,9 @@ class LowRankRayTracer(nn.Module):
                     # We compute the einsum directly without storing the intermediate tensor
                     
                     # Process frequency basis vectors in chunks to avoid OOM
-                    freq_chunk_size = min(self.freq_chunk_size, num_virtual_subcarriers)  # Use configurable frequency chunk size
-                    for freq_start in range(0, num_virtual_subcarriers, freq_chunk_size):
-                        freq_end = min(freq_start + freq_chunk_size, num_virtual_subcarriers)
+                    freq_chunk_size = min(self.freq_chunk_size, num_subcarriers)  # Use configurable frequency chunk size
+                    for freq_start in range(0, num_subcarriers, freq_chunk_size):
+                        freq_end = min(freq_start + freq_chunk_size, num_subcarriers)
                         freq_chunk = frequency_basis_vectors[freq_start:freq_end]  # [chunk_size, rank]
                         
                         # Compute v_outer_outer for this chunk: [chunk_size, rank, rank, rank]
@@ -213,6 +233,12 @@ class LowRankRayTracer(nn.Module):
         # Normalize by the number of directions
         # CSI enhancement network will handle amplitude control
         csi_accumulator = csi_accumulator / num_directions
+        
+        logger.debug(f"🔧 LowRankRayTracer output:")
+        logger.debug(f"   📊 csi_accumulator.shape: {csi_accumulator.shape}")
+        logger.debug(f"   📊 csi_accumulator.dtype: {csi_accumulator.dtype}")
+        logger.debug(f"   📊 Expected subcarriers: {num_subcarriers}")
+        logger.debug(f"   📊 Output matches expected: {csi_accumulator.shape[0] == num_subcarriers}")
         
         logger.debug(f"🔧 LowRankRayTracer output: csi_accumulator.shape={csi_accumulator.shape}")
         
