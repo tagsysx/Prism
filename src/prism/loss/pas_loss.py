@@ -21,7 +21,15 @@ class PASLoss(nn.Module):
     Power Angular Spectrum (PAS) Loss for spatial spectrum comparison.
     
     This loss computes the difference between predicted and target PAS,
-    which represents the spatial distribution of signal power.
+    which represents the spatial distribution of signal power. The loss combines
+    traditional distance metrics (MSE, MAE, KL-div, JS-div) with cosine similarity
+    to measure both magnitude and pattern similarity.
+    
+     Features:
+     - Multiple loss types: MSE, MAE, KL divergence, Jensen-Shannon divergence, Cosine similarity
+     - Cosine similarity loss for pattern matching (focuses on shape, range [0,1])
+     - Power-based weighting for emphasizing high-power samples
+     - Debug visualization with configurable save directory
     
     Args:
         bs_config: Base station configuration dictionary (must contain 'num_antennas')
@@ -29,7 +37,7 @@ class PASLoss(nn.Module):
         azimuth_divisions: Number of azimuth angle divisions (default: 18)
         elevation_divisions: Number of elevation angle divisions (default: 6)
         normalize_pas: Whether to normalize PAS before loss computation (default: True)
-        loss_type: Type of loss ('mse', 'mae', 'kl_div', 'js_div') (default: 'mse')
+        loss_type: Type of loss ('mse', 'mae', 'kl_div', 'js_div', 'cosine') (default: 'mse')
         weight_by_power: Whether to weight loss by power distribution (default: True)
         debug_dir: Directory path for saving debug spatial spectrum files (default: None)
     """
@@ -83,7 +91,7 @@ class PASLoss(nn.Module):
         self.ue_config = ue_config
         
         # Validate loss type
-        valid_types = ['mse', 'mae', 'kl_div', 'js_div']
+        valid_types = ['mse', 'mae', 'kl_div', 'js_div', 'cosine']
         if self.loss_type not in valid_types:
             raise ValueError(f"Invalid loss_type: {self.loss_type}. Must be one of {valid_types}")
         
@@ -183,16 +191,37 @@ class PASLoss(nn.Module):
             if power_weights is not None:
                 loss = loss * torch.mean(power_weights)
             
+        elif self.loss_type == 'cosine':
+            # Cosine similarity loss for pattern matching
+            # Flatten PAS patterns for cosine similarity computation
+            pred_flat = pred_pas.view(pred_pas.shape[0], -1)  # [batch_size, azimuth_div * elevation_div]
+            target_flat = target_pas.view(target_pas.shape[0], -1)  # [batch_size, azimuth_div * elevation_div]
+            
+            # Add small epsilon to avoid division by zero
+            eps = 1e-8
+            
+            # Compute cosine similarity for each sample
+            # cosine_sim = (A · B) / (||A|| * ||B||)
+            dot_product = torch.sum(pred_flat * target_flat, dim=1)  # [batch_size]
+            pred_norm = torch.norm(pred_flat, dim=1) + eps  # [batch_size]
+            target_norm = torch.norm(target_flat, dim=1) + eps  # [batch_size]
+            
+            cosine_similarity = dot_product / (pred_norm * target_norm)  # [batch_size]
+            
+            # Convert to loss: 1 - abs(cosine_similarity) (range [0, 1], 0 = perfect similarity)
+            cosine_loss_per_sample = 1.0 - torch.abs(cosine_similarity)  # [batch_size]
+            
+            # Apply power weights if provided
+            if power_weights is not None:
+                weighted_cosine_loss = cosine_loss_per_sample * power_weights  # [batch_size]
+                loss = torch.mean(weighted_cosine_loss)
+            else:
+                loss = torch.mean(cosine_loss_per_sample)
+            
         else:
             raise ValueError(f"Unknown loss type: {self.loss_type}")
         
-        # Add cosine similarity loss to measure PAS pattern similarity
-        cosine_similarity_loss = self._compute_cosine_similarity_loss(pred_pas, target_pas, power_weights)
-        
-        # Combine main loss with cosine similarity loss (weighted)
-        # Cosine similarity loss weight can be adjusted based on importance
-        cosine_weight = 0.1  # 10% weight for cosine similarity
-        combined_loss = loss + cosine_weight * cosine_similarity_loss
+        combined_loss = loss
         
         # Normalize by total number of antennas to prevent loss scaling with antenna count
         # This ensures that the loss magnitude is comparable regardless of antenna configuration

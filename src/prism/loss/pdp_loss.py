@@ -20,26 +20,38 @@ class PDPLoss(nn.Module):
     Power Delay Profile (PDP) Loss Function
     
     Provides time-domain validation by comparing PDPs derived from CSI data.
-    Converts CSI to PDP using IFFT and computes MSE loss between PDPs.
+    Converts CSI to PDP using IFFT and computes loss between PDPs using various metrics.
+    
+    Supported loss types:
+    - 'mse': Mean Squared Error (default)
+    - 'mae': Mean Absolute Error  
+    - 'cosine': Cosine similarity loss for pattern matching (range [0,1])
     """
     
-    def __init__(self, fft_size: int = 1024, normalize_pdp: bool = True):
+    def __init__(self, fft_size: int = 1024, normalize_pdp: bool = True, loss_type: str = 'mse'):
         """
         Initialize PDP loss function
         
         Args:
             fft_size: Size of FFT for PDP computation (default: 1024)
             normalize_pdp: Whether to normalize PDPs before loss computation (default: True)
+            loss_type: Type of loss ('mse', 'mae', 'cosine') (default: 'mse')
         """
         super(PDPLoss, self).__init__()
         
         self.fft_size = int(fft_size)  # Ensure fft_size is always an integer
         self.normalize_pdp = normalize_pdp
+        self.loss_type = loss_type.lower()
+        
+        # Validate loss type
+        valid_types = ['mse', 'mae', 'cosine']
+        if self.loss_type not in valid_types:
+            raise ValueError(f"Invalid loss_type: {self.loss_type}. Must be one of {valid_types}")
         
         logger.info(f"PDP Loss initialized:")
         logger.info(f"  FFT size: {fft_size}")
         logger.info(f"  Normalize PDP: {normalize_pdp}")
-        logger.info(f"  Loss computation: MSE between PDPs")
+        logger.info(f"  Loss type: {self.loss_type}")
         
     def forward(self, predictions: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
@@ -104,10 +116,33 @@ class PDPLoss(nn.Module):
         pdp_pred_batch = torch.stack(pdp_pred_batch, dim=0)  # [batch_size, fft_size]
         pdp_target_batch = torch.stack(pdp_target_batch, dim=0)  # [batch_size, fft_size]
         
-        # Compute MSE loss between PDPs
-        mse_loss = F.mse_loss(pdp_pred_batch, pdp_target_batch)
+        # Compute loss based on specified type
+        if self.loss_type == 'mse':
+            loss = F.mse_loss(pdp_pred_batch, pdp_target_batch)
+            
+        elif self.loss_type == 'mae':
+            loss = F.l1_loss(pdp_pred_batch, pdp_target_batch)
+            
+        elif self.loss_type == 'cosine':
+            # Cosine similarity loss for PDP pattern matching
+            # Add small epsilon to avoid division by zero
+            eps = 1e-8
+            
+            # Compute cosine similarity for each sample
+            dot_product = torch.sum(pdp_pred_batch * pdp_target_batch, dim=1)  # [batch_size]
+            pred_norm = torch.norm(pdp_pred_batch, dim=1) + eps  # [batch_size]
+            target_norm = torch.norm(pdp_target_batch, dim=1) + eps  # [batch_size]
+            
+            cosine_similarity = dot_product / (pred_norm * target_norm)  # [batch_size]
+            
+            # Convert to loss: 1 - abs(cosine_similarity) (range [0, 1], 0 = perfect similarity)
+            cosine_loss_per_sample = 1.0 - torch.abs(cosine_similarity)  # [batch_size]
+            loss = torch.mean(cosine_loss_per_sample)
+            
+        else:
+            raise ValueError(f"Unknown loss type: {self.loss_type}")
         
-        return mse_loss
+        return loss
     
     def _csi_to_pdp(self, csi: torch.Tensor) -> torch.Tensor:
         """

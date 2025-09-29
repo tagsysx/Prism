@@ -32,11 +32,9 @@ DEFAULT_LOSS_CONFIG = {
         'normalize_weights': True
     },
     'pdp_loss': {
-        'type': 'hybrid',  # 'mse', 'delay', 'hybrid' (correlation disabled)
+        'loss_type': 'mse',  # 'mse', 'mae', 'cosine'
         'fft_size': 1024,
         'normalize_pdp': True
-        # mse_weight and delay_weight now hardcoded in hybrid loss (0.7, 0.3)
-        # correlation_weight removed - correlation loss disabled
     },
     'pas_loss': {
         'enabled': False,
@@ -112,11 +110,13 @@ class LossFunction(nn.Module):
         
         self.pdp_loss = PDPLoss(
             fft_size=pdp_fft_size,
-            normalize_pdp=pdp_normalize
+            normalize_pdp=pdp_normalize,
+            loss_type=pdp_config.get('loss_type', 'mse')
         )
         
         logger.info(f"PDP Loss configuration:")
         logger.info(f"  Enabled: {self.pdp_enabled}")
+        logger.info(f"  Loss type: {pdp_config.get('loss_type', 'mse')}")
         logger.info(f"  FFT size: {pdp_fft_size}")
         logger.info(f"  Normalize PDP: {pdp_normalize}")
         
@@ -281,7 +281,16 @@ class LossFunction(nn.Module):
                 loss_components['pas_loss'] = pas_loss_val.item()
                 logger.info(f"🎯 Weighted PAS Loss: {weighted_pas_loss.item():.6f} (base: {pas_loss_val.item():.6f} × weight: {self.pas_weight})")
             except Exception as e:
-                logger.warning(f"PAS loss computation failed: {e}")
+                logger.error(f"❌ PAS loss computation failed: {e}")
+                logger.error(f"   Predictions keys: {list(predictions.keys())}")
+                logger.error(f"   Targets keys: {list(targets.keys())}")
+                if 'csi' in predictions:
+                    logger.error(f"   Pred CSI shape: {predictions['csi'].shape}")
+                if 'csi' in targets:
+                    logger.error(f"   Target CSI shape: {targets['csi'].shape}")
+                # Log full traceback for debugging
+                import traceback
+                logger.error(f"   Full traceback:\n{traceback.format_exc()}")
                 loss_components['pas_loss'] = 0.0
         else:
             # PAS loss is disabled or missing position data, set to 0
