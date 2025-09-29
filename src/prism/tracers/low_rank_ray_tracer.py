@@ -208,6 +208,9 @@ class LowRankRayTracer(nn.Module):
                                 
                                 # Clear intermediate variables
                                 del us_outer_hat_sub, sub_chunk_contribution, ray_radiation_sub, ray_attenuation_sub, ray_u_hat_rho_sub
+                                # Force memory cleanup
+                                if torch.cuda.is_available():
+                                    torch.cuda.empty_cache()
                             
                             # Store the accumulated contribution for this ray (use local indices)
                             chunk_contribution[ray_sub_start:ray_sub_end, :] = ray_contribution
@@ -218,6 +221,9 @@ class LowRankRayTracer(nn.Module):
                         
                         # Clear intermediate variables
                         del v_outer_outer_chunk, chunk_contribution
+                        # Force memory cleanup
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
                 
                 # Combine terms and accumulate
                 # According to the mathematical derivation: S_f ≈ ⟨U^(1), V^(1)⟩ + ⟨U^(2), V^(2)⟩
@@ -228,7 +234,12 @@ class LowRankRayTracer(nn.Module):
                 del us_outer, v_outer, first_order_chunk
                 del second_order_chunk
                 del ray_contribution_chunk
-                torch.cuda.empty_cache()
+                # Force memory cleanup
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                # Also force Python garbage collection
+                import gc
+                gc.collect()
         
         # Normalize by the number of directions
         # CSI enhancement network will handle amplitude control

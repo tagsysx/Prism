@@ -1,5 +1,5 @@
 base_station:
-  antenna_embedding_dim: 32
+  antenna_embedding_dim: 16
   antenna_type: mimo
   num_antennas: 64  # Chrissy has 64 BS antennas (8x8 array)
   antenna_array:
@@ -17,22 +17,22 @@ user_equipment:
 
 neural_networks:
   antenna_codebook:
-    embedding_dim: 32
+    embedding_dim: 16
     initialization: normal
     normalize: false
     std: 0.1
   attenuation_network:
     activation: relu
-    feature_dim: 128
-    hidden_dim: 64
-    num_layers: 3
+    feature_dim: 64
+    hidden_dim: 32
+    num_layers: 2
     output_dim: 32
     use_shortcuts: true
   csi_network:
-    d_model: 16  # Extreme reduction to save memory
-    n_layers: 1  # Minimal layers
-    n_heads: 1   # Minimal attention heads
-    d_ff: 32     # Extreme reduction in feed-forward dimension
+    d_model: 128   # Absolute minimal to save memory
+    n_layers: 4   # Minimal layers
+    n_heads: 8    # Minimal attention heads
+    d_ff: 128     # Absolute minimal feed-forward dimension
     dropout_rate: 0.05
     max_magnitude: 100.0
     # Add frequency domain smoothing for better phase prediction
@@ -44,14 +44,15 @@ neural_networks:
     std: 0.1
     normalize: false
   prism_network:
-    antenna_embedding_dim: 32
+    feature_dim: 64
+    antenna_embedding_dim: 16
     azimuth_divisions: 18
     elevation_divisions: 6
   radiance_network:
     activation: relu
-    antenna_embedding_dim: 32
-    feature_dim: 128
-    hidden_dim: 64
+    antenna_embedding_dim: 16
+    feature_dim: 64
+    hidden_dim: 32
     num_layers: 2
     output_dim: 32
     ue_position_dim: 16  # Linear projection of 3D UE position to 16D features
@@ -63,14 +64,14 @@ system:
 
 tracing:
   max_ray_length: 250.0
-  num_sampling_points: 64      # Number of sampling points along each ray (enhanced precision)
-  # Ray processing chunk sizes for memory management (high performance mode)
+  num_sampling_points: 16       # Number of sampling points along each ray (safe)
+  # Ray processing chunk sizes for memory management (safe memory usage)
   # IMPORTANT: ray_sub_chunk_size MUST be <= ray_chunk_size and point_chunk_size < num_sampling_points
   # Otherwise will cause tensor dimension mismatch errors!
-  ray_chunk_size: 1024        # Main ray processing chunk size (maximum GPU utilization)
-  freq_chunk_size: 512        # Frequency processing chunk size (maximum throughput)
-  ray_sub_chunk_size: 128     # Ray sub-chunk size (MUST be <= ray_chunk_size)
-  point_chunk_size: 56        # Point processing chunk size (MUST be < num_sampling_points=64)
+  ray_chunk_size: 108           # Main ray processing chunk size (safe)
+  freq_chunk_size: 408          # Frequency processing chunk size (safe)
+  ray_sub_chunk_size: 108       # Ray sub-chunk size (MUST be <= ray_chunk_size)
+  point_chunk_size: 16         # Point processing chunk size (MUST be < num_sampling_points=5)
 
 input:
   dataset_path: data/chrissy/chrissy.h5  # Chrissy dataset path with 4 UE antennas
@@ -99,8 +100,8 @@ output:
 
 training:
   num_epochs: 50
-  batch_size: 300  # Aggressive batch size to maximize GPU utilization (50% → 80% VRAM)
-  checkpoint_frequency: 5
+  batch_size: 1  # Position pairs per batch (minimal memory usage)
+  checkpoint_frequency: 1
   auto_checkpoint: true
   epoch_save_interval: 1
   learning_rate: 0.00015
@@ -129,15 +130,15 @@ training:
       type: hybrid
     pdp_weight: 0.0
     pas_loss:
-      enabled: false  # Disable original PAS loss for Chrissy dataset
-      azimuth_divisions: 36  # Higher resolution for Chrissy dataset
-      elevation_divisions: 9
+      enabled: true  # Disable original PAS loss for Chrissy dataset
+      azimuth_divisions: 360  # Higher resolution for Chrissy dataset
+      elevation_divisions: 90
       normalize_pas: true
       type: mse
       weight_by_power: true
-    pas_weight: 0.0
+    pas_weight: 1.5
     pas_loss2:
-      enabled: true  # Enable PAS Loss 2 for Chrissy dataset
+      enabled: false  # Enable PAS Loss 2 for Chrissy dataset
       freq_spatial_weight: 0.40  # Weight for frequency-spatial correlation loss
       phase_consistency_weight: 0.35  # Weight for phase consistency loss
       angle_spectrum_weight: 0.25  # Weight for angle spectrum loss

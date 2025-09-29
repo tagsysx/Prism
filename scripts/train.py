@@ -621,6 +621,12 @@ class PrismTrainer(BaseRunner):
                 # Update progress
                 monitor.update_batch(batch_idx, batch_loss)
                 
+                # Force memory cleanup after each batch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                import gc
+                gc.collect()
+                
                 # Automatic checkpointing
                 if (self.training_config['auto_checkpoint'] and 
                     batch_idx % self.training_config['checkpoint_frequency'] == 0 and 
