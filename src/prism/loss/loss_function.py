@@ -134,6 +134,13 @@ class LossFunction(nn.Module):
             if not ue_config:
                 raise ValueError("Configuration must contain 'user_equipment' section for PAS loss")
             
+            # Extract debug directory from output configuration
+            debug_dir = None
+            if self.full_config and 'output' in self.full_config:
+                output_config = self.full_config['output']
+                if 'training' in output_config and 'debug_dir' in output_config['training']:
+                    debug_dir = output_config['training']['debug_dir']
+            
             self.pas_loss = PASLoss(
                 bs_config=bs_config,
                 ue_config=ue_config,
@@ -141,7 +148,8 @@ class LossFunction(nn.Module):
                 elevation_divisions=pas_config.get('elevation_divisions', 6),
                 normalize_pas=pas_config.get('normalize_pas', True),
                 loss_type=pas_config.get('type', 'mse'),
-                weight_by_power=pas_config.get('weight_by_power', True)
+                weight_by_power=pas_config.get('weight_by_power', True),
+                debug_dir=debug_dir
             )
         else:
             self.pas_loss = None

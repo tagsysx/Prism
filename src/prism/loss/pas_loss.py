@@ -31,6 +31,7 @@ class PASLoss(nn.Module):
         normalize_pas: Whether to normalize PAS before loss computation (default: True)
         loss_type: Type of loss ('mse', 'mae', 'kl_div', 'js_div') (default: 'mse')
         weight_by_power: Whether to weight loss by power distribution (default: True)
+        debug_dir: Directory path for saving debug spatial spectrum files (default: None)
     """
     
     def __init__(
@@ -43,7 +44,8 @@ class PASLoss(nn.Module):
         loss_type: str = 'mse',
         weight_by_power: bool = True,
         center_freq: float = 3.5e9,
-        subcarrier_spacing: float = 245.1e3
+        subcarrier_spacing: float = 245.1e3,
+        debug_dir: str = None
     ):
         super().__init__()
         
@@ -54,6 +56,7 @@ class PASLoss(nn.Module):
         self.weight_by_power = weight_by_power
         self.center_freq = center_freq
         self.subcarrier_spacing = subcarrier_spacing
+        self.debug_dir = debug_dir or "results/temp"  # Default fallback path
         
         # Validate required configs
         if not bs_config:
@@ -183,14 +186,22 @@ class PASLoss(nn.Module):
         else:
             raise ValueError(f"Unknown loss type: {self.loss_type}")
         
+        # Add cosine similarity loss to measure PAS pattern similarity
+        cosine_similarity_loss = self._compute_cosine_similarity_loss(pred_pas, target_pas, power_weights)
+        
+        # Combine main loss with cosine similarity loss (weighted)
+        # Cosine similarity loss weight can be adjusted based on importance
+        cosine_weight = 0.1  # 10% weight for cosine similarity
+        combined_loss = loss + cosine_weight * cosine_similarity_loss
+        
         # Normalize by total number of antennas to prevent loss scaling with antenna count
         # This ensures that the loss magnitude is comparable regardless of antenna configuration
         if total_antennas > 1:
             # Don't normalize if we only have 1 antenna total
             normalization_factor = 1.0 / total_antennas
-            loss = loss * normalization_factor
+            combined_loss = combined_loss * normalization_factor
             
-        return loss
+        return combined_loss
     
     def forward(self, predictions: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
@@ -343,8 +354,8 @@ class PASLoss(nn.Module):
         # 1% probability to save debug data
         if random.random() < 0.05:
             try:
-                # Create debug directory
-                debug_dir = "results/temp"
+                # Use configured debug directory
+                debug_dir = self.debug_dir
                 os.makedirs(debug_dir, exist_ok=True)
                 
                 # Generate timestamp for unique filename

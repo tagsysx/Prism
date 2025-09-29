@@ -97,6 +97,7 @@ output:
     log_level: DEBUG
     models_dir: '{{base_dir}}/training/models'
     tensorboard_dir: '{{base_dir}}/training/tensorboard'
+    debug_dir: '{{base_dir}}/training/debug'      # Debug directory for temporary spatial spectrum and intermediate files
 
 training:
   num_epochs: 50
