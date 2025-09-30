@@ -25,14 +25,29 @@ class Similarity:
 
     @staticmethod
     def compute_spectral_correlation_coefficient(pred_pdp: np.ndarray, target_pdp: np.ndarray) -> float:
-        """Compute Spectral Correlation Coefficient (SCC) between two PDPs"""
+        """Compute Spectral Correlation Coefficient (SCC) between two PDPs (0-1, higher is more similar)"""
         pred_flat = pred_pdp.flatten()
         target_flat = target_pdp.flatten()
+        
+        # Handle edge cases
+        if len(pred_flat) == 0 or len(target_flat) == 0:
+            return 0.0
+        
+        # Check for constant arrays (zero variance)
+        pred_std = np.std(pred_flat)
+        target_std = np.std(target_flat)
+        
+        if pred_std < 1e-12 and target_std < 1e-12:
+            # Both are constant - check if they're the same constant
+            return 1.0 if np.abs(np.mean(pred_flat) - np.mean(target_flat)) < 1e-12 else 0.0
+        elif pred_std < 1e-12 or target_std < 1e-12:
+            # One is constant, one is not - no correlation
+            return 0.0
         
         # Compute correlation coefficient
         correlation = np.corrcoef(pred_flat, target_flat)[0, 1]
         
-        # Handle NaN case
+        # Handle NaN case (shouldn't happen with above checks, but just in case)
         if np.isnan(correlation):
             return 0.0
         
@@ -41,71 +56,104 @@ class Similarity:
 
     @staticmethod
     def compute_log_spectral_distance(pred_pdp: np.ndarray, target_pdp: np.ndarray) -> float:
-        """Compute Log Spectral Distance (LSD) using maximum possible error normalization"""
+        """Compute Log Spectral Distance similarity (0-1, higher is more similar)"""
         pred_flat = pred_pdp.flatten()
         target_flat = target_pdp.flatten()
         
-        # Compute MSE
-        mse = np.mean((pred_flat - target_flat) ** 2)
+        # Add epsilon to avoid log(0) and ensure positive values
+        eps = 1e-12
+        pred_flat = np.maximum(np.abs(pred_flat), eps)
+        target_flat = np.maximum(np.abs(target_flat), eps)
         
-        # Compute maximum squared values
-        pred_max_squared = np.max(pred_flat ** 2)
-        target_max_squared = np.max(target_flat ** 2)
-        max_possible_error = pred_max_squared + target_max_squared
+        # Compute log spectral distance
+        log_diff = np.log(pred_flat) - np.log(target_flat)
+        lsd = np.sqrt(np.mean(log_diff ** 2))
         
-        # Avoid division by zero
-        if max_possible_error < 1e-12:
-            return 1.0  # Perfect similarity if no variation
+        # Convert to similarity using exponential decay
+        # LSD can range from 0 to infinity, we use exp(-LSD) to map to (0,1]
+        # Then we can adjust the scaling factor to control sensitivity
+        similarity = np.exp(-lsd)
         
-        # Compute maximum possible error normalized similarity
-        similarity = 1.0 - (mse / max_possible_error)
-        
-        # Clip to valid range [0, 1]
+        # Clip to valid range [0, 1] (though exp(-x) is already in (0,1])
         similarity = np.clip(similarity, 0.0, 1.0)
         
         return float(similarity)
 
     @staticmethod
     def compute_bhattacharyya_coefficient(pred_pdp: np.ndarray, target_pdp: np.ndarray) -> float:
-        """Compute Bhattacharyya Coefficient (BC) between two PDPs"""
+        """Compute Bhattacharyya Coefficient (BC) between two PDPs (0-1, higher is more similar)"""
         pred_flat = pred_pdp.flatten()
         target_flat = target_pdp.flatten()
         
-        # Normalize to make them probability distributions
-        pred_norm = pred_flat / (np.sum(pred_flat) + 1e-10)
-        target_norm = target_flat / (np.sum(target_flat) + 1e-10)
+        # Ensure non-negative values for probability distributions
+        pred_flat = np.abs(pred_flat)
+        target_flat = np.abs(target_flat)
         
-        # Compute Bhattacharyya coefficient
-        bc = np.sum(np.sqrt(pred_norm * target_norm))
+        # Add small epsilon to avoid division by zero
+        eps = 1e-12
+        pred_sum = np.sum(pred_flat) + eps
+        target_sum = np.sum(target_flat) + eps
+        
+        # Normalize to make them probability distributions
+        pred_norm = pred_flat / pred_sum
+        target_norm = target_flat / target_sum
+        
+        # Compute Bhattacharyya coefficient (ensure non-negative under sqrt)
+        product = pred_norm * target_norm
+        # Clip to avoid numerical issues with sqrt
+        product = np.clip(product, 0.0, None)
+        bc = np.sum(np.sqrt(product))
         
         # BC is already in [0, 1] where 1 is most similar
+        bc = np.clip(bc, 0.0, 1.0)
         return float(bc)
 
     @staticmethod
     def compute_jensen_shannon_divergence(pred_pdp: np.ndarray, target_pdp: np.ndarray) -> float:
-        """Compute Jensen-Shannon Divergence (JSD) using maximum possible error normalization"""
+        """Compute Jensen-Shannon Divergence similarity (0-1, higher is more similar)"""
         pred_flat = pred_pdp.flatten()
         target_flat = target_pdp.flatten()
         
-        # Compute MSE
-        mse = np.mean((pred_flat - target_flat) ** 2)
+        # Add small epsilon to avoid log(0)
+        eps = 1e-12
         
-        # Compute maximum squared values
-        pred_max_squared = np.max(pred_flat ** 2)
-        target_max_squared = np.max(target_flat ** 2)
-        max_possible_error = pred_max_squared + target_max_squared
+        # Normalize to probability distributions (ensure positive values)
+        pred_flat = np.abs(pred_flat) + eps
+        target_flat = np.abs(target_flat) + eps
         
-        # Avoid division by zero
-        if max_possible_error < 1e-12:
-            return 1.0  # Perfect similarity if no variation
+        # Normalize to sum to 1
+        pred_prob = pred_flat / np.sum(pred_flat)
+        target_prob = target_flat / np.sum(target_flat)
         
-        # Compute maximum possible error normalized similarity
-        similarity = 1.0 - (mse / max_possible_error)
+        # Compute M = (P + Q) / 2
+        m = (pred_prob + target_prob) / 2
+        
+        # Compute KL divergences
+        def kl_divergence(p, q):
+            # Avoid log(0) by adding epsilon where needed
+            mask = (p > eps) & (q > eps)
+            if not np.any(mask):
+                return 0.0
+            return np.sum(p[mask] * np.log(p[mask] / q[mask]))
+        
+        kl_pm = kl_divergence(pred_prob, m)
+        kl_qm = kl_divergence(target_prob, m)
+        
+        # Jensen-Shannon divergence
+        js_divergence = 0.5 * kl_pm + 0.5 * kl_qm
+        
+        # Normalize JS divergence to [0, 1] range
+        # Maximum JS divergence is log(2) ≈ 0.693
+        max_js = np.log(2)
+        js_normalized = js_divergence / max_js
+        
+        # Convert to similarity (1 - divergence), so higher values mean more similar
+        js_similarity = 1.0 - js_normalized
         
         # Clip to valid range [0, 1]
-        similarity = np.clip(similarity, 0.0, 1.0)
+        js_similarity = np.clip(js_similarity, 0.0, 1.0)
         
-        return float(similarity)
+        return float(js_similarity)
 
     @staticmethod
     def compute_cosine_similarity(pred_tensor: torch.Tensor, target_tensor: torch.Tensor) -> float:
@@ -263,7 +311,15 @@ class Similarity:
             denominator = (mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2)
             
             ssim_values = numerator / denominator
-            return float(ssim_values.mean())
+            ssim_mean = ssim_values.mean()
+            
+            # SSIM can be negative, so we need to map it to [0,1] for similarity
+            # SSIM range is typically [-1, 1], map to [0, 1]
+            ssim_similarity = (ssim_mean + 1.0) / 2.0
+            
+            # Clip to ensure valid range
+            ssim_similarity = torch.clamp(ssim_similarity, 0.0, 1.0)
+            return float(ssim_similarity)
             
         except Exception as e:
             # Fallback to simple correlation if SSIM fails
@@ -359,8 +415,14 @@ class Similarity:
             ssim_map = (numerator1 * numerator2) / (denominator1 * denominator2)
             
             # Return mean SSIM over the entire image
-            ssim_value = torch.mean(ssim_map)
-            return float(torch.clamp(ssim_value, 0.0, 1.0))
+            ssim_mean = torch.mean(ssim_map)
+            
+            # SSIM can be negative, so we need to map it to [0,1] for similarity
+            # SSIM range is typically [-1, 1], map to [0, 1]
+            ssim_similarity = (ssim_mean + 1.0) / 2.0
+            
+            # Clip to ensure valid range
+            return float(torch.clamp(ssim_similarity, 0.0, 1.0))
             
         except Exception as e:
             # Fallback to simple correlation if SSIM fails

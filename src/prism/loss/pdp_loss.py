@@ -106,8 +106,15 @@ class PDPLoss(nn.Module):
             
             # Normalize PDPs if required
             if self.normalize_pdp:
-                pdp_pred = self._normalize_pdp(pdp_pred)
-                pdp_target = self._normalize_pdp(pdp_target)
+                # Normalize predicted PDP
+                total_energy_pred = torch.sum(pdp_pred)
+                if total_energy_pred >= 1e-12:
+                    pdp_pred = pdp_pred / total_energy_pred
+                
+                # Normalize target PDP
+                total_energy_target = torch.sum(pdp_target)
+                if total_energy_target >= 1e-12:
+                    pdp_target = pdp_target / total_energy_target
             
             pdp_pred_batch.append(pdp_pred)
             pdp_target_batch.append(pdp_target)
@@ -116,15 +123,17 @@ class PDPLoss(nn.Module):
         pdp_pred_batch = torch.stack(pdp_pred_batch, dim=0)  # [batch_size, fft_size]
         pdp_target_batch = torch.stack(pdp_target_batch, dim=0)  # [batch_size, fft_size]
         
-        # Compute loss based on specified type
+        # Compute loss based on specified type - per-CSI calculation
         if self.loss_type == 'mse':
-            loss = F.mse_loss(pdp_pred_batch, pdp_target_batch)
+            # Compute MSE loss per sample: [batch_size]
+            loss_per_sample = torch.mean((pdp_pred_batch - pdp_target_batch) ** 2, dim=1)
             
         elif self.loss_type == 'mae':
-            loss = F.l1_loss(pdp_pred_batch, pdp_target_batch)
+            # Compute MAE loss per sample: [batch_size]
+            loss_per_sample = torch.mean(torch.abs(pdp_pred_batch - pdp_target_batch), dim=1)
             
         elif self.loss_type == 'cosine':
-            # Cosine similarity loss for PDP pattern matching
+            # Cosine similarity loss for PDP pattern matching - per sample
             # Add small epsilon to avoid division by zero
             eps = 1e-8
             
@@ -137,12 +146,13 @@ class PDPLoss(nn.Module):
             
             # Convert to loss: (1 - (1 + cosine) / 2) (range [0, 1], 0 = perfect similarity)
             # cosine=1 → loss=0 (best), cosine=0 → loss=0.5 (medium), cosine=-1 → loss=1 (worst)
-            cosine_loss_per_sample = 1.0 - (1.0 + cosine_similarity) / 2.0  # [batch_size]
-            loss = torch.mean(cosine_loss_per_sample)
+            loss_per_sample = 1.0 - (1.0 + cosine_similarity) / 2.0  # [batch_size]
             
         else:
             raise ValueError(f"Unknown loss type: {self.loss_type}")
         
+        # Return mean loss for backward compatibility, but now computed per-CSI first
+        loss = torch.mean(loss_per_sample)
         return loss
     
     def _csi_to_pdp(self, csi: torch.Tensor) -> torch.Tensor:
@@ -175,25 +185,3 @@ class PDPLoss(nn.Module):
         pdp = torch.abs(impulse_response) ** 2
         
         return pdp
-    
-    def _normalize_pdp(self, pdp: torch.Tensor) -> torch.Tensor:
-        """
-        Normalize PDP to unit energy.
-        
-        Args:
-            pdp: Power Delay Profile [fft_size]
-            
-        Returns:
-            normalized_pdp: Normalized PDP [fft_size]
-        """
-        # Compute total energy
-        total_energy = torch.sum(pdp)
-        
-        # Avoid division by zero
-        if total_energy < 1e-12:
-            return pdp
-        
-        # Normalize to unit energy
-        normalized_pdp = pdp / total_energy
-        
-        return normalized_pdp

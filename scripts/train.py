@@ -860,6 +860,9 @@ class PrismTrainer(BaseRunner):
         
         self.logger.info(f"🔄 Training from epoch {start_epoch} to {num_epochs}")
         
+        # Initialize epoch to handle early errors in finally block
+        epoch = start_epoch - 1
+        
         try:
             for epoch in range(start_epoch, num_epochs):
                 epoch_start_time = time.time()

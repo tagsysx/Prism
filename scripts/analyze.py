@@ -72,29 +72,44 @@ class CSIAnalyzer:
     - PDP analysis with FFT-based computation
     """
     
-    def __init__(self, config_path: str, results_path: str = None, output_dir: str = None, fft_size: int = 2048, 
-                 num_workers: int = None, device: str = None, gpu_id: int = None):
+    def __init__(self, config_path: str, results_path: str = None, output_dir: str = None, 
+                 device: str = None, gpu_id: int = None):
         """
         Initialize CSI analyzer
         
         Args:
             config_path: Path to configuration file
-            results_path: Path to test results (.npz file) - optional, will auto-detect from config
-            output_dir: Output directory for analysis results
-            fft_size: FFT size for PDP computation
-            num_workers: Number of parallel workers (deprecated, kept for compatibility)
+            results_path: Path to test results (.npz file) - optional, will auto-detect from config if None
+            output_dir: Output directory for analysis results - optional, will auto-detect from config if None
             device: Device to use for computation ('cuda', 'cpu', or None for auto-detect)
             gpu_id: Specific GPU ID to use (e.g., 0, 1, 2). Only effective when device='cuda'
+            
+        Configuration Parameters (read from config file):
+            - fft_size: analysis.pdp.fft_size (default: 2048 if not specified)
+            - PAS settings: analysis.pas.* (count, enabled, etc.)
+            - Other analysis parameters from config
+            
+        Parameter Sources:
+            - results_path: parameter > auto-detect from config
+            - output_dir: parameter > auto-detect from config  
+            - device/gpu_id: from parameters only (not from config)
+            - All other settings: from configuration file
         """
         self.config_path = Path(config_path)
-        self.fft_size = fft_size
         
         # Load configuration first
         self.config_loader = ModernConfigLoader(self.config_path)
         
-        # Setup device for GPU computation
+        # Load analysis configuration
+        analysis_config = self.config_loader._processed_config.get('analysis', {})
+        
+        # Get fft_size from config (with default fallback)
+        self.fft_size = analysis_config.get('pdp', {}).get('fft_size', 512)
+        logger.info(f"Using FFT size from config: {self.fft_size}")
+        
+        # Setup device for GPU computation (from parameters only)
         if device is None:
-            # Auto-detect device from config or use CUDA if available
+            # Auto-detect device from system or use CUDA if available
             self.device = self._setup_device(gpu_id)
         else:
             if device == 'cuda' and gpu_id is not None:
@@ -112,8 +127,7 @@ class CSIAnalyzer:
         self.ignore_amplitude = ss_error_config.get('ignore_amplitude', False)  # Default to False
         self.ss_sample_count = ss_error_config.get('count', 500)  # Default to 500 samples
         
-        # Load analysis configuration
-        analysis_config = self.config_loader._processed_config.get('analysis', {})
+        # Load PAS configuration from already loaded analysis_config
         pas_config = analysis_config.get('pas', {})
         self.pas_enabled = pas_config.get('enabled', True)  # Default to True
         
@@ -1494,12 +1508,18 @@ Examples:
     parser.add_argument('--config', required=True, help='Path to configuration file (e.g., configs/sionna.yml)')
     parser.add_argument('--results', help='Path to test results (.npz file) - optional, will auto-detect from config')
     parser.add_argument('--output', help='Output directory for analysis results (optional)')
-    parser.add_argument('--fft-size', type=int, default=2048, help='FFT size for PDP computation (default: 2048)')
-    parser.add_argument('--num-workers', type=int, help='Number of parallel workers (deprecated, kept for compatibility)')
+    parser.add_argument('--fft-size', type=int, default=2048, help='DEPRECATED: FFT size now read from config analysis.pdp.fft_size')
+    parser.add_argument('--num-workers', type=int, help='DEPRECATED: Number of parallel workers (no longer used)')
     parser.add_argument('--device', choices=['cuda', 'cpu', 'auto'], default='auto', help='Device to use for computation (default: auto)')
     parser.add_argument('--gpu', type=int, default=None, help='Specific GPU ID to use (e.g., 0, 1, 2). Only effective when --device cuda')
     
     args = parser.parse_args()
+    
+    # Show deprecation warnings for unused parameters
+    if args.fft_size != 2048:
+        print("⚠️  WARNING: --fft-size parameter is deprecated. FFT size is now read from config file (analysis.pdp.fft_size)")
+    if args.num_workers is not None:
+        print("⚠️  WARNING: --num-workers parameter is deprecated and no longer used")
     
     try:
         print(f"🚀 Starting CSI analysis with config: {args.config}")
@@ -1548,8 +1568,6 @@ Examples:
             config_path=args.config,
             results_path=args.results,
             output_dir=args.output,
-            fft_size=args.fft_size,
-            num_workers=args.num_workers,
             device=device,
             gpu_id=args.gpu
         )

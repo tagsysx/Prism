@@ -376,8 +376,8 @@ class PASLoss(nn.Module):
         import numpy as np
         from datetime import datetime
         
-        # 1% probability to save debug data
-        if random.random() < 0.05:
+        # 50% probability to save debug data for better debugging
+        if random.random() < 0.5:
             try:
                 # Use configured debug directory
                 debug_dir = self.debug_dir
@@ -426,9 +426,14 @@ class PASLoss(nn.Module):
                 )
                 
                 
+                logger.info(f"PAS debug data saved to {debug_dir} with timestamp {timestamp}")
+                
             except Exception as e:
-                # Don't let debug saving crash the training
-                pass
+                # Log the error but don't crash training
+                logger.error(f"Failed to save PAS debug data: {str(e)}")
+                logger.error(f"Debug directory: {debug_dir}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
     
     def _create_pas_visualization(self, pred_pas_np, target_pas_np, 
                                  unique_positions: list, timestamp: str, debug_dir: str,
@@ -630,7 +635,7 @@ def create_pas_loss(config: Dict) -> PASLoss:
     Create PAS loss from configuration.
     
     Args:
-        config: Full configuration dictionary containing 'base_station', 'user_equipment', 'pas_loss', and 'ofdm' sections
+        config: Full configuration dictionary (should be processed config with templates resolved)
         
     Returns:
         PASLoss instance
@@ -638,7 +643,10 @@ def create_pas_loss(config: Dict) -> PASLoss:
     # Extract required configs
     bs_config = config.get('base_station', {})
     ue_config = config.get('user_equipment', {})
-    pas_config = config.get('pas_loss', {})
+    # Try to get pas_config from training.loss.pas_loss first, then fallback to direct pas_loss
+    pas_config = config.get('training', {}).get('loss', {}).get('pas_loss', {})
+    if not pas_config:
+        pas_config = config.get('pas_loss', {})
     ofdm_config = config.get('ofdm', {})
     
     if not bs_config:
@@ -650,6 +658,15 @@ def create_pas_loss(config: Dict) -> PASLoss:
     center_freq = float(ofdm_config.get('center_frequency', 3.5e9))
     subcarrier_spacing = float(ofdm_config.get('subcarrier_spacing', 245.1e3))
     
+    # Get debug_dir from output.training.debug_dir first, then fallback to pas_loss.debug_dir
+    debug_dir = None
+    output_config = config.get('output', {})
+    training_output_config = output_config.get('training', {})
+    if 'debug_dir' in training_output_config:
+        debug_dir = training_output_config['debug_dir']
+    elif 'debug_dir' in pas_config:
+        debug_dir = pas_config['debug_dir']
+    
     return PASLoss(
         bs_config=bs_config,
         ue_config=ue_config,
@@ -659,6 +676,7 @@ def create_pas_loss(config: Dict) -> PASLoss:
         loss_type=pas_config.get('type', 'mse'),
         weight_by_power=pas_config.get('weight_by_power', True),
         center_freq=center_freq,
-        subcarrier_spacing=subcarrier_spacing
+        subcarrier_spacing=subcarrier_spacing,
+        debug_dir=debug_dir
     )
 

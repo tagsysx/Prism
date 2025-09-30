@@ -99,7 +99,7 @@ output:
     debug_dir: '{{base_dir}}/training/debug'      # Debug directory for temporary spatial spectrum and intermediate files
 
 training:
-  num_epochs: 60  # Reduced epochs for PolyU dataset
+  num_epochs: 100  # Reduced epochs for PolyU dataset
   batch_size: 16  # Position pairs per batch (16 pairs × 8 antenna combinations = 128 samples)
   checkpoint_frequency: 5
   auto_checkpoint: true
@@ -129,7 +129,7 @@ training:
       fft_size: 128  # Reduced from 2048 to reduce sparsity (should be >= num_subcarriers)
       normalize_pdp: true
       loss_type: cosine  # Loss type: 'mse', 'mae', 'cosine' (cosine for pattern similarity)
-    pdp_weight: 20.0
+    pdp_weight: 100.0
     pas_loss:
       enabled: true  # Set to false to disable original PAS loss
       azimuth_divisions: 18  # ~20 degree resolution (180/18 = 10 deg per bin)
@@ -152,8 +152,13 @@ training:
 
 
 analysis:
+  # PAS (Power Angular Spectrum) analysis configuration
   pas:
     ignore_amplitude: false  # Whether to ignore amplitude and only use phase for spatial spectrum computation
     count: 50000  # Maximum number of spatial spectrum samples to analyze (randomly selected from all samples)
     enabled: true  # Enable PAS analysis
     use_parallel: false  # Enable parallel processing for PAS analysis
+  
+  # PDP (Power Delay Profile) analysis configuration
+  pdp:
+    fft_size: 512  # FFT size for PDP analysis

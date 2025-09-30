@@ -153,8 +153,13 @@ training:
 
 
 analysis:
+  # PAS (Power Angular Spectrum) analysis configuration
   pas:
     ignore_amplitude: false  # Whether to ignore amplitude and only use phase for spatial spectrum computation
     count: 5000  # Maximum number of spatial spectrum samples to analyze (randomly selected from all samples)
     enabled: true  # Enable PAS analysis
     use_parallel: false  # Enable parallel processing for PAS analysis
+  
+  # PDP (Power Delay Profile) analysis configuration
+  pdp:
+    fft_size: 1024  # FFT size for PDP analysis
