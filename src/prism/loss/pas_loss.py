@@ -208,15 +208,11 @@ class PASLoss(nn.Module):
             
             cosine_similarity = dot_product / (pred_norm * target_norm)  # [batch_size]
             
-            # Convert to loss: 1 - abs(cosine_similarity) (range [0, 1], 0 = perfect similarity)
-            cosine_loss_per_sample = 1.0 - torch.abs(cosine_similarity)  # [batch_size]
+            # Convert to loss: (1 - (1 + cosine) / 2) (range [0, 1], 0 = perfect similarity)
+            # cosine=1 → loss=0 (best), cosine=0 → loss=0.5 (medium), cosine=-1 → loss=1 (worst)
+            cosine_loss_per_sample = 1.0 - (1.0 + cosine_similarity) / 2.0  # [batch_size]
             
-            # Apply power weights if provided
-            if power_weights is not None:
-                weighted_cosine_loss = cosine_loss_per_sample * power_weights  # [batch_size]
-                loss = torch.mean(weighted_cosine_loss)
-            else:
-                loss = torch.mean(cosine_loss_per_sample)
+            loss = torch.mean(cosine_loss_per_sample)
             
         else:
             raise ValueError(f"Unknown loss type: {self.loss_type}")

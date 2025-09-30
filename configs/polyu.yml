@@ -31,7 +31,7 @@ neural_networks:
   csi_network:
     d_model: 128
     n_layers: 4
-    n_heads: 8
+    n_heads: 4
     d_ff: 512
     dropout_rate: 0.05
     max_magnitude: 50.0
@@ -93,7 +93,7 @@ output:
     checkpoint_dir: '{{base_dir}}/training/checkpoints'
     log_dir: '{{base_dir}}/training/logs'
     log_file: '{{base_dir}}/training/logs/training.log'
-    log_level: DEBUG
+    log_level: INFO
     models_dir: '{{base_dir}}/training/models'
     tensorboard_dir: '{{base_dir}}/training/tensorboard'
     debug_dir: '{{base_dir}}/training/debug'      # Debug directory for temporary spatial spectrum and intermediate files

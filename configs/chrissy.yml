@@ -130,15 +130,15 @@ training:
       fft_size: 512  # Reduced from 2048 to reduce sparsity (should be >= num_subcarriers)
       normalize_pdp: true
       loss_type: cosine  # Loss type: 'mse', 'mae', 'cosine' (cosine for pattern similarity)
-    pdp_weight: 1.0
+    pdp_weight: 50
     pas_loss:
       enabled: true  # Enable PAS loss for Chrissy dataset
-      azimuth_divisions: 360  # Higher resolution for Chrissy dataset
-      elevation_divisions: 90
+      azimuth_divisions: 18  # Higher resolution for Chrissy dataset
+      elevation_divisions: 6
       normalize_pas: true
       type: cosine  # Loss type: 'mse', 'mae', 'kl_div', 'js_div', 'cosine' (cosine for pattern similarity)
-      weight_by_power: true
-    pas_weight: 1.5
+      weight_by_power: false
+    pas_weight: 50
     # pas_loss2:
     #   enabled: false  # Enable PAS Loss 2 for Chrissy dataset
     #   freq_spatial_weight: 0.40  # Weight for frequency-spatial correlation loss

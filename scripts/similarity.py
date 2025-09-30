@@ -124,8 +124,9 @@ class Similarity:
         
         cosine_sim = dot_product / (pred_norm * target_norm)
         
-        # Use abs(cosine_similarity) directly where 1 is most similar
-        return float(abs(cosine_sim))
+        # Convert to similarity: (1 + cosine) / 2 (range [0, 1], 1 = most similar)
+        # cosine=1 → similarity=1 (best), cosine=0 → similarity=0.5 (medium), cosine=-1 → similarity=0 (worst)
+        return float((1.0 + cosine_sim) / 2.0)
 
     @staticmethod
     def compute_nmse_similarity(pred_tensor: torch.Tensor, target_tensor: torch.Tensor) -> float:
