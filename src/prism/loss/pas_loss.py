@@ -235,11 +235,9 @@ class PASLoss(nn.Module):
         
         # Debug: randomly save PAS comparison plots
         # Only save debug plots when we have meaningful spatial spectrum
-        # Now that we separate BS and UE processing, we can use simpler logic
-        # Note: Debug saving is now handled in _compute_split_pas_loss to use correct loss values
-        # if (self.debug_dir and random.random() < self.debug_sample_rate and 
-        #     (self.num_bs_antennas > 1 or self.num_ue_antennas > 1)):
-        #     self._save_debug_plot(pred_pas, target_pas, loss)
+        if (self.debug_dir and random.random() < self.debug_sample_rate and 
+            (self.num_bs_antennas > 1 or self.num_ue_antennas > 1)):
+            self._save_debug_plot(pred_pas, target_pas, loss, self.loss_type)
         
         # Normalize by total number of antennas to prevent loss scaling with antenna count
         # This ensures that the loss magnitude is comparable regardless of antenna configuration
@@ -379,19 +377,13 @@ class PASLoss(nn.Module):
             ue_loss = self.compute_loss(ue_pas_pred_flat, ue_pas_target_flat, self.num_ue_antennas)
             total_loss = total_loss + ue_loss
             logger.debug(f"UE PAS loss: {ue_loss.item():.6f} (UE antennas: {self.num_ue_antennas})")
-            
-            # Save debug plot for UE PAS (since it has meaningful spatial spectrum)
-            if (self.debug_dir and random.random() < self.debug_sample_rate):
-                self._save_debug_plot(ue_pas_pred_flat, ue_pas_target_flat, ue_loss)
         else:
             logger.debug(f"Skipping UE PAS loss (single antenna: {self.num_ue_antennas})")
         
         # Also save debug plot for BS PAS if it has multiple antennas
-        if (self.num_bs_antennas > 1 and bs_loss is not None and 
-            self.debug_dir and random.random() < self.debug_sample_rate):
-            bs_pas_pred_flat = bs_pas_pred.view(-1, azimuth_div, elevation_div)
-            bs_pas_target_flat = bs_pas_target.view(-1, azimuth_div, elevation_div)
-            self._save_debug_plot(bs_pas_pred_flat, bs_pas_target_flat, bs_loss)
+        if (self.num_bs_antennas > 1 and bs_loss is not None):
+            # Debug plot for BS PAS is handled in compute_loss method
+            pass
         
         return total_loss
     
@@ -498,7 +490,7 @@ class PASLoss(nn.Module):
             logger.warning(f"Error checking PAS content meaningfulness: {e}, defaulting to save")
             return True  # Default to saving if check fails
     
-    def _save_debug_plot(self, pred_pas: torch.Tensor, target_pas: torch.Tensor, loss_value: torch.Tensor):
+    def _save_debug_plot(self, pred_pas: torch.Tensor, target_pas: torch.Tensor, loss_value: torch.Tensor, loss_type: str):
         """
         Save debug plot comparing predicted and target PAS
         
@@ -548,25 +540,25 @@ class PASLoss(nn.Module):
             cosine_loss = 1.0 - (1.0 + cosine_sim) / 2.0
             
             # Determine actual loss value based on loss type
-            if self.loss_type == 'mse':
+            if loss_type == 'mse':
                 actual_loss_value = mse
                 loss_info = f"MSE Loss: {mse:.6f}"
-            elif self.loss_type == 'mae':
+            elif loss_type == 'mae':
                 actual_loss_value = mae
                 loss_info = f"MAE Loss: {mae:.6f}"
-            elif self.loss_type == 'cosine':
+            elif loss_type == 'cosine':
                 actual_loss_value = cosine_loss
                 loss_info = f"Cosine Loss: {cosine_loss:.6f} (sim: {cosine_sim:.4f})"
-            elif self.loss_type in ['kl_div', 'js_div']:
+            elif loss_type in ['kl_div', 'js_div']:
                 actual_loss_value = loss_value.item()
-                loss_info = f"{self.loss_type.upper()} Loss: {loss_value.item():.6f}"
+                loss_info = f"{loss_type.upper()} Loss: {loss_value.item():.6f}"
             else:
                 actual_loss_value = loss_value.item()
                 loss_info = f"Unknown Loss: {loss_value.item():.6f}"
             
             # Add antenna configuration information and loss details
             antenna_info = f"BS: {self.num_bs_antennas} ant, UE: {self.num_ue_antennas} ant"
-            loss_type_info = f"Loss Type: {self.loss_type.upper()}"
+            loss_type_info = f"Loss Type: {loss_type.upper()}"
             loss_value_info = f"Loss Value: {actual_loss_value:.6f}"
             config_info = f"[{antenna_info}] [{loss_type_info}] [{loss_value_info}] Sample {sample_idx}"
             
@@ -635,7 +627,7 @@ class PASLoss(nn.Module):
 PAS Loss Analysis
 {'='*50}
 LOSS FUNCTION DETAILS:
-• Type: {self.loss_type.upper()}
+• Type: {loss_type.upper()}
 • Current Loss Value: {actual_loss_value:.6f}
 
 ANTENNA CONFIGURATION:
