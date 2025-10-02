@@ -541,19 +541,24 @@ class PASLoss(nn.Module):
             
             # Determine actual loss value based on loss type
             if loss_type == 'mse':
-                actual_loss_value = mse
-                loss_info = f"MSE Loss: {mse:.6f}"
+                actual_loss_value = loss_value.item()  # Use actual computed loss
+                comparison_loss_value = mse  # For comparison
+                loss_info = f"MSE Loss: {actual_loss_value:.6f} (sample MSE: {mse:.6f})"
             elif loss_type == 'mae':
-                actual_loss_value = mae
-                loss_info = f"MAE Loss: {mae:.6f}"
+                actual_loss_value = loss_value.item()  # Use actual computed loss
+                comparison_loss_value = mae  # For comparison
+                loss_info = f"MAE Loss: {actual_loss_value:.6f} (sample MAE: {mae:.6f})"
             elif loss_type == 'cosine':
-                actual_loss_value = cosine_loss
-                loss_info = f"Cosine Loss: {cosine_loss:.6f} (sim: {cosine_sim:.4f})"
+                actual_loss_value = loss_value.item()  # Use actual computed loss (batch average)
+                comparison_loss_value = cosine_loss  # Single sample for comparison
+                loss_info = f"Cosine Loss: {actual_loss_value:.6f} (sample: {cosine_loss:.6f}, sim: {cosine_sim:.4f})"
             elif loss_type in ['kl_div', 'js_div']:
                 actual_loss_value = loss_value.item()
+                comparison_loss_value = actual_loss_value
                 loss_info = f"{loss_type.upper()} Loss: {loss_value.item():.6f}"
             else:
                 actual_loss_value = loss_value.item()
+                comparison_loss_value = actual_loss_value
                 loss_info = f"Unknown Loss: {loss_value.item():.6f}"
             
             # Add antenna configuration information and loss details

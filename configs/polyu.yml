@@ -134,12 +134,12 @@ training:
     pdp_weight: 10.0
     pas_loss:
       enabled: true  # Set to false to disable original PAS loss
-      azimuth_divisions: 18  # ~20 degree resolution (180/18 = 10 deg per bin)
-      elevation_divisions: 6   # 15 degree resolution (90/6 = 15 deg per bin)
+      azimuth_divisions: 360  # ~20 degree resolution (180/18 = 10 deg per bin)
+      elevation_divisions: 90   # 15 degree resolution (90/6 = 15 deg per bin)
       normalize_pas: false  # Disable normalization for larger loss values
       type: cosine  # Loss type: 'mse', 'mae', 'kl_div', 'js_div', 'cosine' (cosine for pattern similarity)
       weight_by_power: false  # Disable power weighting for simplicity
-      debug_sample_rate: 0.1  # Probability to save debug plots (0.5 = 50%)
+      debug_sample_rate: 0.3  # Probability to save debug plots (0.5 = 50%)
     pas_weight: 20.0
     # pas2_loss:
     #   enabled: false  # Enable PAS Loss 2 (Multi-subcarrier CSI Spatial-Frequency Loss)
