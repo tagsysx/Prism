@@ -123,13 +123,15 @@ training:
       phase_weight: 3.0
       normalize_weights: true
       max_magnitude: 50.0  # Maximum magnitude for numerical stability
+      debug_sample_rate: 0.1  # Probability to save debug plots (0.5 = 50%)
     csi_weight: 1.0
     pdp_loss:
       enabled: true
       fft_size: 128  # Reduced from 2048 to reduce sparsity (should be >= num_subcarriers)
       normalize_pdp: true
       loss_type: cosine  # Loss type: 'mse', 'mae', 'cosine' (cosine for pattern similarity)
-    pdp_weight: 100.0
+      debug_sample_rate: 0.1  # Probability to save debug plots (0.5 = 50%)
+    pdp_weight: 10.0
     pas_loss:
       enabled: true  # Set to false to disable original PAS loss
       azimuth_divisions: 18  # ~20 degree resolution (180/18 = 10 deg per bin)
@@ -137,6 +139,7 @@ training:
       normalize_pas: false  # Disable normalization for larger loss values
       type: cosine  # Loss type: 'mse', 'mae', 'kl_div', 'js_div', 'cosine' (cosine for pattern similarity)
       weight_by_power: false  # Disable power weighting for simplicity
+      debug_sample_rate: 0.1  # Probability to save debug plots (0.5 = 50%)
     pas_weight: 20.0
     # pas2_loss:
     #   enabled: false  # Enable PAS Loss 2 (Multi-subcarrier CSI Spatial-Frequency Loss)
@@ -157,7 +160,7 @@ analysis:
     ignore_amplitude: false  # Whether to ignore amplitude and only use phase for spatial spectrum computation
     count: 50000  # Maximum number of spatial spectrum samples to analyze (randomly selected from all samples)
     enabled: true  # Enable PAS analysis
-    use_parallel: false  # Enable parallel processing for PAS analysis
+    azimuth_only: false  # If true, compute only azimuth spectrum (integrate over elevation for 2D arrays)
   
   # PDP (Power Delay Profile) analysis configuration
   pdp:

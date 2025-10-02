@@ -11,6 +11,10 @@ import torch.nn.functional as F
 from typing import Optional, Dict
 import numpy as np
 import logging
+import random
+import matplotlib.pyplot as plt
+from pathlib import Path
+from datetime import datetime
 
 # Get logger for this module
 logger = logging.getLogger(__name__)
@@ -25,7 +29,8 @@ class CSILoss(nn.Module):
     """
     
     def __init__(self, phase_weight: float = 1.0, magnitude_weight: float = 1.0,
-                 normalize_weights: bool = True, max_magnitude: float = 100.0):
+                 normalize_weights: bool = True, max_magnitude: float = 100.0,
+                 debug_dir: Optional[str] = None, debug_sample_rate: float = 0.5):
         """
         Initialize CSI loss function
         
@@ -34,14 +39,24 @@ class CSILoss(nn.Module):
             magnitude_weight: Weight for magnitude component in the loss
             normalize_weights: Whether to normalize weights to sum to 1.0 for balanced scaling
             max_magnitude: Maximum magnitude value from config for numerical stability
+            debug_dir: Directory to save debug CSI plots (default: None, no plotting)
+            debug_sample_rate: Probability to save debug plots (default: 0.5, 50%)
         """
         super(CSILoss, self).__init__()
         self.normalize_weights = normalize_weights
         self.max_magnitude = max_magnitude
+        self.debug_dir = Path(debug_dir) if debug_dir else None
+        self.debug_sample_rate = debug_sample_rate
         
         # Store original weights for reference
         self.original_phase_weight = phase_weight
         self.original_magnitude_weight = magnitude_weight
+        
+        # Create debug directory if specified
+        if self.debug_dir:
+            self.debug_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"CSI Loss debug plots will be saved to: {self.debug_dir}")
+            logger.info(f"CSI Loss debug sample rate: {self.debug_sample_rate*100:.1f}%")
         
         # Apply weight normalization if requested
         if normalize_weights:
@@ -262,6 +277,10 @@ class CSILoss(nn.Module):
             # Return a small positive loss to prevent training crash
             loss = torch.tensor(1e-6, device=loss.device, dtype=loss.dtype, requires_grad=True)
         
+        # Debug: randomly save CSI comparison plots
+        if self.debug_dir and random.random() < self.debug_sample_rate:
+            self._save_debug_plot(predicted_csi, target_csi, loss)
+        
         return loss
     
     def _compute_js_divergence(self, pred_antenna: torch.Tensor, target_antenna: torch.Tensor) -> torch.Tensor:
@@ -352,6 +371,104 @@ class CSILoss(nn.Module):
         print(f"   Current Weights:")
         print(f"     magnitude: {info['current_magnitude_weight']:.6f}")
         print(f"     phase: {info['current_phase_weight']:.6f}")
+    
+    def _save_debug_plot(self, pred_csi: torch.Tensor, target_csi: torch.Tensor, loss_value: torch.Tensor):
+        """
+        Save debug plot comparing predicted and target CSI
+        
+        Args:
+            pred_csi: Predicted CSI [batch_size, num_subcarriers] (complex)
+            target_csi: Target CSI [batch_size, num_subcarriers] (complex)
+            loss_value: Computed loss value (scalar tensor)
+        """
+        try:
+            # Randomly select one sample from the batch
+            batch_size = pred_csi.shape[0]
+            sample_idx = random.randint(0, batch_size - 1)
+            
+            # Get CSI for selected sample
+            pred_sample = pred_csi[sample_idx].detach().cpu().numpy()
+            target_sample = target_csi[sample_idx].detach().cpu().numpy()
+            
+            # Extract magnitude and phase
+            pred_mag = np.abs(pred_sample)
+            target_mag = np.abs(target_sample)
+            pred_phase = np.angle(pred_sample)
+            target_phase = np.angle(target_sample)
+            
+            # Create subcarrier indices
+            num_subcarriers = len(pred_sample)
+            subcarrier_indices = np.arange(num_subcarriers)
+            
+            # Compute metrics
+            mag_mse = ((pred_mag - target_mag) ** 2).mean()
+            mag_mae = np.abs(pred_mag - target_mag).mean()
+            phase_mse = ((pred_phase - target_phase) ** 2).mean()
+            phase_mae = np.abs(pred_phase - target_phase).mean()
+            
+            # Create plot with 4 subplots
+            fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+            
+            # Plot 1: Magnitude comparison
+            axes[0, 0].plot(subcarrier_indices, pred_mag, 'b-', linewidth=2, label='Predicted', alpha=0.8)
+            axes[0, 0].plot(subcarrier_indices, target_mag, 'r--', linewidth=2, label='Target', alpha=0.8)
+            axes[0, 0].set_xlabel('Subcarrier Index', fontsize=11)
+            axes[0, 0].set_ylabel('Magnitude', fontsize=11)
+            axes[0, 0].set_title(f'CSI Magnitude Comparison | MAE: {mag_mae:.6f}, MSE: {mag_mse:.6f}',
+                               fontsize=12, fontweight='bold')
+            axes[0, 0].legend(fontsize=10)
+            axes[0, 0].grid(True, alpha=0.3)
+            
+            # Plot 2: Phase comparison
+            axes[0, 1].plot(subcarrier_indices, pred_phase, 'b-', linewidth=2, label='Predicted', alpha=0.8)
+            axes[0, 1].plot(subcarrier_indices, target_phase, 'r--', linewidth=2, label='Target', alpha=0.8)
+            axes[0, 1].set_xlabel('Subcarrier Index', fontsize=11)
+            axes[0, 1].set_ylabel('Phase (radians)', fontsize=11)
+            axes[0, 1].set_title(f'CSI Phase Comparison | MAE: {phase_mae:.6f}, MSE: {phase_mse:.6f}',
+                               fontsize=12, fontweight='bold')
+            axes[0, 1].legend(fontsize=10)
+            axes[0, 1].grid(True, alpha=0.3)
+            
+            # Plot 3: Magnitude error
+            mag_error = pred_mag - target_mag
+            axes[1, 0].plot(subcarrier_indices, mag_error, 'g-', linewidth=1.5, label='Error (Pred - Target)')
+            axes[1, 0].axhline(y=0, color='k', linestyle='--', alpha=0.5)
+            axes[1, 0].set_xlabel('Subcarrier Index', fontsize=11)
+            axes[1, 0].set_ylabel('Magnitude Error', fontsize=11)
+            axes[1, 0].set_title('Magnitude Prediction Error', fontsize=12, fontweight='bold')
+            axes[1, 0].legend(fontsize=10)
+            axes[1, 0].grid(True, alpha=0.3)
+            
+            # Plot 4: Phase error
+            phase_error = pred_phase - target_phase
+            # Wrap phase error to [-pi, pi]
+            phase_error = np.arctan2(np.sin(phase_error), np.cos(phase_error))
+            axes[1, 1].plot(subcarrier_indices, phase_error, 'm-', linewidth=1.5, label='Error (Pred - Target)')
+            axes[1, 1].axhline(y=0, color='k', linestyle='--', alpha=0.5)
+            axes[1, 1].set_xlabel('Subcarrier Index', fontsize=11)
+            axes[1, 1].set_ylabel('Phase Error (radians)', fontsize=11)
+            axes[1, 1].set_title('Phase Prediction Error', fontsize=12, fontweight='bold')
+            axes[1, 1].legend(fontsize=10)
+            axes[1, 1].grid(True, alpha=0.3)
+            
+            # Add overall title with loss information
+            fig.suptitle(f'CSI Loss Debug | Total Loss: {loss_value.item():.6f} | Sample: {sample_idx}',
+                        fontsize=14, fontweight='bold')
+            
+            plt.tight_layout()
+            
+            # Generate filename with timestamp
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+            filename = f'csi_comparison_{timestamp}_sample{sample_idx}.png'
+            filepath = self.debug_dir / filename
+            
+            plt.savefig(filepath, dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            logger.debug(f"Saved debug CSI plot: {filename}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to save debug CSI plot: {e}")
     
     # _complex_correlation method removed - was incorrectly implemented
     # (mixed all subcarriers and antennas together)

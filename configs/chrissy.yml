@@ -124,12 +124,14 @@ training:
       phase_weight: 3.0
       normalize_weights: true
       max_magnitude: 100.0  # Maximum magnitude for numerical stability
+      debug_sample_rate: 0.5  # Probability to save debug plots (0.5 = 50%)
     csi_weight: 1.0
     pdp_loss:
       enabled: true
       fft_size: 512  # Reduced from 2048 to reduce sparsity (should be >= num_subcarriers)
       normalize_pdp: true
       loss_type: cosine  # Loss type: 'mse', 'mae', 'cosine' (cosine for pattern similarity)
+      debug_sample_rate: 0.5  # Probability to save debug plots (0.5 = 50%)
     pdp_weight: 50
     pas_loss:
       enabled: true  # Enable PAS loss for Chrissy dataset
@@ -138,6 +140,7 @@ training:
       normalize_pas: true
       type: cosine  # Loss type: 'mse', 'mae', 'kl_div', 'js_div', 'cosine' (cosine for pattern similarity)
       weight_by_power: false
+      debug_sample_rate: 0.5  # Probability to save debug plots (0.5 = 50%)
     pas_weight: 50
     # pas_loss2:
     #   enabled: false  # Enable PAS Loss 2 for Chrissy dataset
@@ -158,7 +161,7 @@ analysis:
     ignore_amplitude: false  # Whether to ignore amplitude and only use phase for spatial spectrum computation
     count: 5000  # Maximum number of spatial spectrum samples to analyze (randomly selected from all samples)
     enabled: true  # Enable PAS analysis
-    use_parallel: false  # Enable parallel processing for PAS analysis
+    azimuth_only: true  # If true, compute only azimuth spectrum (integrate over elevation for 2D arrays)
   
   # PDP (Power Delay Profile) analysis configuration
   pdp:

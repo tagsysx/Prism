@@ -590,7 +590,7 @@ class CSIAnalyzer:
         
         return pdp
 
-
+    
     def _analyze_pdp(self):
         """Analyze Power Delay Profile (PDP) with FFT-based computation"""
         logger.info("📊 Analyzing Power Delay Profile (PDP)...")
@@ -622,30 +622,30 @@ class CSIAnalyzer:
         for sample_idx in range(batch_size):
             # 4D format: [batch_size, num_bs_antennas, num_ue_antennas, num_subcarriers]
             for bs_idx in range(num_bs_antennas):
-                    for ue_idx in range(num_ue_antennas):
-                        # Get CSI for this sample, BS antenna, and UE antenna
-                        pred_csi = self.predictions[sample_idx, bs_idx, ue_idx, :].cpu().numpy()
-                        target_csi = self.targets[sample_idx, bs_idx, ue_idx, :].cpu().numpy()
-                        
-                        # Skip if target CSI is zero (no ground truth)
-                        if self._is_target_csi_zero(self.targets[sample_idx, bs_idx, ue_idx, :]):
-                            logger.warning(f"Skipping PDP analysis for sample {sample_idx}, BS antenna {bs_idx}, UE antenna {ue_idx} - target CSI is zero (no ground truth)")
-                            continue
-                        
-                        pred_pdp = self._compute_pdp(pred_csi, self.fft_size)
-                        target_pdp = self._compute_pdp(target_csi, self.fft_size)
-                        
-                        pred_pdp_all.append(pred_pdp)
-                        target_pdp_all.append(target_pdp)
-                        valid_sample_info.append({
-                            'sample_idx': sample_idx,
-                            'bs_idx': bs_idx,
-                            'ue_idx': ue_idx
-                        })
-                        
-                        processed_count += 1
-                        if processed_count % 50 == 0:  # Progress update every 50 PDP computations
-                            logger.info(f"     PDP computation progress: {processed_count}/{total_pdp_computations} ({processed_count/total_pdp_computations*100:.1f}%)")
+                for ue_idx in range(num_ue_antennas):
+                    # Get CSI for this sample, BS antenna, and UE antenna
+                    pred_csi = self.predictions[sample_idx, bs_idx, ue_idx, :].cpu().numpy()
+                    target_csi = self.targets[sample_idx, bs_idx, ue_idx, :].cpu().numpy()
+                    
+                    # Skip if target CSI is zero (no ground truth)
+                    if self._is_target_csi_zero(self.targets[sample_idx, bs_idx, ue_idx, :]):
+                        logger.warning(f"Skipping PDP analysis for sample {sample_idx}, BS antenna {bs_idx}, UE antenna {ue_idx} - target CSI is zero (no ground truth)")
+                        continue
+                    
+                    pred_pdp = self._compute_pdp(pred_csi, self.fft_size)
+                    target_pdp = self._compute_pdp(target_csi, self.fft_size)
+                    
+                    pred_pdp_all.append(pred_pdp)
+                    target_pdp_all.append(target_pdp)
+                    valid_sample_info.append({
+                        'sample_idx': sample_idx,
+                        'bs_idx': bs_idx,
+                        'ue_idx': ue_idx
+                    })
+                    
+                    processed_count += 1
+                    if processed_count % 50 == 0:  # Progress update every 50 PDP computations
+                        logger.info(f"     PDP computation progress: {processed_count}/{total_pdp_computations} ({processed_count/total_pdp_computations*100:.1f}%)")
         
         # Convert to numpy arrays (move to CPU first if on GPU)
         pred_pdp_all = [pdp.cpu() if pdp.is_cuda else pdp for pdp in pred_pdp_all]
@@ -1102,6 +1102,9 @@ class CSIAnalyzer:
             # Directly call mimo_to_pas for PAS computation
             from prism.utils.pas_utils import mimo_to_pas
             
+            # Get azimuth_only setting from config
+            azimuth_only = analysis_config.get('azimuth_only', False)
+            
             pred_pas_dict = mimo_to_pas(
                 csi_matrix=pred_csi_mimo,
                 bs_array_shape=bs_array_shape,
@@ -1110,7 +1113,8 @@ class CSIAnalyzer:
                 elevation_divisions=91,
                 normalize_pas=True,
                 center_freq=center_freq,
-                subcarrier_spacing=subcarrier_spacing
+                subcarrier_spacing=subcarrier_spacing,
+                azimuth_only=azimuth_only
             )
             target_pas_dict = mimo_to_pas(
                 csi_matrix=target_csi_mimo,
@@ -1120,7 +1124,8 @@ class CSIAnalyzer:
                 elevation_divisions=91,
                 normalize_pas=True,
                 center_freq=center_freq,
-                subcarrier_spacing=subcarrier_spacing
+                subcarrier_spacing=subcarrier_spacing,
+                azimuth_only=azimuth_only
             )
             
             # Save all PAS data without averaging - preserve full information
@@ -1176,8 +1181,8 @@ class CSIAnalyzer:
                     
                     ue_results.append({
                         'bs_antenna_idx': bs_ant_idx,
-                        'predicted_spectrum': pred_spectrum.cpu().numpy().tolist(),
-                        'target_spectrum': target_spectrum.cpu().numpy().tolist(),
+                'predicted_spectrum': pred_spectrum.cpu().numpy().tolist(),
+                'target_spectrum': target_spectrum.cpu().numpy().tolist(),
                         'similarity_metrics': similarity_metrics
                     })
             
@@ -1204,10 +1209,10 @@ class CSIAnalyzer:
             if sample['bs_perspective']:  # Will be empty if BS has only 1 antenna
                 for bs_result in sample['bs_perspective']:
                     similarity_metrics = bs_result['similarity_metrics']
-                    cosine_similarity_values.append(similarity_metrics['cosine_similarity'])
-                    nmse_values.append(similarity_metrics['nmse'])
-                    ssim_values.append(similarity_metrics['ssim'])
-            
+            cosine_similarity_values.append(similarity_metrics['cosine_similarity'])
+            nmse_values.append(similarity_metrics['nmse'])
+            ssim_values.append(similarity_metrics['ssim'])
+        
             # Collect from UE perspective (all BS antennas) - only if UE has multiple antennas
             if sample['ue_perspective']:  # Will be empty if UE has only 1 antenna
                 for ue_result in sample['ue_perspective']:
@@ -1355,7 +1360,7 @@ class CSIAnalyzer:
         }
     
     
-    
+
     def _compute_spatial_spectrum_similarity(self, pred_spectrum: torch.Tensor, 
                                            target_spectrum: torch.Tensor) -> dict:
         """Compute similarity metrics between predicted and target spatial spectra on GPU"""

@@ -87,11 +87,14 @@ class LossFunction(nn.Module):
         # Initialize component losses with configuration
         csi_config = config.get('csi_loss', {})
         self.csi_enabled = csi_config.get('enabled', True)  # Default enabled for backward compatibility
+        
         self.csi_loss = CSILoss(
             phase_weight=csi_config.get('phase_weight', 1.0),
             magnitude_weight=csi_config.get('magnitude_weight', 1.0),
             normalize_weights=csi_config.get('normalize_weights', True),
-            max_magnitude=csi_config.get('max_magnitude', 100.0)
+            max_magnitude=csi_config.get('max_magnitude', 100.0),
+            debug_dir=csi_config.get('debug_dir', None),
+            debug_sample_rate=csi_config.get('debug_sample_rate', 0.5)
         )
         
         # Initialize PDP loss
@@ -111,7 +114,9 @@ class LossFunction(nn.Module):
         self.pdp_loss = PDPLoss(
             fft_size=pdp_fft_size,
             normalize_pdp=pdp_normalize,
-            loss_type=pdp_config.get('loss_type', 'mse')
+            loss_type=pdp_config.get('loss_type', 'mse'),
+            debug_dir=pdp_config.get('debug_dir', None),
+            debug_sample_rate=pdp_config.get('debug_sample_rate', 0.5)
         )
         
         logger.info(f"PDP Loss configuration:")
@@ -134,13 +139,6 @@ class LossFunction(nn.Module):
             if not ue_config:
                 raise ValueError("Configuration must contain 'user_equipment' section for PAS loss")
             
-            # Extract debug directory from output configuration
-            debug_dir = None
-            if self.full_config and 'output' in self.full_config:
-                output_config = self.full_config['output']
-                if 'training' in output_config and 'debug_dir' in output_config['training']:
-                    debug_dir = output_config['training']['debug_dir']
-            
             self.pas_loss = PASLoss(
                 bs_config=bs_config,
                 ue_config=ue_config,
@@ -149,7 +147,8 @@ class LossFunction(nn.Module):
                 normalize_pas=pas_config.get('normalize_pas', True),
                 loss_type=pas_config.get('type', 'mse'),
                 weight_by_power=pas_config.get('weight_by_power', True),
-                debug_dir=debug_dir
+                debug_dir=pas_config.get('debug_dir', None),
+                debug_sample_rate=pas_config.get('debug_sample_rate', 0.5)
             )
         else:
             self.pas_loss = None

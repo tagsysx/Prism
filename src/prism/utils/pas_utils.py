@@ -13,14 +13,16 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def compute_pas(csi_batch: torch.Tensor, array_shape: tuple, wavelengths: torch.Tensor, 
-                ignore_amplitude: bool = False, azimuth_divisions: int = 361, 
-                elevation_divisions: int = 91) -> torch.Tensor:
+def _compute_pas(csi_batch: torch.Tensor, array_shape: tuple, wavelengths: torch.Tensor, 
+                 ignore_amplitude: bool = False, azimuth_divisions: int = 361, 
+                 elevation_divisions: int = 91) -> torch.Tensor:
     """
-    Compute Power Angular Spectrum (PAS) for a batch of CSI samples on GPU
+    Internal function to compute Power Angular Spectrum (PAS) for a batch of CSI samples on GPU
     
-    This function computes PAS for each subcarrier separately, then averages
-    across subcarriers to get a robust PAS estimate.
+    This is the core implementation that computes PAS for each subcarrier separately, 
+    then averages across subcarriers to get a robust PAS estimate.
+    
+    Note: This is an internal function. Use compute_pas() instead for the public API.
     
     Args:
         csi_batch: CSI tensor of shape [batch_size, num_antennas, num_subcarriers]
@@ -175,6 +177,97 @@ def compute_pas(csi_batch: torch.Tensor, array_shape: tuple, wavelengths: torch.
     return pas_batch
 
 
+def compute_pas(csi_batch: torch.Tensor, array_shape: tuple, wavelengths: torch.Tensor,
+                ignore_amplitude: bool = False, azimuth_divisions: int = 361,
+                elevation_divisions: int = 91, azimuth_only: bool = False) -> torch.Tensor:
+    """
+    Compute Power Angular Spectrum (PAS) for a batch of CSI samples on GPU
+    
+    This is the main public API for computing spatial spectrum from CSI data.
+    Supports both 1D linear arrays and 2D planar arrays, with flexible output options.
+    
+    Args:
+        csi_batch: CSI tensor of shape [batch_size, num_antennas, num_subcarriers]
+        array_shape: Antenna array shape tuple (length 1 for linear array, length 2 for planar array)
+        wavelengths: Wavelength tensor of shape [num_subcarriers] containing wavelength for each subcarrier
+        ignore_amplitude: Whether to ignore amplitude (default: False)
+        azimuth_divisions: Number of azimuth angle divisions (default: 361 for 0-360° with 1° resolution)
+        elevation_divisions: Number of elevation angle divisions (default: 91 for 0-90° with 1° resolution)
+        azimuth_only: If True, returns only azimuth spectrum [batch_size, azimuth_divisions]
+                     If False, returns full spectrum based on array type (default: False)
+        
+    Returns:
+        When azimuth_only=False (default):
+            - For 1D arrays: [batch_size, azimuth_divisions]
+            - For 2D arrays: [batch_size, azimuth_divisions, elevation_divisions]
+        When azimuth_only=True:
+            - Always returns: [batch_size, azimuth_divisions]
+            - For 2D arrays: integrates over elevation to get azimuth energy
+                         
+    Note:
+        - For 1D arrays: Uses azimuth range 0-180° (linear array assumption)
+        - For 2D arrays: Uses azimuth range 0-360° and elevation 0-90°
+        - When azimuth_only=True for 2D arrays, elevation energy is summed into azimuth
+        - Antenna spacing is automatically set to half wavelength (λ/2)
+        - Each subcarrier uses its specific wavelength for accurate phase calculations
+    
+    Example:
+        >>> csi = torch.randn(32, 8, 64, dtype=torch.complex64)  # 32 samples, 8 antennas, 64 subcarriers
+        >>> wavelengths = torch.ones(64) * 0.125  # wavelength in meters
+        >>> 
+        >>> # For 1D array (8 antennas in a line) - full spectrum
+        >>> pas_1d = compute_pas(csi, (8,), wavelengths)
+        >>> print(pas_1d.shape)  # [32, 361]
+        >>> 
+        >>> # For 2D array (2x4 planar array) - full 2D spectrum
+        >>> pas_2d = compute_pas(csi, (2, 4), wavelengths)
+        >>> print(pas_2d.shape)  # [32, 361, 91]
+        >>> 
+        >>> # For 2D array - azimuth only
+        >>> pas_azimuth = compute_pas(csi, (2, 4), wavelengths, azimuth_only=True)
+        >>> print(pas_azimuth.shape)  # [32, 361]
+    """
+    is_2d_array = len(array_shape) == 2
+    
+    if azimuth_only:
+        # Azimuth-only mode: always return [batch_size, azimuth_divisions]
+        if is_2d_array:
+            # For 2D planar arrays: compute full PAS then integrate over elevation
+            # This gives us the total energy at each azimuth angle across all elevation angles
+            pas_full = _compute_pas(
+                csi_batch, 
+                array_shape, 
+                wavelengths, 
+                ignore_amplitude=ignore_amplitude,
+                azimuth_divisions=azimuth_divisions, 
+                elevation_divisions=elevation_divisions
+            )
+            # Integrate over elevation dimension to get azimuth energy
+            # pas_full shape: [batch_size, azimuth_divisions, elevation_divisions]
+            azimuth_spectrum = torch.sum(pas_full, dim=2)  # [batch_size, azimuth_divisions]
+            return azimuth_spectrum
+        else:
+            # For 1D linear arrays: directly compute azimuth spectrum
+            return _compute_pas(
+                csi_batch, 
+                array_shape, 
+                wavelengths, 
+                ignore_amplitude=ignore_amplitude,
+                azimuth_divisions=azimuth_divisions,
+                elevation_divisions=elevation_divisions
+            )
+    else:
+        # Full spectrum mode: return based on array type
+        return _compute_pas(
+            csi_batch, 
+            array_shape, 
+            wavelengths, 
+            ignore_amplitude=ignore_amplitude,
+            azimuth_divisions=azimuth_divisions,
+            elevation_divisions=elevation_divisions
+        )
+
+
 def reorganize_data_as_mimo(csi: torch.Tensor,
                                    bs_positions: torch.Tensor, ue_positions: torch.Tensor,
                                    bs_antenna_indices: torch.Tensor, ue_antenna_indices: torch.Tensor,
@@ -259,7 +352,7 @@ def reorganize_data_as_mimo(csi: torch.Tensor,
 def mimo_to_pas(csi_matrix: torch.Tensor, bs_array_shape: tuple, ue_array_shape: tuple,
                 azimuth_divisions: int = 36, elevation_divisions: int = 9,
                 normalize_pas: bool = True, center_freq: float = 3.5e9, 
-                subcarrier_spacing: float = 245.1e3) -> dict:
+                subcarrier_spacing: float = 245.1e3, azimuth_only: bool = False) -> dict:
     """
     Convert MIMO CSI matrix to Power Angular Spectrum (PAS) using spatial spectrum computation.
     
@@ -275,18 +368,24 @@ def mimo_to_pas(csi_matrix: torch.Tensor, bs_array_shape: tuple, ue_array_shape:
         normalize_pas: Whether to normalize the PAS to unit energy
         center_freq: Center frequency in Hz (default: 3.5 GHz)
         subcarrier_spacing: Subcarrier spacing in Hz (default: 245.1 kHz)
+        azimuth_only: If True, returns only azimuth spectrum (integrates over elevation for 2D arrays)
         
     Returns:
         pas_dict: Dictionary containing PAS from both perspectives
                  {"bs": bs_pas, "ue": ue_pas}
-                 bs_pas: [num_ue_antennas, azimuth_divisions, elevation_divisions] if BS has >1 antennas, else zeros
-                 ue_pas: [num_bs_antennas, azimuth_divisions, elevation_divisions] if UE has >1 antennas, else zeros
+                 When azimuth_only=False:
+                   bs_pas: [num_ue_antennas, azimuth_divisions, elevation_divisions] if BS has >1 antennas, else zeros
+                   ue_pas: [num_bs_antennas, azimuth_divisions, elevation_divisions] if UE has >1 antennas, else zeros
+                 When azimuth_only=True:
+                   bs_pas: [num_ue_antennas, azimuth_divisions] if BS has >1 antennas, else zeros
+                   ue_pas: [num_bs_antennas, azimuth_divisions] if UE has >1 antennas, else zeros
         
     Note:
         - Always computes PAS from both BS and UE perspectives
         - If BS has single antenna, bs_pas will be zeros
         - If UE has single antenna, ue_pas will be zeros
         - Each perspective uses its respective antenna array configuration
+        - When azimuth_only=True for 2D arrays, elevation energy is summed into azimuth
     """
     device = csi_matrix.device
     num_bs_antennas, num_ue_antennas, num_subcarriers = csi_matrix.shape
@@ -310,15 +409,16 @@ def mimo_to_pas(csi_matrix: torch.Tensor, bs_array_shape: tuple, ue_array_shape:
         
         bs_pas_results = compute_pas(
             bs_csi_batch, bs_array_shape, wavelengths, ignore_amplitude=False,
-            azimuth_divisions=azimuth_divisions, elevation_divisions=elevation_divisions
+            azimuth_divisions=azimuth_divisions, elevation_divisions=elevation_divisions,
+            azimuth_only=azimuth_only
         )
         
-        # Keep all UE antenna results: [num_ue_antennas, azimuth_divisions, elevation_divisions]
+        # Keep all UE antenna results
         bs_pas = bs_pas_results
         
-        # Ensure 2D output format for each UE antenna
-        if len(bs_pas.shape) == 2:
-            # 1D case: expand to 2D
+        # Ensure proper output format based on azimuth_only flag
+        if not azimuth_only and len(bs_pas.shape) == 2:
+            # 1D case without azimuth_only: expand to 2D
             bs_pas = bs_pas.unsqueeze(2).expand(-1, -1, elevation_divisions)  # [num_ue_antennas, azimuth_divisions, elevation_divisions]
         
         # Normalize each UE antenna's PAS if requested (avoid inplace operations)
@@ -333,8 +433,11 @@ def mimo_to_pas(csi_matrix: torch.Tensor, bs_array_shape: tuple, ue_array_shape:
                     normalized_pas_list.append(pas_slice)
             bs_pas = torch.stack(normalized_pas_list, dim=0)
     else:
-        # Single BS antenna - return zeros with shape [num_ue_antennas, azimuth_divisions, elevation_divisions]
-        bs_pas = torch.zeros(num_ue_antennas, azimuth_divisions, elevation_divisions, device=device)
+        # Single BS antenna - return zeros with appropriate shape
+        if azimuth_only:
+            bs_pas = torch.zeros(num_ue_antennas, azimuth_divisions, device=device)
+        else:
+            bs_pas = torch.zeros(num_ue_antennas, azimuth_divisions, elevation_divisions, device=device)
     
     pas_dict["bs"] = bs_pas
     
@@ -347,15 +450,16 @@ def mimo_to_pas(csi_matrix: torch.Tensor, bs_array_shape: tuple, ue_array_shape:
         
         ue_pas_results = compute_pas(
             ue_csi_batch, ue_array_shape, wavelengths, ignore_amplitude=False,
-            azimuth_divisions=azimuth_divisions, elevation_divisions=elevation_divisions
+            azimuth_divisions=azimuth_divisions, elevation_divisions=elevation_divisions,
+            azimuth_only=azimuth_only
         )
         
-        # Keep all BS antenna results: [num_bs_antennas, azimuth_divisions, elevation_divisions]
+        # Keep all BS antenna results
         ue_pas = ue_pas_results
         
-        # Ensure 2D output format for each BS antenna
-        if len(ue_pas.shape) == 2:
-            # 1D case: expand to 2D
+        # Ensure proper output format based on azimuth_only flag
+        if not azimuth_only and len(ue_pas.shape) == 2:
+            # 1D case without azimuth_only: expand to 2D
             ue_pas = ue_pas.unsqueeze(2).expand(-1, -1, elevation_divisions)  # [num_bs_antennas, azimuth_divisions, elevation_divisions]
         
         # Normalize each BS antenna's PAS if requested (avoid inplace operations)
@@ -370,8 +474,11 @@ def mimo_to_pas(csi_matrix: torch.Tensor, bs_array_shape: tuple, ue_array_shape:
                     normalized_pas_list.append(pas_slice)
             ue_pas = torch.stack(normalized_pas_list, dim=0)
     else:
-        # Single UE antenna - return zeros with shape [num_bs_antennas, azimuth_divisions, elevation_divisions]
-        ue_pas = torch.zeros(num_bs_antennas, azimuth_divisions, elevation_divisions, device=device)
+        # Single UE antenna - return zeros with appropriate shape
+        if azimuth_only:
+            ue_pas = torch.zeros(num_bs_antennas, azimuth_divisions, device=device)
+        else:
+            ue_pas = torch.zeros(num_bs_antennas, azimuth_divisions, elevation_divisions, device=device)
     
     pas_dict["ue"] = ue_pas
     

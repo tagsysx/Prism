@@ -9,8 +9,13 @@ of signal power across different angles of arrival/departure.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict
+from typing import Dict, Optional
 import logging
+import random
+import matplotlib.pyplot as plt
+import numpy as np
+from pathlib import Path
+from datetime import datetime
 from prism.utils.pas_utils import reorganize_data_as_mimo
 
 logger = logging.getLogger(__name__)
@@ -53,7 +58,8 @@ class PASLoss(nn.Module):
         weight_by_power: bool = True,
         center_freq: float = 3.5e9,
         subcarrier_spacing: float = 245.1e3,
-        debug_dir: str = None
+        debug_dir: str = None,
+        debug_sample_rate: float = 0.5
     ):
         super().__init__()
         
@@ -64,7 +70,8 @@ class PASLoss(nn.Module):
         self.weight_by_power = weight_by_power
         self.center_freq = center_freq
         self.subcarrier_spacing = subcarrier_spacing
-        self.debug_dir = debug_dir or "results/temp"  # Default fallback path
+        self.debug_dir = Path(debug_dir) if debug_dir else None
+        self.debug_sample_rate = debug_sample_rate
         
         # Validate required configs
         if not bs_config:
@@ -95,6 +102,10 @@ class PASLoss(nn.Module):
         if self.loss_type not in valid_types:
             raise ValueError(f"Invalid loss_type: {self.loss_type}. Must be one of {valid_types}")
         
+        # Create debug directory if specified
+        if self.debug_dir:
+            self.debug_dir.mkdir(parents=True, exist_ok=True)
+        
         logger.info(f"PASLoss initialized:")
         logger.info(f"  Azimuth divisions: {azimuth_divisions}")
         logger.info(f"  Elevation divisions: {elevation_divisions}")
@@ -105,6 +116,9 @@ class PASLoss(nn.Module):
         logger.info(f"  Subcarrier spacing: {subcarrier_spacing/1e3:.1f} kHz")
         logger.info(f"  Number of BS antennas: {self.num_bs_antennas}")
         logger.info(f"  Number of UE antennas: {self.num_ue_antennas}")
+        if self.debug_dir:
+            logger.info(f"  Debug plots will be saved to: {self.debug_dir}")
+            logger.info(f"  Debug sample rate: {self.debug_sample_rate*100:.1f}%")
     
     def compute_loss(self, pred_pas: torch.Tensor, target_pas: torch.Tensor, total_antennas: int = 1) -> torch.Tensor:
         """
@@ -219,6 +233,13 @@ class PASLoss(nn.Module):
         
         combined_loss = loss
         
+        # Debug: randomly save PAS comparison plots
+        # Only save debug plots when we have meaningful spatial spectrum (multiple antennas)
+        # For single antenna configurations, PAS will be mostly zeros which is not informative
+        if (self.debug_dir and random.random() < self.debug_sample_rate and 
+            total_antennas > 1):
+            self._save_debug_plot(pred_pas, target_pas, loss)
+        
         # Normalize by total number of antennas to prevent loss scaling with antenna count
         # This ensures that the loss magnitude is comparable regardless of antenna configuration
         if total_antennas > 1:
@@ -299,12 +320,6 @@ class PASLoss(nn.Module):
         pred_pas_batch = pred_pas_batch.view(batch_size * total_antennas, azimuth_div, elevation_div)
         target_pas_batch = target_pas_batch.view(batch_size * total_antennas, azimuth_div, elevation_div)
         
-        # Debug: Save PAS data with 1% probability for inspection
-        # Reshape back to original dimensions for visualization
-        pred_pas_for_debug = pred_pas_batch.view(batch_size, total_antennas, azimuth_div, elevation_div)
-        target_pas_for_debug = target_pas_batch.view(batch_size, total_antennas, azimuth_div, elevation_div)
-        self._maybe_save_pas_debug(pred_pas_for_debug, target_pas_for_debug, unique_positions, pred_csi_by_pos, target_csi_by_pos)
-        
         # Compute loss with normalization factor
         pas_loss = self.compute_loss(pred_pas_batch, target_pas_batch, total_antennas)
         
@@ -359,276 +374,166 @@ class PASLoss(nn.Module):
         
         return all_pas
     
-    def _maybe_save_pas_debug(self, pred_pas_batch: torch.Tensor, target_pas_batch: torch.Tensor, unique_positions: list, 
-                             pred_csi_by_pos: list = None, target_csi_by_pos: list = None):
+    def _save_debug_plot(self, pred_pas: torch.Tensor, target_pas: torch.Tensor, loss_value: torch.Tensor):
         """
-        Save PAS data and visualization for debugging with 1% probability.
+        Save debug plot comparing predicted and target PAS
         
         Args:
-            pred_pas_batch: [num_position_pairs, total_antennas, azimuth_divisions, elevation_divisions]
-            target_pas_batch: [num_position_pairs, total_antennas, azimuth_divisions, elevation_divisions]
-            unique_positions: List of (bs_pos, ue_pos) tuples
-            pred_csi_by_pos: List of predicted CSI matrices [num_bs_antennas, num_ue_antennas, num_subcarriers]
-            target_csi_by_pos: List of target CSI matrices [num_bs_antennas, num_ue_antennas, num_subcarriers]
-        """
-        import random
-        import os
-        import numpy as np
-        from datetime import datetime
-        
-        # 50% probability to save debug data for better debugging
-        if random.random() < 0.5:
-            try:
-                # Use configured debug directory
-                debug_dir = self.debug_dir
-                os.makedirs(debug_dir, exist_ok=True)
-                
-                # Generate timestamp for unique filename
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # Include milliseconds
-                
-                # Convert tensors to numpy for saving
-                pred_pas_np = pred_pas_batch.detach().cpu().numpy()  # [num_position_pairs, total_antennas, azimuth_divisions, elevation_divisions]
-                target_pas_np = target_pas_batch.detach().cpu().numpy()  # [num_position_pairs, total_antennas, azimuth_divisions, elevation_divisions]
-                
-                # Convert CSI data to numpy if available
-                pred_csi_np = None
-                target_csi_np = None
-                if pred_csi_by_pos is not None:
-                    pred_csi_np = [csi.detach().cpu().numpy() for csi in pred_csi_by_pos]
-                if target_csi_by_pos is not None:
-                    target_csi_np = [csi.detach().cpu().numpy() for csi in target_csi_by_pos]
-                
-                # Create visualization
-                self._create_pas_visualization(pred_pas_np, target_pas_np, unique_positions, timestamp, debug_dir, pred_csi_np, target_csi_np)
-                
-                # Save data as .npz file
-                save_path = os.path.join(debug_dir, f"pas_debug_{timestamp}.npz")
-                positions_data = []
-                for i, (bs_pos, ue_pos) in enumerate(unique_positions):
-                    positions_data.append({
-                        'position_pair_idx': i,
-                        'bs_position': bs_pos.detach().cpu().numpy().tolist(),
-                        'ue_position': ue_pos.detach().cpu().numpy().tolist()
-                    })
-                
-                np.savez(
-                    save_path,
-                    pred_pas=pred_pas_np,
-                    target_pas=target_pas_np,
-                    positions=positions_data,
-                    azimuth_divisions=self.azimuth_divisions,
-                    elevation_divisions=self.elevation_divisions,
-                    num_bs_antennas=self.num_bs_antennas,
-                    num_ue_antennas=self.num_ue_antennas,
-                    normalize_pas=self.normalize_pas,
-                    center_freq=self.center_freq,
-                    subcarrier_spacing=self.subcarrier_spacing
-                )
-                
-                
-                logger.info(f"PAS debug data saved to {debug_dir} with timestamp {timestamp}")
-                
-            except Exception as e:
-                # Log the error but don't crash training
-                logger.error(f"Failed to save PAS debug data: {str(e)}")
-                logger.error(f"Debug directory: {debug_dir}")
-                import traceback
-                logger.error(f"Traceback: {traceback.format_exc()}")
-    
-    def _create_pas_visualization(self, pred_pas_np, target_pas_np, 
-                                 unique_positions: list, timestamp: str, debug_dir: str,
-                                 pred_csi_np: list = None, target_csi_np: list = None):
-        """
-        Create and save PAS visualization plots with CSI magnitude information.
-        
-        Args:
-            pred_pas_np: Predicted PAS numpy array [num_position_pairs, total_antennas, azimuth_divisions, elevation_divisions]
-            target_pas_np: Target PAS numpy array [num_position_pairs, total_antennas, azimuth_divisions, elevation_divisions]
-            unique_positions: List of (bs_pos, ue_pos) tuples
-            timestamp: Timestamp string for filename
-            debug_dir: Directory to save plots
-            pred_csi_np: List of predicted CSI matrices [num_bs_antennas, num_ue_antennas, num_subcarriers]
-            target_csi_np: List of target CSI matrices [num_bs_antennas, num_ue_antennas, num_subcarriers]
+            pred_pas: Predicted PAS [batch_size, azimuth_divisions, elevation_divisions] or [batch_size, azimuth_divisions]
+            target_pas: Target PAS (same shape as pred_pas)
+            loss_value: Computed loss value (scalar tensor)
         """
         try:
-            import matplotlib.pyplot as plt
-            import matplotlib
-            import numpy as np
-            import os
-            matplotlib.use('Agg')  # Use non-interactive backend
+            # Randomly select one sample from the batch
+            batch_size = pred_pas.shape[0]
+            sample_idx = random.randint(0, batch_size - 1)
             
-            num_position_pairs, total_antennas, azimuth_div, elevation_div = pred_pas_np.shape
+            # Get PAS for selected sample
+            pred_spectrum = pred_pas[sample_idx].detach().cpu().numpy()
+            target_spectrum = target_pas[sample_idx].detach().cpu().numpy()
             
-            # Create angle grids for plotting
-            azimuth_angles = np.linspace(0, 360, self.azimuth_divisions)  # 0 to 360 degrees
-            elevation_angles = np.linspace(0, 90, self.elevation_divisions)  # 0 to 90 degrees
+            # Compute metrics
+            mse = ((pred_spectrum - target_spectrum) ** 2).mean()
+            mae = np.abs(pred_spectrum - target_spectrum).mean()
             
-            # Plot each position pair (limit to first 3 for clarity)
-            for pos_idx in range(min(num_position_pairs, 3)):
-                # Create larger figure with more subplots to include CSI magnitude
-                if pred_csi_np is not None and target_csi_np is not None:
-                    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-                    fig.suptitle(f'PAS & CSI Comparison - Position Pair {pos_idx} - {timestamp}', fontsize=16)
-                else:
-                    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-                    fig.suptitle(f'PAS Comparison - Position Pair {pos_idx} - {timestamp}', fontsize=14)
+            # Cosine similarity
+            pred_flat = pred_spectrum.flatten()
+            target_flat = target_spectrum.flatten()
+            dot_product = (pred_flat * target_flat).sum()
+            pred_norm = (pred_flat ** 2).sum() ** 0.5
+            target_norm = (target_flat ** 2).sum() ** 0.5
+            cosine_sim = dot_product / (pred_norm * target_norm + 1e-8)
+            cosine_loss = 1.0 - (1.0 + cosine_sim) / 2.0
+            
+            # Determine actual loss value based on loss type
+            if self.loss_type == 'mse':
+                actual_loss_value = mse
+                loss_info = f"MSE Loss: {mse:.6f}"
+            elif self.loss_type == 'mae':
+                actual_loss_value = mae
+                loss_info = f"MAE Loss: {mae:.6f}"
+            elif self.loss_type == 'cosine':
+                actual_loss_value = cosine_loss
+                loss_info = f"Cosine Loss: {cosine_loss:.6f} (sim: {cosine_sim:.4f})"
+            elif self.loss_type in ['kl_div', 'js_div']:
+                actual_loss_value = loss_value.item()
+                loss_info = f"{self.loss_type.upper()} Loss: {loss_value.item():.6f}"
+            else:
+                actual_loss_value = loss_value.item()
+                loss_info = f"Unknown Loss: {loss_value.item():.6f}"
+            
+            # Add antenna configuration information and loss details
+            antenna_info = f"BS: {self.num_bs_antennas} ant, UE: {self.num_ue_antennas} ant"
+            loss_type_info = f"Loss Type: {self.loss_type.upper()}"
+            loss_value_info = f"Loss Value: {actual_loss_value:.6f}"
+            config_info = f"[{antenna_info}] [{loss_type_info}] [{loss_value_info}] Sample {sample_idx}"
+            
+            # Check if 1D or 2D PAS
+            is_1d = len(pred_spectrum.shape) == 1
+            
+            if is_1d:
+                # 1D PAS: single line plot
+                fig, axes = plt.subplots(2, 1, figsize=(12, 8))
                 
-                # Get PAS for this position pair: [total_antennas, azimuth_divisions, elevation_divisions]
-                pred_pas_all_antennas = pred_pas_np[pos_idx]  # [total_antennas, azimuth_divisions, elevation_divisions]
-                target_pas_all_antennas = target_pas_np[pos_idx]  # [total_antennas, azimuth_divisions, elevation_divisions]
+                azimuth_angles = np.linspace(0, 180, len(pred_spectrum))
                 
-                # Average across all antennas for visualization (you can also plot individual antennas if needed)
-                pred_pas_single = np.mean(pred_pas_all_antennas, axis=0)  # [azimuth_divisions, elevation_divisions]
-                target_pas_single = np.mean(target_pas_all_antennas, axis=0)  # [azimuth_divisions, elevation_divisions]
+                # Plot 1: Comparison
+                axes[0].plot(azimuth_angles, pred_spectrum, 'b-', linewidth=2, label='Predicted', alpha=0.8)
+                axes[0].plot(azimuth_angles, target_spectrum, 'r--', linewidth=2, label='Target', alpha=0.8)
+                axes[0].set_xlabel('Azimuth Angle (degrees)', fontsize=11)
+                axes[0].set_ylabel('Power', fontsize=11)
+                axes[0].set_title(f'PAS Comparison | {config_info}\nMSE: {mse:.6f} | Additional Metrics: {loss_info}',
+                                fontsize=11, fontweight='bold')
+                axes[0].legend(fontsize=10)
+                axes[0].grid(True, alpha=0.3)
                 
-                if pred_csi_np is not None and target_csi_np is not None:
-                    # 3x3 layout with CSI magnitude information
-                    pred_csi_single = pred_csi_np[pos_idx]  # [num_bs_antennas, num_ue_antennas, num_subcarriers]
-                    target_csi_single = target_csi_np[pos_idx]
-                    
-                    # Row 1: CSI Magnitude plots
-                    # Predicted CSI magnitude (averaged over subcarriers)
-                    pred_csi_mag = np.mean(np.abs(pred_csi_single), axis=2)  # [num_bs_antennas, num_ue_antennas]
-                    im_csi1 = axes[0, 0].imshow(pred_csi_mag, aspect='auto', cmap='plasma')
-                    axes[0, 0].set_title('Predicted CSI Magnitude\n(avg over subcarriers)')
-                    axes[0, 0].set_xlabel('UE Antenna Index')
-                    axes[0, 0].set_ylabel('BS Antenna Index')
-                    plt.colorbar(im_csi1, ax=axes[0, 0])
-                    
-                    # Target CSI magnitude (averaged over subcarriers)
-                    target_csi_mag = np.mean(np.abs(target_csi_single), axis=2)
-                    im_csi2 = axes[0, 1].imshow(target_csi_mag, aspect='auto', cmap='plasma')
-                    axes[0, 1].set_title('Target CSI Magnitude\n(avg over subcarriers)')
-                    axes[0, 1].set_xlabel('UE Antenna Index')
-                    axes[0, 1].set_ylabel('BS Antenna Index')
-                    plt.colorbar(im_csi2, ax=axes[0, 1])
-                    
-                    # CSI magnitude difference
-                    csi_mag_diff = pred_csi_mag - target_csi_mag
-                    im_csi3 = axes[0, 2].imshow(csi_mag_diff, aspect='auto', cmap='RdBu_r')
-                    axes[0, 2].set_title('CSI Magnitude Difference\n(Pred - Target)')
-                    axes[0, 2].set_xlabel('UE Antenna Index')
-                    axes[0, 2].set_ylabel('BS Antenna Index')
-                    plt.colorbar(im_csi3, ax=axes[0, 2])
-                    
-                    # Row 2: PAS heatmaps
-                    # Predicted PAS
-                    im1 = axes[1, 0].imshow(pred_pas_single.T, aspect='auto', origin='lower', 
-                                           extent=[azimuth_angles[0], azimuth_angles[-1], 
-                                                  elevation_angles[0], elevation_angles[-1]],
-                                           cmap='viridis')
-                    axes[1, 0].set_title('Predicted PAS')
-                    axes[1, 0].set_xlabel('Azimuth (degrees)')
-                    axes[1, 0].set_ylabel('Elevation (degrees)')
-                    plt.colorbar(im1, ax=axes[1, 0])
-                    
-                    # Target PAS
-                    im2 = axes[1, 1].imshow(target_pas_single.T, aspect='auto', origin='lower',
-                                           extent=[azimuth_angles[0], azimuth_angles[-1], 
-                                                  elevation_angles[0], elevation_angles[-1]],
-                                           cmap='viridis')
-                    axes[1, 1].set_title('Target PAS')
-                    axes[1, 1].set_xlabel('Azimuth (degrees)')
-                    axes[1, 1].set_ylabel('Elevation (degrees)')
-                    plt.colorbar(im2, ax=axes[1, 1])
-                    
-                    # PAS difference
-                    pas_diff = pred_pas_single - target_pas_single
-                    im3 = axes[1, 2].imshow(pas_diff.T, aspect='auto', origin='lower', cmap='RdBu_r',
-                                           extent=[azimuth_angles[0], azimuth_angles[-1], 
-                                                  elevation_angles[0], elevation_angles[-1]])
-                    axes[1, 2].set_title('PAS Difference\n(Pred - Target)')
-                    axes[1, 2].set_xlabel('Azimuth (degrees)')
-                    axes[1, 2].set_ylabel('Elevation (degrees)')
-                    plt.colorbar(im3, ax=axes[1, 2])
-                    
-                    # Row 3: 1D profiles and statistics
-                    # Azimuth profiles
-                    pred_azimuth = np.mean(pred_pas_single, axis=1)
-                    target_azimuth = np.mean(target_pas_single, axis=1)
-                    
-                    axes[1, 0].plot(azimuth_angles, pred_azimuth, 'b-', label='Predicted', linewidth=2)
-                    axes[1, 0].plot(azimuth_angles, target_azimuth, 'r--', label='Target', linewidth=2)
-                    axes[1, 0].set_title('Azimuth Profile (avg over elevation)')
-                    axes[1, 0].set_xlabel('Azimuth (degrees)')
-                    axes[1, 0].set_ylabel('Power')
-                    axes[1, 0].legend()
-                    axes[1, 0].grid(True, alpha=0.3)
-                    
-                    # Elevation profiles
-                    pred_elevation = np.mean(pred_pas_single, axis=0)
-                    target_elevation = np.mean(target_pas_single, axis=0)
-                    
-                    axes[1, 1].plot(elevation_angles, pred_elevation, 'b-', label='Predicted', linewidth=2)
-                    axes[1, 1].plot(elevation_angles, target_elevation, 'r--', label='Target', linewidth=2)
-                    axes[1, 1].set_title('Elevation Profile (avg over azimuth)')
-                    axes[1, 1].set_xlabel('Elevation (degrees)')
-                    axes[1, 1].set_ylabel('Power')
-                    axes[1, 1].legend()
-                    axes[1, 1].grid(True, alpha=0.3)
-                    
-                    # Hide the unused subplot
-                    axes[1, 2].set_visible(False)
-                    
-                    
-                else:
-                    # Original 2x2 layout when CSI data is not available
-                    # Predicted PAS
-                    im1 = axes[0, 0].imshow(pred_pas_single.T, aspect='auto', origin='lower', 
-                                           extent=[azimuth_angles[0], azimuth_angles[-1], 
-                                                  elevation_angles[0], elevation_angles[-1]],
-                                           cmap='viridis')
-                    axes[0, 0].set_title('Predicted PAS')
-                    axes[0, 0].set_xlabel('Azimuth (degrees)')
-                    axes[0, 0].set_ylabel('Elevation (degrees)')
-                    plt.colorbar(im1, ax=axes[0, 0])
-                    
-                    # Target PAS
-                    im2 = axes[0, 1].imshow(target_pas_single.T, aspect='auto', origin='lower',
-                                           extent=[azimuth_angles[0], azimuth_angles[-1], 
-                                                  elevation_angles[0], elevation_angles[-1]],
-                                           cmap='viridis')
-                    axes[0, 1].set_title('Target PAS')
-                    axes[0, 1].set_xlabel('Azimuth (degrees)')
-                    axes[0, 1].set_ylabel('Elevation (degrees)')
-                    plt.colorbar(im2, ax=axes[0, 1])
-                    
-                    # 1D comparison - Azimuth profiles (averaged over elevation)
-                    pred_azimuth = np.mean(pred_pas_single, axis=1)
-                    target_azimuth = np.mean(target_pas_single, axis=1)
-                    
-                    axes[1, 0].plot(azimuth_angles, pred_azimuth, 'b-', label='Predicted', linewidth=2)
-                    axes[1, 0].plot(azimuth_angles, target_azimuth, 'r--', label='Target', linewidth=2)
-                    axes[1, 0].set_title('Azimuth Profile (avg over elevation)')
-                    axes[1, 0].set_xlabel('Azimuth (degrees)')
-                    axes[1, 0].set_ylabel('Power')
-                    axes[1, 0].legend()
-                    axes[1, 0].grid(True, alpha=0.3)
-                    
-                    # 1D comparison - Elevation profiles (averaged over azimuth)
-                    pred_elevation = np.mean(pred_pas_single, axis=0)
-                    target_elevation = np.mean(target_pas_single, axis=0)
-                    
-                    axes[1, 1].plot(elevation_angles, pred_elevation, 'b-', label='Predicted', linewidth=2)
-                    axes[1, 1].plot(elevation_angles, target_elevation, 'r--', label='Target', linewidth=2)
-                    axes[1, 1].set_title('Elevation Profile (avg over azimuth)')
-                    axes[1, 1].set_xlabel('Elevation (degrees)')
-                    axes[1, 1].set_ylabel('Power')
-                    axes[1, 1].legend()
-                    axes[1, 1].grid(True, alpha=0.3)
-                    
+                # Plot 2: Error
+                error = pred_spectrum - target_spectrum
+                axes[1].plot(azimuth_angles, error, 'g-', linewidth=1.5, label='Error (Pred - Target)')
+                axes[1].axhline(y=0, color='k', linestyle='--', alpha=0.5)
+                axes[1].set_xlabel('Azimuth Angle (degrees)', fontsize=11)
+                axes[1].set_ylabel('Error', fontsize=11)
+                axes[1].set_title('Prediction Error', fontsize=12, fontweight='bold')
+                axes[1].legend(fontsize=10)
+                axes[1].grid(True, alpha=0.3)
                 
-                plt.tight_layout()
+            else:
+                # 2D PAS: heatmaps
+                fig, axes = plt.subplots(2, 2, figsize=(15, 12))
                 
-                # Save plot
-                plot_path = os.path.join(debug_dir, f"pas_comparison_{timestamp}_pos{pos_idx}.png")
-                plt.savefig(plot_path, dpi=150, bbox_inches='tight')
-                plt.close()  # Close to free memory
+                # Overall title with antenna configuration and loss information
+                fig.suptitle(f'PAS Comparison | {config_info}\nAdditional Metrics: MSE: {mse:.6f}, MAE: {mae:.6f}', 
+                           fontsize=12, fontweight='bold')
                 
+                # Plot 1: Predicted PAS
+                im1 = axes[0, 0].imshow(pred_spectrum.T, aspect='auto', origin='lower', cmap='hot')
+                axes[0, 0].set_title('Predicted PAS', fontsize=12, fontweight='bold')
+                axes[0, 0].set_xlabel('Azimuth', fontsize=10)
+                axes[0, 0].set_ylabel('Elevation', fontsize=10)
+                plt.colorbar(im1, ax=axes[0, 0])
                 
+                # Plot 2: Target PAS
+                im2 = axes[0, 1].imshow(target_spectrum.T, aspect='auto', origin='lower', cmap='hot')
+                axes[0, 1].set_title('Target PAS', fontsize=12, fontweight='bold')
+                axes[0, 1].set_xlabel('Azimuth', fontsize=10)
+                axes[0, 1].set_ylabel('Elevation', fontsize=10)
+                plt.colorbar(im2, ax=axes[0, 1])
+                
+                # Plot 3: Difference
+                diff = pred_spectrum - target_spectrum
+                im3 = axes[1, 0].imshow(diff.T, aspect='auto', origin='lower', cmap='RdBu_r')
+                axes[1, 0].set_title('Difference (Pred - Target)', fontsize=12, fontweight='bold')
+                axes[1, 0].set_xlabel('Azimuth', fontsize=10)
+                axes[1, 0].set_ylabel('Elevation', fontsize=10)
+                plt.colorbar(im3, ax=axes[1, 0])
+                
+                # Plot 4: Metrics and Loss Information
+                axes[1, 1].axis('off')
+                metrics_text = f"""
+PAS Loss Analysis
+{'='*50}
+LOSS FUNCTION DETAILS:
+• Type: {self.loss_type.upper()}
+• Current Loss Value: {actual_loss_value:.6f}
+
+ANTENNA CONFIGURATION:
+• BS Antennas: {self.num_bs_antennas}
+• UE Antennas: {self.num_ue_antennas}
+
+COMPARISON METRICS:
+• MSE (Mean Squared Error): {mse:.6f}
+• MAE (Mean Absolute Error): {mae:.6f}
+• Cosine Similarity: {cosine_sim:.4f}
+• Cosine Loss: {cosine_loss:.6f}
+
+SPECTRUM STATISTICS:
+• Pred Energy: {np.sum(np.abs(pred_spectrum)):.3e}
+• Target Energy: {np.sum(np.abs(target_spectrum)):.3e}
+• Max Pred Value: {np.max(pred_spectrum):.6f}
+• Max Target Value: {np.max(target_spectrum):.6f}
+
+SAMPLE INFO:
+• Sample Index: {sample_idx}
+• Spectrum Shape: {pred_spectrum.shape}
+                """
+                axes[1, 1].text(0.05, 0.95, metrics_text, transform=axes[1, 1].transAxes,
+                               fontsize=9, verticalalignment='top', fontfamily='monospace',
+                               bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.8))
+            
+            plt.tight_layout()
+            
+            # Generate filename with timestamp
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+            filename = f'pas_comparison_{timestamp}_sample{sample_idx}.png'
+            filepath = self.debug_dir / filename
+            
+            plt.savefig(filepath, dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            logger.debug(f"Saved debug PAS plot: {filename}")
+            
         except Exception as e:
-            pass
-    
+            logger.warning(f"Failed to save debug PAS plot: {e}")
 
 def create_pas_loss(config: Dict) -> PASLoss:
     """
@@ -677,6 +582,7 @@ def create_pas_loss(config: Dict) -> PASLoss:
         weight_by_power=pas_config.get('weight_by_power', True),
         center_freq=center_freq,
         subcarrier_spacing=subcarrier_spacing,
-        debug_dir=debug_dir
+        debug_dir=debug_dir,
+        debug_sample_rate=pas_config.get('debug_sample_rate', 0.5)
     )
 

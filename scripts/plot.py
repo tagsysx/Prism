@@ -394,8 +394,6 @@ class CSIPlotter:
         if bs_samples:
             logger.info(f"   Plotting {len(bs_samples)} BS perspective PAS samples...")
             for i, sample in enumerate(bs_samples):
-                fig, axes = plt.subplots(1, 2, figsize=(15, 6))
-                
                 pred_spectrum = np.array(sample['predicted_spatial_spectrum'])
                 target_spectrum = np.array(sample['target_spatial_spectrum'])
                 
@@ -409,37 +407,62 @@ class CSIPlotter:
                 cosine_sim = similarity.get('cosine_similarity', 'N/A')
                 ssim = similarity.get('ssim', 'N/A')
                 
-                # Determine spectrum dimensions for angle arrays
-                azimuth_divisions = pred_spectrum.shape[0]
-                elevation_divisions = pred_spectrum.shape[1]
+                # Check if spectrum is 1D (azimuth only) or 2D (azimuth + elevation)
+                is_1d = len(pred_spectrum.shape) == 1
                 
-                # Create angle arrays based on actual spectrum dimensions
-                azimuth_angles = np.linspace(0, 360, azimuth_divisions)  # 0-360 degrees
-                elevation_angles = np.linspace(0, 90, elevation_divisions)  # 0-90 degrees
-                
-                # Plot predicted spectrum
-                im1 = axes[0].imshow(pred_spectrum.T, cmap='viridis', aspect='auto',
-                                   extent=[azimuth_angles[0], azimuth_angles[-1], 
-                                          elevation_angles[0], elevation_angles[-1]], 
-                                   origin='lower')
-                axes[0].set_title(f'BS Perspective - Predicted Spatial Spectrum\nSample {sample_idx}, Pos {pos_idx}, UE Ant {ue_antenna_idx}', 
+                if is_1d:
+                    # 1D azimuth-only spectrum: plot both on same figure
+                    fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+                    
+                    azimuth_divisions = pred_spectrum.shape[0]
+                    azimuth_angles = np.linspace(0, 360, azimuth_divisions)
+                    
+                    # Plot both predicted and target on same axes
+                    ax.plot(azimuth_angles, pred_spectrum, 'b-', linewidth=2, label='Predicted', alpha=0.8)
+                    ax.plot(azimuth_angles, target_spectrum, 'r--', linewidth=2, label='Target', alpha=0.8)
+                    ax.set_title(f'BS Perspective - Azimuth Spectrum Comparison\nSample {sample_idx}, Pos {pos_idx}, UE Ant {ue_antenna_idx} | Cosine: {cosine_sim:.3f}', 
                                 fontsize=12, fontweight='bold')
-                axes[0].set_xlabel('Azimuth Angle (degrees)', fontsize=10)
-                axes[0].set_ylabel('Elevation Angle (degrees)', fontsize=10)
-                axes[0].grid(True, alpha=0.3, linestyle='--')
-                plt.colorbar(im1, ax=axes[0], label='Power')
-                
-                # Plot target spectrum
-                im2 = axes[1].imshow(target_spectrum.T, cmap='viridis', aspect='auto',
-                                   extent=[azimuth_angles[0], azimuth_angles[-1], 
-                                          elevation_angles[0], elevation_angles[-1]], 
-                                   origin='lower')
-                axes[1].set_title(f'BS Perspective - Target Spatial Spectrum\nCosine: {cosine_sim:.3f}, SSIM: {ssim:.3f}', 
-                                fontsize=12, fontweight='bold')
-                axes[1].set_xlabel('Azimuth Angle (degrees)', fontsize=10)
-                axes[1].set_ylabel('Elevation Angle (degrees)', fontsize=10)
-                axes[1].grid(True, alpha=0.3, linestyle='--')
-                plt.colorbar(im2, ax=axes[1], label='Power')
+                    ax.set_xlabel('Azimuth Angle (degrees)', fontsize=11)
+                    ax.set_ylabel('Power', fontsize=11)
+                    ax.grid(True, alpha=0.3)
+                    ax.legend(fontsize=10, loc='best')
+                    
+                    # Add shaded error region if needed
+                    # ax.fill_between(azimuth_angles, pred_spectrum, target_spectrum, alpha=0.2, color='gray')
+                    
+                else:
+                    # 2D spectrum: use heatmap
+                    fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+                    
+                    azimuth_divisions = pred_spectrum.shape[0]
+                    elevation_divisions = pred_spectrum.shape[1]
+                    
+                    azimuth_angles = np.linspace(0, 360, azimuth_divisions)
+                    elevation_angles = np.linspace(0, 90, elevation_divisions)
+                    
+                    # Plot predicted spectrum
+                    im1 = axes[0].imshow(pred_spectrum.T, cmap='viridis', aspect='auto',
+                                       extent=[azimuth_angles[0], azimuth_angles[-1], 
+                                              elevation_angles[0], elevation_angles[-1]], 
+                                       origin='lower')
+                    axes[0].set_title(f'BS Perspective - Predicted Spatial Spectrum\nSample {sample_idx}, Pos {pos_idx}, UE Ant {ue_antenna_idx}', 
+                                    fontsize=12, fontweight='bold')
+                    axes[0].set_xlabel('Azimuth Angle (degrees)', fontsize=10)
+                    axes[0].set_ylabel('Elevation Angle (degrees)', fontsize=10)
+                    axes[0].grid(True, alpha=0.3, linestyle='--')
+                    plt.colorbar(im1, ax=axes[0], label='Power')
+                    
+                    # Plot target spectrum
+                    im2 = axes[1].imshow(target_spectrum.T, cmap='viridis', aspect='auto',
+                                       extent=[azimuth_angles[0], azimuth_angles[-1], 
+                                              elevation_angles[0], elevation_angles[-1]], 
+                                       origin='lower')
+                    axes[1].set_title(f'BS Perspective - Target Spatial Spectrum\nCosine: {cosine_sim:.3f}, SSIM: {ssim:.3f}', 
+                                    fontsize=12, fontweight='bold')
+                    axes[1].set_xlabel('Azimuth Angle (degrees)', fontsize=10)
+                    axes[1].set_ylabel('Elevation Angle (degrees)', fontsize=10)
+                    axes[1].grid(True, alpha=0.3, linestyle='--')
+                    plt.colorbar(im2, ax=axes[1], label='Power')
                 
                 plt.tight_layout()
                 
@@ -454,8 +477,6 @@ class CSIPlotter:
         if ue_samples:
             logger.info(f"   Plotting {len(ue_samples)} UE perspective PAS samples...")
             for i, sample in enumerate(ue_samples):
-                fig, axes = plt.subplots(1, 2, figsize=(15, 6))
-                
                 pred_spectrum = np.array(sample['predicted_spatial_spectrum'])
                 target_spectrum = np.array(sample['target_spatial_spectrum'])
                 
@@ -469,37 +490,62 @@ class CSIPlotter:
                 cosine_sim = similarity.get('cosine_similarity', 'N/A')
                 ssim = similarity.get('ssim', 'N/A')
                 
-                # Determine spectrum dimensions for angle arrays
-                azimuth_divisions = pred_spectrum.shape[0]
-                elevation_divisions = pred_spectrum.shape[1]
+                # Check if spectrum is 1D (azimuth only) or 2D (azimuth + elevation)
+                is_1d = len(pred_spectrum.shape) == 1
                 
-                # Create angle arrays based on actual spectrum dimensions
-                azimuth_angles = np.linspace(0, 360, azimuth_divisions)  # 0-360 degrees
-                elevation_angles = np.linspace(0, 90, elevation_divisions)  # 0-90 degrees
-                
-                # Plot predicted spectrum
-                im1 = axes[0].imshow(pred_spectrum.T, cmap='viridis', aspect='auto',
-                                   extent=[azimuth_angles[0], azimuth_angles[-1], 
-                                          elevation_angles[0], elevation_angles[-1]], 
-                                   origin='lower')
-                axes[0].set_title(f'UE Perspective - Predicted Spatial Spectrum\nSample {sample_idx}, Pos {pos_idx}, BS Ant {bs_antenna_idx}', 
+                if is_1d:
+                    # 1D azimuth-only spectrum: plot both on same figure
+                    fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+                    
+                    azimuth_divisions = pred_spectrum.shape[0]
+                    azimuth_angles = np.linspace(0, 360, azimuth_divisions)
+                    
+                    # Plot both predicted and target on same axes
+                    ax.plot(azimuth_angles, pred_spectrum, 'b-', linewidth=2, label='Predicted', alpha=0.8)
+                    ax.plot(azimuth_angles, target_spectrum, 'r--', linewidth=2, label='Target', alpha=0.8)
+                    ax.set_title(f'UE Perspective - Azimuth Spectrum Comparison\nSample {sample_idx}, Pos {pos_idx}, BS Ant {bs_antenna_idx} | Cosine: {cosine_sim:.3f}', 
                                 fontsize=12, fontweight='bold')
-                axes[0].set_xlabel('Azimuth Angle (degrees)', fontsize=10)
-                axes[0].set_ylabel('Elevation Angle (degrees)', fontsize=10)
-                axes[0].grid(True, alpha=0.3, linestyle='--')
-                plt.colorbar(im1, ax=axes[0], label='Power')
-                
-                # Plot target spectrum
-                im2 = axes[1].imshow(target_spectrum.T, cmap='viridis', aspect='auto',
-                                   extent=[azimuth_angles[0], azimuth_angles[-1], 
-                                          elevation_angles[0], elevation_angles[-1]], 
-                                   origin='lower')
-                axes[1].set_title(f'UE Perspective - Target Spatial Spectrum\nCosine: {cosine_sim:.3f}, SSIM: {ssim:.3f}', 
-                                fontsize=12, fontweight='bold')
-                axes[1].set_xlabel('Azimuth Angle (degrees)', fontsize=10)
-                axes[1].set_ylabel('Elevation Angle (degrees)', fontsize=10)
-                axes[1].grid(True, alpha=0.3, linestyle='--')
-                plt.colorbar(im2, ax=axes[1], label='Power')
+                    ax.set_xlabel('Azimuth Angle (degrees)', fontsize=11)
+                    ax.set_ylabel('Power', fontsize=11)
+                    ax.grid(True, alpha=0.3)
+                    ax.legend(fontsize=10, loc='best')
+                    
+                    # Add shaded error region if needed
+                    # ax.fill_between(azimuth_angles, pred_spectrum, target_spectrum, alpha=0.2, color='gray')
+                    
+                else:
+                    # 2D spectrum: use heatmap
+                    fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+                    
+                    azimuth_divisions = pred_spectrum.shape[0]
+                    elevation_divisions = pred_spectrum.shape[1]
+                    
+                    azimuth_angles = np.linspace(0, 360, azimuth_divisions)
+                    elevation_angles = np.linspace(0, 90, elevation_divisions)
+                    
+                    # Plot predicted spectrum
+                    im1 = axes[0].imshow(pred_spectrum.T, cmap='viridis', aspect='auto',
+                                       extent=[azimuth_angles[0], azimuth_angles[-1], 
+                                              elevation_angles[0], elevation_angles[-1]], 
+                                       origin='lower')
+                    axes[0].set_title(f'UE Perspective - Predicted Spatial Spectrum\nSample {sample_idx}, Pos {pos_idx}, BS Ant {bs_antenna_idx}', 
+                                    fontsize=12, fontweight='bold')
+                    axes[0].set_xlabel('Azimuth Angle (degrees)', fontsize=10)
+                    axes[0].set_ylabel('Elevation Angle (degrees)', fontsize=10)
+                    axes[0].grid(True, alpha=0.3, linestyle='--')
+                    plt.colorbar(im1, ax=axes[0], label='Power')
+                    
+                    # Plot target spectrum
+                    im2 = axes[1].imshow(target_spectrum.T, cmap='viridis', aspect='auto',
+                                       extent=[azimuth_angles[0], azimuth_angles[-1], 
+                                              elevation_angles[0], elevation_angles[-1]], 
+                                       origin='lower')
+                    axes[1].set_title(f'UE Perspective - Target Spatial Spectrum\nCosine: {cosine_sim:.3f}, SSIM: {ssim:.3f}', 
+                                    fontsize=12, fontweight='bold')
+                    axes[1].set_xlabel('Azimuth Angle (degrees)', fontsize=10)
+                    axes[1].set_ylabel('Elevation Angle (degrees)', fontsize=10)
+                    axes[1].grid(True, alpha=0.3, linestyle='--')
+                    plt.colorbar(im2, ax=axes[1], label='Power')
                 
                 plt.tight_layout()
                 

@@ -9,7 +9,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import logging
-from typing import Dict
+import random
+import matplotlib.pyplot as plt
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, Optional
 
 # Get logger for this module
 logger = logging.getLogger(__name__)
@@ -28,7 +32,8 @@ class PDPLoss(nn.Module):
     - 'cosine': Cosine similarity loss for pattern matching (range [0,1])
     """
     
-    def __init__(self, fft_size: int = 1024, normalize_pdp: bool = True, loss_type: str = 'mse'):
+    def __init__(self, fft_size: int = 1024, normalize_pdp: bool = True, loss_type: str = 'mse', 
+                 debug_dir: Optional[str] = None, debug_sample_rate: float = 0.5):
         """
         Initialize PDP loss function
         
@@ -36,12 +41,22 @@ class PDPLoss(nn.Module):
             fft_size: Size of FFT for PDP computation (default: 1024)
             normalize_pdp: Whether to normalize PDPs before loss computation (default: True)
             loss_type: Type of loss ('mse', 'mae', 'cosine') (default: 'mse')
+            debug_dir: Directory to save debug PDP plots (default: None, no plotting)
+            debug_sample_rate: Probability to save debug plots (default: 0.5, 50%)
         """
         super(PDPLoss, self).__init__()
         
         self.fft_size = int(fft_size)  # Ensure fft_size is always an integer
         self.normalize_pdp = normalize_pdp
         self.loss_type = loss_type.lower()
+        self.debug_dir = Path(debug_dir) if debug_dir else None
+        self.debug_sample_rate = debug_sample_rate
+        
+        # Create debug directory if specified
+        if self.debug_dir:
+            self.debug_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"  Debug plots will be saved to: {self.debug_dir}")
+            logger.info(f"  Debug sample rate: {self.debug_sample_rate*100:.1f}%")
         
         # Validate loss type
         valid_types = ['mse', 'mae', 'cosine']
@@ -123,6 +138,10 @@ class PDPLoss(nn.Module):
         pdp_pred_batch = torch.stack(pdp_pred_batch, dim=0)  # [batch_size, fft_size]
         pdp_target_batch = torch.stack(pdp_target_batch, dim=0)  # [batch_size, fft_size]
         
+        # Debug: randomly save PDP comparison plots
+        if self.debug_dir and random.random() < self.debug_sample_rate:
+            self._save_debug_plot(pdp_pred_batch, pdp_target_batch)
+        
         # Compute loss based on specified type - per-CSI calculation
         if self.loss_type == 'mse':
             # Compute MSE loss per sample: [batch_size]
@@ -185,3 +204,86 @@ class PDPLoss(nn.Module):
         pdp = torch.abs(impulse_response) ** 2
         
         return pdp
+    
+    def _save_debug_plot(self, pdp_pred_batch: torch.Tensor, pdp_target_batch: torch.Tensor):
+        """
+        Save debug plot comparing predicted and target PDPs
+        
+        Args:
+            pdp_pred_batch: Predicted PDPs [batch_size, fft_size]
+            pdp_target_batch: Target PDPs [batch_size, fft_size]
+        """
+        try:
+            # Randomly select one sample from the batch
+            batch_size = pdp_pred_batch.shape[0]
+            sample_idx = random.randint(0, batch_size - 1)
+            
+            # Get PDPs for selected sample
+            pdp_pred = pdp_pred_batch[sample_idx].detach().cpu().numpy()
+            pdp_target = pdp_target_batch[sample_idx].detach().cpu().numpy()
+            
+            # Create delay axis (in samples)
+            delay_samples = range(len(pdp_pred))
+            
+            # Compute similarity metrics
+            mse = ((pdp_pred - pdp_target) ** 2).mean()
+            mae = abs(pdp_pred - pdp_target).mean()
+            
+            # Cosine similarity
+            dot_product = (pdp_pred * pdp_target).sum()
+            pred_norm = (pdp_pred ** 2).sum() ** 0.5
+            target_norm = (pdp_target ** 2).sum() ** 0.5
+            cosine_sim = dot_product / (pred_norm * target_norm + 1e-8)
+            cosine_loss = 1.0 - (1.0 + cosine_sim) / 2.0
+            
+            # Determine actual loss value based on loss type
+            if self.loss_type == 'mse':
+                actual_loss = mse
+                loss_info = f"MSE Loss: {mse:.6f}"
+            elif self.loss_type == 'mae':
+                actual_loss = mae
+                loss_info = f"MAE Loss: {mae:.6f}"
+            elif self.loss_type == 'cosine':
+                actual_loss = cosine_loss
+                loss_info = f"Cosine Loss: {cosine_loss:.6f} (sim: {cosine_sim:.4f})"
+            else:
+                actual_loss = mse
+                loss_info = f"Loss: {mse:.6f}"
+            
+            # Create plot
+            fig, axes = plt.subplots(2, 1, figsize=(12, 8))
+            
+            # Plot 1: Overlay comparison
+            axes[0].plot(delay_samples, pdp_pred, 'b-', linewidth=2, label='Predicted', alpha=0.8)
+            axes[0].plot(delay_samples, pdp_target, 'r--', linewidth=2, label='Target', alpha=0.8)
+            axes[0].set_xlabel('Delay (samples)', fontsize=11)
+            axes[0].set_ylabel('Power', fontsize=11)
+            axes[0].set_title(f'PDP Comparison [{self.loss_type.upper()}] | {loss_info} | MSE: {mse:.6f}', 
+                            fontsize=12, fontweight='bold')
+            axes[0].legend(fontsize=10)
+            axes[0].grid(True, alpha=0.3)
+            
+            # Plot 2: Error plot
+            error = pdp_pred - pdp_target
+            axes[1].plot(delay_samples, error, 'g-', linewidth=1.5, label='Error (Pred - Target)')
+            axes[1].axhline(y=0, color='k', linestyle='--', alpha=0.5)
+            axes[1].set_xlabel('Delay (samples)', fontsize=11)
+            axes[1].set_ylabel('Error', fontsize=11)
+            axes[1].set_title('Prediction Error', fontsize=12, fontweight='bold')
+            axes[1].legend(fontsize=10)
+            axes[1].grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            
+            # Generate filename with timestamp
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+            filename = f'pdp_comparison_{timestamp}_sample{sample_idx}.png'
+            filepath = self.debug_dir / filename
+            
+            plt.savefig(filepath, dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            logger.debug(f"Saved debug PDP plot: {filename}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to save debug PDP plot: {e}")

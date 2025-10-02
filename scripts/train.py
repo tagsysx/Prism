@@ -255,8 +255,26 @@ class PrismTrainer(BaseRunner):
         # Get loss configuration
         loss_config = self.config_loader.get_loss_functions_config()
         
-        # Create combined loss function with unified config
-        self.loss_function = LossFunction(config=loss_config, full_config=loss_config)
+        # Get full config for PAS loss
+        full_config = self.config_loader._processed_config
+        
+        # Add debug_dir to loss configurations
+        debug_dir = self.output_paths.get('debug_dir', None)
+        
+        if 'csi_loss' in loss_config:
+            loss_config['csi_loss']['debug_dir'] = debug_dir
+            # debug_sample_rate is now read from config file (default: 0.5 if not specified)
+        
+        if 'pdp_loss' in loss_config:
+            loss_config['pdp_loss']['debug_dir'] = debug_dir
+            # debug_sample_rate is now read from config file (default: 0.5 if not specified)
+        
+        if 'pas_loss' in loss_config:
+            loss_config['pas_loss']['debug_dir'] = debug_dir
+            # debug_sample_rate is now read from config file (default: 0.5 if not specified)
+        
+        # Create combined loss function with full config for PAS loss
+        self.loss_function = LossFunction(config=loss_config, full_config=full_config)
         
         self.logger.info(f"✅ Loss function created with weights: CSI={loss_config.get('csi_weight', 0.7)}, "
                         f"PDP={loss_config.get('pdp_weight', 0.3)}, "
@@ -845,6 +863,8 @@ class PrismTrainer(BaseRunner):
             self._clear_previous_results()
             # Recreate directories after clearing
             self.config_loader.ensure_output_directories()
+            # Re-setup logging after clearing (log file was deleted)
+            self._setup_logging()
         
         # Initialize all components
         self._create_model()

@@ -30,17 +30,20 @@ class CSILossConfig:
     phase_weight: float = 1.0
     magnitude_weight: float = 1.0
     normalize_weights: bool = True
+    debug_sample_rate: float = 0.5  # Probability to save debug plots
 
 
 @dataclass
 class PDPLossConfig:
     """PDP Loss configuration."""
     enabled: bool = True
-    type: str = 'delay'
+    type: str = 'delay'  # Deprecated, use loss_type instead
+    loss_type: str = 'mse'  # Loss type: 'mse', 'mae', 'cosine'
     fft_size: int = 2046
     normalize_pdp: bool = True
     mse_weight: float = 0.7
     delay_weight: float = 0.3
+    debug_sample_rate: float = 0.5  # Probability to save debug plots
 
 
 @dataclass
@@ -52,6 +55,7 @@ class PASLossConfig:
     normalize_pas: bool = True  # Whether to normalize PAS before loss computation
     type: str = 'mse'  # Loss type: 'mse', 'mae', 'kl_div', 'js_div'
     weight_by_power: bool = True  # Whether to weight loss by power distribution
+    debug_sample_rate: float = 0.5  # Probability to save debug plots
 
 
 
@@ -565,6 +569,7 @@ class ModernConfigLoader:
             'models_dir': f"{base_dir}/training/models",
             'log_dir': f"{base_dir}/training/logs",
             'log_file': f"{base_dir}/training/logs/training.log",
+            'debug_dir': f"{base_dir}/training/debug",
             'results_dir': f"{base_dir}/testing/results",
             'plots_dir': f"{base_dir}/testing/plots",
             'predictions_dir': f"{base_dir}/testing/predictions",

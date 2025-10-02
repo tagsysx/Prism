@@ -188,7 +188,20 @@ class PrismTester(BaseRunner):
                     logger.info(f"Using best model: {self.model_path}")
                     print(f"🏆 Using BEST model: {self.model_path}")
                 else:
-                    raise FileNotFoundError(f"Best model not found: {best_model_path}")
+                    # Fallback: try final_model if best_model not found
+                    if os.path.exists(final_model_path):
+                        self.model_path = final_model_path
+                        logger.warning(f"Best model not found: {best_model_path}, using final model: {self.model_path}")
+                        print(f"⚠️  Best model not found, using FINAL model: {self.model_path}")
+                    else:
+                        # Fallback: look for latest checkpoint
+                        latest_checkpoint = self._find_latest_checkpoint()
+                        if latest_checkpoint:
+                            self.model_path = latest_checkpoint
+                            logger.warning(f"Best and final models not found, using latest checkpoint: {self.model_path}")
+                            print(f"⚠️  Best and final models not found, using LATEST CHECKPOINT: {self.model_path}")
+                        else:
+                            raise FileNotFoundError(f"Best model not found: {best_model_path}, final model not found: {final_model_path}, and no checkpoints available")
             elif self.model_selection == 'final':
                 if os.path.exists(final_model_path):
                     self.model_path = final_model_path
