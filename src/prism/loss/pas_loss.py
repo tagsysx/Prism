@@ -234,10 +234,10 @@ class PASLoss(nn.Module):
         combined_loss = loss
         
         # Debug: randomly save PAS comparison plots
-        # Only save debug plots when we have meaningful spatial spectrum (multiple antennas)
-        # For single antenna configurations, PAS will be mostly zeros which is not informative
+        # Only save debug plots when we have meaningful spatial spectrum
+        # Now that we separate BS and UE processing, we can use simpler logic
         if (self.debug_dir and random.random() < self.debug_sample_rate and 
-            total_antennas > 1):
+            (self.num_bs_antennas > 1 or self.num_ue_antennas > 1)):
             self._save_debug_plot(pred_pas, target_pas, loss)
         
         # Normalize by total number of antennas to prevent loss scaling with antenna count
@@ -321,9 +321,66 @@ class PASLoss(nn.Module):
         target_pas_batch = target_pas_batch.view(batch_size * total_antennas, azimuth_div, elevation_div)
         
         # Compute loss with normalization factor
-        pas_loss = self.compute_loss(pred_pas_batch, target_pas_batch, total_antennas)
+        # Split BS and UE PAS for separate processing to avoid mixing zero and non-zero samples
+        pas_loss = self._compute_split_pas_loss(pred_pas_batch, target_pas_batch, total_antennas)
         
         return pas_loss
+    
+    def _compute_split_pas_loss(self, pred_pas_batch: torch.Tensor, target_pas_batch: torch.Tensor, total_antennas: int) -> torch.Tensor:
+        """
+        Compute PAS loss by processing BS and UE PAS separately.
+        
+        This avoids the issue where single-antenna BS generates all-zero PAS samples
+        that get mixed with meaningful UE PAS samples.
+        
+        Args:
+            pred_pas_batch: [batch_size * total_antennas, azimuth_div, elevation_div]
+            target_pas_batch: [batch_size * total_antennas, azimuth_div, elevation_div]
+            total_antennas: Total number of antenna samples (num_ue_antennas + num_bs_antennas)
+            
+        Returns:
+            Combined PAS loss
+        """
+        # Split the batch back into BS and UE components
+        batch_size = pred_pas_batch.shape[0] // total_antennas
+        azimuth_div, elevation_div = pred_pas_batch.shape[1], pred_pas_batch.shape[2]
+        
+        # Reshape back to [batch_size, total_antennas, azimuth_div, elevation_div]
+        pred_pas_batch = pred_pas_batch.view(batch_size, total_antennas, azimuth_div, elevation_div)
+        target_pas_batch = target_pas_batch.view(batch_size, total_antennas, azimuth_div, elevation_div)
+        
+        # Split BS and UE PAS based on antenna counts
+        # BS PAS: first num_ue_antennas samples (from BS perspective)
+        # UE PAS: last num_bs_antennas samples (from UE perspective)
+        bs_pas_pred = pred_pas_batch[:, :self.num_ue_antennas, :, :]  # [batch_size, num_ue_antennas, azimuth_div, elevation_div]
+        bs_pas_target = target_pas_batch[:, :self.num_ue_antennas, :, :]
+        
+        ue_pas_pred = pred_pas_batch[:, self.num_ue_antennas:, :, :]  # [batch_size, num_bs_antennas, azimuth_div, elevation_div]
+        ue_pas_target = target_pas_batch[:, self.num_ue_antennas:, :, :]
+        
+        total_loss = torch.tensor(0.0, device=pred_pas_batch.device, requires_grad=True)
+        
+        # Process BS PAS (only if BS has multiple antennas)
+        if self.num_bs_antennas > 1:
+            bs_pas_pred_flat = bs_pas_pred.view(-1, azimuth_div, elevation_div)
+            bs_pas_target_flat = bs_pas_target.view(-1, azimuth_div, elevation_div)
+            bs_loss = self.compute_loss(bs_pas_pred_flat, bs_pas_target_flat, self.num_bs_antennas)
+            total_loss = total_loss + bs_loss
+            logger.debug(f"BS PAS loss: {bs_loss.item():.6f} (BS antennas: {self.num_bs_antennas})")
+        else:
+            logger.debug(f"Skipping BS PAS loss (single antenna: {self.num_bs_antennas})")
+        
+        # Process UE PAS (only if UE has multiple antennas)  
+        if self.num_ue_antennas > 1:
+            ue_pas_pred_flat = ue_pas_pred.view(-1, azimuth_div, elevation_div)
+            ue_pas_target_flat = ue_pas_target.view(-1, azimuth_div, elevation_div)
+            ue_loss = self.compute_loss(ue_pas_pred_flat, ue_pas_target_flat, self.num_ue_antennas)
+            total_loss = total_loss + ue_loss
+            logger.debug(f"UE PAS loss: {ue_loss.item():.6f} (UE antennas: {self.num_ue_antennas})")
+        else:
+            logger.debug(f"Skipping UE PAS loss (single antenna: {self.num_ue_antennas})")
+        
+        return total_loss
     
     
     def _compute_spatial_spectrum_for_position_pair(self, csi_matrix: torch.Tensor, bs_pos: torch.Tensor, ue_pos: torch.Tensor) -> torch.Tensor:
@@ -374,6 +431,60 @@ class PASLoss(nn.Module):
         
         return all_pas
     
+    def _has_meaningful_pas_content(self, pred_pas: torch.Tensor, target_pas: torch.Tensor) -> bool:
+        """
+        Check if PAS batch contains meaningful (non-zero) spatial spectrum samples.
+        
+        For configurations like PolyU where BS has single antenna, most PAS samples
+        will be zero. This method ensures we only save debug plots when there are
+        sufficient non-zero samples worth visualizing.
+        
+        Args:
+            pred_pas: Predicted PAS [batch_size, azimuth_divisions, elevation_divisions]
+            target_pas: Target PAS (same shape as pred_pas)
+            
+        Returns:
+            bool: True if batch contains meaningful PAS samples, False otherwise
+        """
+        try:
+            batch_size = pred_pas.shape[0]
+            
+            # Count non-zero samples
+            pred_nonzero_samples = 0
+            target_nonzero_samples = 0
+            
+            for i in range(batch_size):
+                # Check if this sample has any significant values
+                pred_sample_energy = torch.sum(torch.abs(pred_pas[i])).item()
+                target_sample_energy = torch.sum(torch.abs(target_pas[i])).item()
+                
+                if pred_sample_energy > 1e-8:
+                    pred_nonzero_samples += 1
+                if target_sample_energy > 1e-8:
+                    target_nonzero_samples += 1
+            
+            # Calculate ratios
+            pred_nonzero_ratio = pred_nonzero_samples / batch_size
+            target_nonzero_ratio = target_nonzero_samples / batch_size
+            
+            # We consider the batch meaningful if at least 20% of samples are non-zero
+            # This threshold helps avoid the PolyU case where 88.9% samples are zero
+            meaningful_threshold = 0.2
+            
+            is_meaningful = (pred_nonzero_ratio >= meaningful_threshold or 
+                           target_nonzero_ratio >= meaningful_threshold)
+            
+            if not is_meaningful:
+                logger.debug(f"Skipping PAS debug plot - insufficient meaningful samples "
+                           f"(pred: {pred_nonzero_samples}/{batch_size} = {pred_nonzero_ratio:.1%}, "
+                           f"target: {target_nonzero_samples}/{batch_size} = {target_nonzero_ratio:.1%})")
+            
+            return is_meaningful
+            
+        except Exception as e:
+            logger.warning(f"Error checking PAS content meaningfulness: {e}, defaulting to save")
+            return True  # Default to saving if check fails
+    
     def _save_debug_plot(self, pred_pas: torch.Tensor, target_pas: torch.Tensor, loss_value: torch.Tensor):
         """
         Save debug plot comparing predicted and target PAS
@@ -384,9 +495,27 @@ class PASLoss(nn.Module):
             loss_value: Computed loss value (scalar tensor)
         """
         try:
-            # Randomly select one sample from the batch
+            # Intelligently select a sample from the batch
+            # Prefer non-zero samples for more meaningful visualization
             batch_size = pred_pas.shape[0]
-            sample_idx = random.randint(0, batch_size - 1)
+            
+            # Find non-zero samples
+            non_zero_indices = []
+            for i in range(batch_size):
+                pred_energy = torch.sum(torch.abs(pred_pas[i])).item()
+                target_energy = torch.sum(torch.abs(target_pas[i])).item()
+                if pred_energy > 1e-8 or target_energy > 1e-8:
+                    non_zero_indices.append(i)
+            
+            # Select sample index
+            if non_zero_indices:
+                # Prefer non-zero samples
+                sample_idx = random.choice(non_zero_indices)
+                logger.debug(f"Selected non-zero PAS sample {sample_idx} from {len(non_zero_indices)} non-zero samples")
+            else:
+                # Fallback to random selection if all samples are zero
+                sample_idx = random.randint(0, batch_size - 1)
+                logger.debug(f"All PAS samples are zero, selected random sample {sample_idx}")
             
             # Get PAS for selected sample
             pred_spectrum = pred_pas[sample_idx].detach().cpu().numpy()
