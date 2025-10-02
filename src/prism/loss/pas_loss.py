@@ -236,9 +236,10 @@ class PASLoss(nn.Module):
         # Debug: randomly save PAS comparison plots
         # Only save debug plots when we have meaningful spatial spectrum
         # Now that we separate BS and UE processing, we can use simpler logic
-        if (self.debug_dir and random.random() < self.debug_sample_rate and 
-            (self.num_bs_antennas > 1 or self.num_ue_antennas > 1)):
-            self._save_debug_plot(pred_pas, target_pas, loss)
+        # Note: Debug saving is now handled in _compute_split_pas_loss to use correct loss values
+        # if (self.debug_dir and random.random() < self.debug_sample_rate and 
+        #     (self.num_bs_antennas > 1 or self.num_ue_antennas > 1)):
+        #     self._save_debug_plot(pred_pas, target_pas, loss)
         
         # Normalize by total number of antennas to prevent loss scaling with antenna count
         # This ensures that the loss magnitude is comparable regardless of antenna configuration
@@ -359,6 +360,7 @@ class PASLoss(nn.Module):
         ue_pas_target = target_pas_batch[:, self.num_ue_antennas:, :, :]
         
         total_loss = torch.tensor(0.0, device=pred_pas_batch.device, requires_grad=True)
+        bs_loss = None  # Initialize for later use
         
         # Process BS PAS (only if BS has multiple antennas)
         if self.num_bs_antennas > 1:
@@ -377,8 +379,19 @@ class PASLoss(nn.Module):
             ue_loss = self.compute_loss(ue_pas_pred_flat, ue_pas_target_flat, self.num_ue_antennas)
             total_loss = total_loss + ue_loss
             logger.debug(f"UE PAS loss: {ue_loss.item():.6f} (UE antennas: {self.num_ue_antennas})")
+            
+            # Save debug plot for UE PAS (since it has meaningful spatial spectrum)
+            if (self.debug_dir and random.random() < self.debug_sample_rate):
+                self._save_debug_plot(ue_pas_pred_flat, ue_pas_target_flat, ue_loss)
         else:
             logger.debug(f"Skipping UE PAS loss (single antenna: {self.num_ue_antennas})")
+        
+        # Also save debug plot for BS PAS if it has multiple antennas
+        if (self.num_bs_antennas > 1 and bs_loss is not None and 
+            self.debug_dir and random.random() < self.debug_sample_rate):
+            bs_pas_pred_flat = bs_pas_pred.view(-1, azimuth_div, elevation_div)
+            bs_pas_target_flat = bs_pas_target.view(-1, azimuth_div, elevation_div)
+            self._save_debug_plot(bs_pas_pred_flat, bs_pas_target_flat, bs_loss)
         
         return total_loss
     
